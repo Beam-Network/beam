@@ -347,13 +347,16 @@ class SybilDetector:
     """Sybil detector (stub - detection done by BeamCore)."""
 
     def __init__(self, **kwargs):
-        pass
+        self._suspicious: Dict[str, Any] = {}
 
     def check_entity(self, hotkey: str, ip: str) -> SybilDetectionResult:
         return SybilDetectionResult()
 
     def check_path(self, path: List[str]) -> SybilDetectionResult:
         return SybilDetectionResult()
+
+    def get_suspicious_entities(self) -> Dict[str, Any]:
+        return self._suspicious
 
 
 _sybil_detector: Optional[SybilDetector] = None
