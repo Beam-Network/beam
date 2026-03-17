@@ -167,7 +167,7 @@ class EpochManager:
         # Update BeamCore with payment proof FIRST (always, regardless of merkle availability)
         if subnet_core:
             try:
-                from ..clients.subnet_core_client import EpochPaymentData
+                from clients.subnet_core_client import EpochPaymentData
                 update_data = EpochPaymentData(
                     epoch=epoch,
                     total_distributed=total_distributed,
@@ -218,7 +218,7 @@ class EpochManager:
             # Update BeamCore again with actual merkle root (if different from placeholder)
             if subnet_core and merkle_root != "0x" + "0" * 64:
                 try:
-                    from ..clients.subnet_core_client import EpochPaymentData
+                    from clients.subnet_core_client import EpochPaymentData
                     update_data = EpochPaymentData(
                         epoch=epoch,
                         total_distributed=total_distributed,

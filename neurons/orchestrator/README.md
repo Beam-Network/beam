@@ -12,11 +12,21 @@ Orchestrators coordinate data transfers and manage worker pools on the Beam subn
 
 ```bash
 # From repository root
-cd Beam
 pip install -e ".[orchestrator]"
+```
 
-# Copy and configure environment
-cp neurons/orchestrator/.env.example neurons/orchestrator/.env
+## Quick Start
+
+```bash
+# Run orchestrator on testnet (single command)
+cd neurons/orchestrator && \
+WALLET_NAME=your_coldkey \
+WALLET_HOTKEY=your_hotkey \
+SUBTENSOR_NETWORK=test \
+NETUID=304 \
+SUBNET_CORE_URL=https://beamcore-dev.b1m.ai \
+REGISTRY_URL=https://beamcore-dev.b1m.ai \
+python main.py
 ```
 
 ## Staking Requirements
@@ -38,26 +48,47 @@ Orchestrators must stake TAO to participate in the subnet (minimum 2 TAO require
 
 ## Running
 
-```bash
-# Using helper script (recommended)
-./scripts/run_orchestrator.sh [local|testnet|mainnet] [port]
+### Direct Python Command
 
-# Examples
-./scripts/run_orchestrator.sh local 8001    # Development mode (no chain)
-./scripts/run_orchestrator.sh testnet 8001  # Testnet
-./scripts/run_orchestrator.sh mainnet 8001  # Production
+```bash
+# From neurons/orchestrator directory
+cd neurons/orchestrator
+
+# Testnet
+WALLET_NAME=your_coldkey \
+WALLET_HOTKEY=your_hotkey \
+SUBTENSOR_NETWORK=test \
+NETUID=304 \
+SUBNET_CORE_URL=https://beamcore-dev.b1m.ai \
+REGISTRY_URL=https://beamcore-dev.b1m.ai \
+python main.py
+
+# Mainnet
+WALLET_NAME=your_coldkey \
+WALLET_HOTKEY=your_hotkey \
+SUBTENSOR_NETWORK=finney \
+NETUID=105 \
+SUBNET_CORE_URL=https://beamcore.b1m.ai \
+REGISTRY_URL=https://beamcore.b1m.ai \
+python main.py
 ```
 
-### Manual Run
+### Using .env File
 
 ```bash
-export WALLET_NAME="your_coldkey"
-export WALLET_HOTKEY="your_hotkey"
-export SUBTENSOR_NETWORK="test"
-export NETUID=304
-export SUBNET_CORE_URL="https://beamcore-dev.b1m.ai"
+# Copy and edit .env file
+cp ../../.env.example .env
+# Edit .env with your wallet and network settings
 
-python -m neurons.orchestrator.main
+# Run
+cd neurons/orchestrator
+python main.py
+```
+
+### Using Helper Script (if available)
+
+```bash
+./scripts/run_orchestrator.sh [local|testnet|mainnet] [port]
 ```
 
 ## Network Endpoints

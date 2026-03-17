@@ -819,7 +819,7 @@ class Orchestrator:
         # Ensure task exists in SubnetCore DB for payment address resolution
         if self.subnet_core_client:
             try:
-                from ..clients.subnet_core_client import TaskCreate, TaskUpdate
+                from clients.subnet_core_client import TaskCreate, TaskUpdate
                 # Create the task first (idempotent - will succeed or already exist)
                 await self.subnet_core_client.create_task(TaskCreate(
                     task_id=task_id,
@@ -953,7 +953,7 @@ class Orchestrator:
         # Ensure task exists in SubnetCore DB for payment address resolution
         if self.subnet_core_client and task_id:
             try:
-                from ..clients.subnet_core_client import TaskCreate, TaskUpdate
+                from clients.subnet_core_client import TaskCreate, TaskUpdate
                 # Create the task first (idempotent - will succeed or already exist)
                 await self.subnet_core_client.create_task(TaskCreate(
                     task_id=task_id,

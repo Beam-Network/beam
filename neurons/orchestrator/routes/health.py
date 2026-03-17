@@ -9,7 +9,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends
 
-from ..core.orchestrator import get_orchestrator, Orchestrator
+from core.orchestrator import get_orchestrator, Orchestrator
 
 logger = logging.getLogger(__name__)
 
