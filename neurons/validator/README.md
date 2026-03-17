@@ -12,9 +12,17 @@ Validators verify bandwidth proofs and set weights on the Bittensor chain.
 ```bash
 # From repository root
 pip install -e ".[validator]"
+```
 
-# Copy and configure environment
-cp .env.example .env
+## Quick Start
+
+```bash
+# Run validator on testnet (single command)
+cd neurons/validator && \
+BEAM_VALIDATOR_WALLET_NAME=your_coldkey \
+BEAM_VALIDATOR_WALLET_HOTKEY=your_hotkey \
+BEAM_VALIDATOR_SUBNET_CORE_URL=https://beamcore-dev.b1m.ai \
+python main.py
 ```
 
 ## Configuration
@@ -29,13 +37,43 @@ cp .env.example .env
 
 ## Running
 
-```bash
-# Using helper script
-./scripts/run_validator.sh [testnet|mainnet]
+### Direct Python Command
 
-# Examples
-./scripts/run_validator.sh testnet
-./scripts/run_validator.sh mainnet
+```bash
+# From neurons/validator directory
+cd neurons/validator
+
+# Testnet
+BEAM_VALIDATOR_WALLET_NAME=your_coldkey \
+BEAM_VALIDATOR_WALLET_HOTKEY=your_hotkey \
+BEAM_VALIDATOR_SUBNET_CORE_URL=https://beamcore-dev.b1m.ai \
+python main.py
+
+# Mainnet
+BEAM_VALIDATOR_WALLET_NAME=your_coldkey \
+BEAM_VALIDATOR_WALLET_HOTKEY=your_hotkey \
+BEAM_VALIDATOR_SUBNET_CORE_URL=https://beamcore.b1m.ai \
+BEAM_SUBTENSOR_NETWORK=finney \
+BEAM_NETUID=105 \
+python main.py
+```
+
+### Using .env File
+
+```bash
+# Copy and edit .env file
+cp ../../.env.example .env
+# Edit .env with your wallet and network settings
+
+# Run
+cd neurons/validator
+python main.py
+```
+
+### Using Helper Script (if available)
+
+```bash
+./scripts/run_validator.sh [testnet|mainnet]
 ```
 
 ## Network Endpoints

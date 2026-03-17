@@ -17,11 +17,11 @@ import os
 # beam.crypto.hashing
 # ============================================================================
 
-def sha256(data: bytes) -> str:
-    """Compute SHA256 hash, return hex string."""
+def sha256(data: bytes) -> bytes:
+    """Compute SHA256 hash, return bytes."""
     if isinstance(data, str):
         data = data.encode()
-    return hashlib.sha256(data).hexdigest()
+    return hashlib.sha256(data).digest()
 
 
 def compute_canary_proof(canary: bytes, data: bytes) -> str:
@@ -205,9 +205,29 @@ NEW_ORCHESTRATOR_GRACE_PERIOD_HOURS = 24
 class SLAMetrics:
     """SLA metrics for an entity."""
     uptime: float = 1.0
+    uptime_percent: float = 100.0
     success_rate: float = 1.0
+    success_rate_percent: float = 100.0
+    acceptance_rate_percent: float = 100.0
     avg_latency_ms: float = 0.0
+    latency_p95_ms: float = 0.0
+    jitter_ms: float = 0.0
     bandwidth_mbps: float = 0.0
+    packet_loss_percent: float = 0.0
+    sample_count: int = 0
+    measurement_start: Optional[datetime] = None
+    measurement_end: Optional[datetime] = None
+
+
+@dataclass
+class SLAMultipliers:
+    """SLA component multipliers."""
+    uptime: float = 1.0
+    bandwidth: float = 1.0
+    latency: float = 1.0
+    jitter: float = 1.0
+    acceptance: float = 1.0
+    success: float = 1.0
 
 
 @dataclass
@@ -216,7 +236,12 @@ class SLAScore:
     raw_score: float = 1.0
     penalty_multiplier: float = 1.0
     final_score: float = 1.0
+    effective_multiplier: float = 1.0
+    combined_multiplier: float = 1.0
+    penalty_redirect_percent: float = 0.0
+    in_grace_period: bool = False
     violations: List[str] = field(default_factory=list)
+    multipliers: SLAMultipliers = field(default_factory=SLAMultipliers)
 
 
 @dataclass
@@ -224,9 +249,13 @@ class OrchestratorSLAState:
     """SLA state for an orchestrator."""
     uid: int = 0
     hotkey: str = ""
-    metrics: SLAMetrics = field(default_factory=SLAMetrics)
-    score: SLAScore = field(default_factory=SLAScore)
+    stake_tao: float = 0.0
+    metrics: Optional[SLAMetrics] = None
+    score: Optional[SLAScore] = None
     in_grace_period: bool = False
+    is_subnet_owned: bool = False
+    registered_at: Optional[datetime] = None
+    grace_period_ends: Optional[datetime] = None
 
 
 @dataclass
@@ -249,6 +278,20 @@ class SLAScorer:
 
     def get_penalty_multiplier(self, violations: List[str]) -> float:
         return 1.0
+
+    def score_orchestrator(self, sla_state: "OrchestratorSLAState") -> SLAScore:
+        """Score an orchestrator based on SLA state."""
+        return SLAScore(
+            raw_score=1.0,
+            penalty_multiplier=1.0,
+            final_score=1.0,
+            effective_multiplier=1.0,
+            combined_multiplier=1.0,
+        )
+
+    def score_worker(self, sla_state: "WorkerSLAState") -> SLAScore:
+        """Score a worker based on SLA state."""
+        return SLAScore()
 
 
 class SLARewardCalculator:
@@ -281,6 +324,8 @@ class Orchestrator:
     stake_tao: float = 0.0
     status: str = "active"
     worker_count: int = 0
+    is_subnet_owned: bool = False
+    sla_state: Optional["OrchestratorSLAState"] = None
 
 
 class OrchestratorManager:
@@ -292,8 +337,52 @@ class OrchestratorManager:
     def get_orchestrator(self, uid: int) -> Optional[Orchestrator]:
         return self.orchestrators.get(uid)
 
+    def get_all_orchestrators(self) -> List[Orchestrator]:
+        return list(self.orchestrators.values())
+
     def list_orchestrators(self) -> List[Orchestrator]:
         return list(self.orchestrators.values())
+
+    def register_orchestrator(self, uid: int, hotkey: str, stake_tao: float = 0.0, **kwargs) -> Orchestrator:
+        """Register a new orchestrator."""
+        if uid in self.orchestrators:
+            raise ValueError(f"Orchestrator UID {uid} already registered")
+        orch = Orchestrator(uid=uid, hotkey=hotkey, stake_tao=stake_tao)
+        self.orchestrators[uid] = orch
+        return orch
+
+    def update_orchestrator(self, uid: int, **kwargs) -> Optional[Orchestrator]:
+        """Update an existing orchestrator."""
+        orch = self.orchestrators.get(uid)
+        if orch:
+            for key, value in kwargs.items():
+                if hasattr(orch, key):
+                    setattr(orch, key, value)
+        return orch
+
+    def update_all_statuses(self) -> None:
+        """Update statuses for all orchestrators (stub - done by BeamCore)."""
+        pass
+
+    def remove_orchestrator(self, uid: int) -> bool:
+        """Remove an orchestrator."""
+        if uid in self.orchestrators:
+            del self.orchestrators[uid]
+            return True
+        return False
+
+    def update_orchestrator_metrics(self, uid: int, metrics: Any) -> None:
+        """Update orchestrator metrics (stub - done by BeamCore)."""
+        pass
+
+    def get_network_stats(self) -> Dict[str, Any]:
+        """Get network statistics (stub)."""
+        return {
+            "total_orchestrators": len(self.orchestrators),
+            "active_orchestrators": len(self.orchestrators),
+            "total_bandwidth_mbps": 0.0,
+            "total_stake_tao": sum(o.stake_tao for o in self.orchestrators.values()),
+        }
 
 
 class WorkerRegistry:

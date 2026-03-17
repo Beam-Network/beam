@@ -60,11 +60,9 @@ Documentation = "https://github.com/Beam-Network/Beam/tree/main/docs"
 Repository = "https://github.com/Beam-Network/Beam"
 
 [tool.setuptools.packages.find]
-where = ["src", "."]
+where = ["."]
 include = ["beam*", "neurons*"]
-
-[tool.setuptools.package-dir]
-"" = "src"
+exclude = ["tests*"]
 
 [tool.black]
 line-length = 100
