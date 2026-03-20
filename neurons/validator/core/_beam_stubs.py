@@ -132,66 +132,145 @@ def verify_merkle_proof(leaf: str, proof: List[str], root: str) -> bool:
 
 
 # ============================================================================
-# beam.protocol.synapse (Bittensor synapses - legacy)
+# beam.protocol.synapse (Bittensor synapses)
+# Must inherit from bt.Synapse to work with dendrite.call()
 # ============================================================================
 
-@dataclass
-class BandwidthChallenge:
-    """Bandwidth challenge synapse (legacy)."""
-    task_id: str = ""
-    challenge_nonce: str = ""
-    chunk_hash: str = ""
-    chunk_size: int = 0
-    deadline_us: int = 0
-    canary: str = ""
-    canary_offset: int = 0
-    path: List[str] = field(default_factory=list)
-    expected_hops: int = 1
-    sla_level: int = 0
-    accepted: bool = False
+try:
+    import bittensor as bt
+    from pydantic import Field as PydanticField
 
+    class BandwidthChallenge(bt.Synapse):
+        """Bandwidth challenge synapse for dendrite communication."""
+        task_id: str = PydanticField(default="", description="Unique task identifier")
+        challenge_nonce: str = PydanticField(default="", description="Random nonce")
+        chunk_hash: str = PydanticField(default="", description="Hash of chunk")
+        chunk_size: int = PydanticField(default=0, description="Size in bytes")
+        deadline_us: int = PydanticField(default=0, description="Deadline in microseconds")
+        canary: str = PydanticField(default="", description="Canary bytes")
+        canary_offset: int = PydanticField(default=0, description="Canary offset")
+        path: List[str] = PydanticField(default_factory=list, description="Relay path")
+        expected_hops: int = PydanticField(default=1, description="Expected hops")
+        sla_level: int = PydanticField(default=0, description="SLA level")
+        accepted: bool = PydanticField(default=False, description="Challenge accepted")
+        worker_assigned: Optional[str] = PydanticField(default=None, description="Assigned worker")
 
-@dataclass
-class BandwidthProof:
-    """Bandwidth proof synapse (legacy)."""
-    task_id: str = ""
-    worker_id: str = ""
-    worker_hotkey: str = ""
-    start_time_us: int = 0
-    end_time_us: int = 0
-    bytes_relayed: int = 0
-    bandwidth_mbps: float = 0.0
-    canary_proof: str = ""
-    chunk_hash_received: str = ""
-    signature: str = ""
-    is_valid: bool = False
+        def deserialize(self) -> "BandwidthChallenge":
+            return self
 
+    class BandwidthProof(bt.Synapse):
+        """Bandwidth proof synapse."""
+        task_id: str = PydanticField(default="", description="Task ID")
+        worker_id: str = PydanticField(default="", description="Worker ID")
+        worker_hotkey: str = PydanticField(default="", description="Worker hotkey")
+        start_time_us: int = PydanticField(default=0, description="Start time")
+        end_time_us: int = PydanticField(default=0, description="End time")
+        bytes_relayed: int = PydanticField(default=0, description="Bytes transferred")
+        bandwidth_mbps: float = PydanticField(default=0.0, description="Bandwidth")
+        canary_proof: str = PydanticField(default="", description="Canary proof")
+        chunk_hash_received: str = PydanticField(default="", description="Received hash")
+        signature: str = PydanticField(default="", description="Signature")
+        is_valid: bool = PydanticField(default=False, description="Is valid")
 
-@dataclass
-class WorkerStatusQuery:
-    """Worker status query synapse (legacy)."""
-    include_workers: bool = True
-    include_capacity: bool = True
-    total_workers: int = 0
-    active_workers: int = 0
-    total_bandwidth_mbps: float = 0.0
+        def deserialize(self) -> "BandwidthProof":
+            return self
 
+    class WorkerStatusQuery(bt.Synapse):
+        """Worker status query synapse."""
+        include_workers: bool = PydanticField(default=True)
+        include_capacity: bool = PydanticField(default=True)
+        total_workers: int = PydanticField(default=0)
+        active_workers: int = PydanticField(default=0)
+        total_bandwidth_mbps: float = PydanticField(default=0.0)
 
-@dataclass
-class ChunkTransfer:
-    """Chunk transfer synapse (legacy)."""
-    task_id: str = ""
-    chunk_hash: str = ""
-    chunk_size: int = 0
-    received: bool = False
+        def deserialize(self) -> "WorkerStatusQuery":
+            return self
 
+    class ChunkTransfer(bt.Synapse):
+        """Chunk transfer synapse."""
+        task_id: str = PydanticField(default="", description="Task ID")
+        chunk_hash: str = PydanticField(default="", description="Chunk hash")
+        chunk_size: int = PydanticField(default=0, description="Size")
+        chunk_data: Optional[str] = PydanticField(default=None, description="Base64 data")
+        canary: str = PydanticField(default="", description="Canary")
+        canary_offset: int = PydanticField(default=0, description="Canary offset")
+        hop_index: int = PydanticField(default=0, description="Hop index")
+        received: bool = PydanticField(default=False, description="Received")
+        receive_time_us: int = PydanticField(default=0, description="Receive time")
 
-@dataclass
-class EpochInfo:
-    """Epoch info synapse (legacy)."""
-    epoch: int = 0
-    epoch_start_block: int = 0
-    tasks_this_epoch: int = 0
+        def deserialize(self) -> "ChunkTransfer":
+            return self
+
+    class EpochInfo(bt.Synapse):
+        """Epoch info synapse."""
+        epoch: int = PydanticField(default=0, description="Epoch number")
+        epoch_start_block: int = PydanticField(default=0, description="Start block")
+        tasks_this_epoch: int = PydanticField(default=0, description="Tasks count")
+
+        def deserialize(self) -> "EpochInfo":
+            return self
+
+except ImportError:
+    # Fallback to dataclasses if bittensor is not available
+    @dataclass
+    class BandwidthChallenge:
+        """Bandwidth challenge synapse (fallback)."""
+        task_id: str = ""
+        challenge_nonce: str = ""
+        chunk_hash: str = ""
+        chunk_size: int = 0
+        deadline_us: int = 0
+        canary: str = ""
+        canary_offset: int = 0
+        path: List[str] = field(default_factory=list)
+        expected_hops: int = 1
+        sla_level: int = 0
+        accepted: bool = False
+        worker_assigned: Optional[str] = None
+
+    @dataclass
+    class BandwidthProof:
+        """Bandwidth proof synapse (fallback)."""
+        task_id: str = ""
+        worker_id: str = ""
+        worker_hotkey: str = ""
+        start_time_us: int = 0
+        end_time_us: int = 0
+        bytes_relayed: int = 0
+        bandwidth_mbps: float = 0.0
+        canary_proof: str = ""
+        chunk_hash_received: str = ""
+        signature: str = ""
+        is_valid: bool = False
+
+    @dataclass
+    class WorkerStatusQuery:
+        """Worker status query synapse (fallback)."""
+        include_workers: bool = True
+        include_capacity: bool = True
+        total_workers: int = 0
+        active_workers: int = 0
+        total_bandwidth_mbps: float = 0.0
+
+    @dataclass
+    class ChunkTransfer:
+        """Chunk transfer synapse (fallback)."""
+        task_id: str = ""
+        chunk_hash: str = ""
+        chunk_size: int = 0
+        chunk_data: Optional[str] = None
+        canary: str = ""
+        canary_offset: int = 0
+        hop_index: int = 0
+        received: bool = False
+        receive_time_us: int = 0
+
+    @dataclass
+    class EpochInfo:
+        """Epoch info synapse (fallback)."""
+        epoch: int = 0
+        epoch_start_block: int = 0
+        tasks_this_epoch: int = 0
 
 
 # ============================================================================

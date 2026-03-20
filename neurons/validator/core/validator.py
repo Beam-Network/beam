@@ -3045,7 +3045,14 @@ class Validator:
                 )
 
             else:
-                logger.error(f"Failed to set weights: {message}")
+                error_msg = message or (
+                    "Unknown error. Common causes: "
+                    "(1) Too soon since last weight update - wait for rate limit, "
+                    "(2) Wallet not registered on subnet, "
+                    "(3) Insufficient stake, "
+                    "(4) Subtensor connection issue"
+                )
+                logger.error(f"Failed to set weights: {error_msg}")
 
         except Exception as e:
             logger.error(f"Error setting weights: {e}", exc_info=True)
@@ -3083,7 +3090,11 @@ class Validator:
         raw_summaries = summaries_data.get("summaries", [])
 
         if not raw_summaries:
-            raise ValueError(f"No epoch summaries available for epoch {used_epoch}")
+            raise ValueError(
+                f"No epoch summaries available for epoch {used_epoch}. "
+                f"This typically means no orchestrators are active or submitting proofs. "
+                f"Falling back to legacy weight formula."
+            )
 
         summaries = [
             SummaryInput(
