@@ -3002,27 +3002,21 @@ class Validator:
                     logger.debug(f"Could not check commit-reveal status: {e}")
 
             if commit_reveal_enabled and self.subtensor is not None:
-                # Use commit_weights for subnets with commit-reveal enabled
-                import secrets
-                salt = [secrets.randbelow(2**16) for _ in range(8)]
-                # Convert weights to uint16 values (0-65535)
-                max_weight = max(weights) if weights else 1.0
-                uint16_weights = [int((w / max_weight) * 65535) for w in weights]
-
-                logger.info(f"Using commit_weights (commit-reveal enabled)")
-                result = self.subtensor.commit_weights(
+                # Use set_weights for subnets with commit-reveal enabled
+                # set_weights() handles the full time-locked commit-reveal flow automatically
+                logger.info(f"Using set_weights with time-locked commit-reveal")
+                result = self.subtensor.set_weights(
                     wallet=self.wallet,
                     netuid=self.settings.netuid,
-                    salt=salt,
                     uids=list(uids),
-                    weights=uint16_weights,
+                    weights=list(weights),
                     wait_for_inclusion=True,
                     wait_for_finalization=False,
-                    wait_for_revealed_execution=False,
+                    wait_for_revealed_execution=True,
                 )
                 success = result.success
                 message = result.message or result.error or ""
-                weight_method = "commit_reveal"
+                weight_method = "timelocked_commit_reveal"
             elif self.fiber_chain is not None and self.uid is not None:
                 success, message = self.fiber_chain.set_weights(
                     keypair=self.wallet,  # Pass full wallet, not just hotkey
