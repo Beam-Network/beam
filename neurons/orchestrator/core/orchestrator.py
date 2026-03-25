@@ -1262,23 +1262,22 @@ class Orchestrator:
         )
 
     async def _registry_loop(self) -> None:
-        """Background loop for registry registration and heartbeat."""
-        await self._meta_sync.register_with_registry(self.hotkey or "", self.wallet, self.our_uid, self.workers)
+        """
+        Background loop for registry registration and heartbeat.
 
+        NOTE: Registration and heartbeat are now handled via WebSocket connection
+        in main.py (_connect_and_register_ws). This loop is kept for backward
+        compatibility but does nothing.
+        """
+        # Registration is now handled via WebSocket in main.py
+        logger.info("Registry loop: registration/heartbeat handled via WebSocket, skipping HTTP")
+
+        # Just keep the task alive to avoid breaking background task management
         while self._running:
             try:
-                await asyncio.sleep(self.settings.registry_heartbeat_interval)
-                await self._meta_sync.send_registry_heartbeat(
-                    self.hotkey or "", self.wallet, self.workers.values(),
-                    self.total_bytes_relayed, WorkerStatus,
-                    subtensor=self.subtensor,
-                    pending_payments=len(self._reward_mgr._payment_retry_queue),
-                )
+                await asyncio.sleep(60)
             except asyncio.CancelledError:
-                await self._meta_sync.unregister_from_registry(self.hotkey or "")
                 break
-            except Exception as e:
-                logger.error(f"Error in registry loop: {e}")
 
     async def _stale_task_reassignment_loop(self) -> None:
         """

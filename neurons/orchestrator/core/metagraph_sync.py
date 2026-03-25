@@ -230,7 +230,13 @@ class MetagraphSync:
         return "127.0.0.1"
 
     async def register_with_registry(self, hotkey: str, wallet, our_uid, workers_ref) -> None:
-        """Register with the discovery registry."""
+        """
+        DEPRECATED: Register with the discovery registry via HTTP.
+
+        Registration is now handled via WebSocket in main.py (_connect_and_register_ws).
+        This method is kept for backward compatibility but should not be called.
+        """
+        logger.warning("register_with_registry is deprecated - use WebSocket registration in main.py")
         try:
             external_ip = await self.get_external_ip()
             url = f"http://{external_ip}:{self.settings.api_port}"

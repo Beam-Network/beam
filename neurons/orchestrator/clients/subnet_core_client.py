@@ -273,6 +273,10 @@ class SubnetCoreClient:
         self._reconnect_delay = 5.0  # Seconds between reconnection attempts
         self._max_reconnect_delay = 60.0  # Max backoff delay
 
+        # WebSocket registration state
+        self._registered = False
+        self._registration_config: Optional[Dict[str, Any]] = None
+
     # =========================================================================
     # Handlers for polling notifications
     # =========================================================================
@@ -426,6 +430,36 @@ class SubnetCoreClient:
                 await asyncio.sleep(reconnect_delay)
                 reconnect_delay = min(reconnect_delay * 1.5, self._max_reconnect_delay)
 
+    def set_registration_config(
+        self,
+        url: str,
+        region: str,
+        max_workers: int = 10000,
+        uid: int = None,
+        fee_percentage: float = 0.0,
+    ):
+        """
+        Set registration config for auto-registration after WebSocket connects.
+
+        This should be called before start_polling() so the orchestrator
+        registers via WebSocket immediately after connection.
+
+        Args:
+            url: Orchestrator's API URL (e.g., http://ip:port)
+            region: Geographic region
+            max_workers: Maximum workers this orchestrator can handle
+            uid: Bittensor UID (optional)
+            fee_percentage: Fee percentage charged to workers
+        """
+        self._registration_config = {
+            "url": url,
+            "region": region,
+            "max_workers": max_workers,
+            "uid": uid,
+            "fee_percentage": fee_percentage,
+        }
+        logger.info(f"Registration config set: region={region}, max_workers={max_workers}")
+
     async def _connect_websocket(self):
         """Connect to WebSocket endpoint."""
         signature, timestamp = self._sign_ws_auth()
@@ -444,7 +478,18 @@ class SubnetCoreClient:
             ping_timeout=10,
         )
         self._ws_connected = True
+        self._registered = False  # Reset on new connection
         logger.info(f"WebSocket connected to {url}")
+
+        # Auto-register if config is set
+        if self._registration_config:
+            await self.register_via_websocket(
+                url=self._registration_config["url"],
+                region=self._registration_config["region"],
+                max_workers=self._registration_config["max_workers"],
+                uid=self._registration_config["uid"],
+                fee_percentage=self._registration_config["fee_percentage"],
+            )
 
     async def _ws_message_loop(self):
         """Process incoming WebSocket messages."""
@@ -501,6 +546,20 @@ class SubnetCoreClient:
         elif msg_type == "heartbeat_ack":
             logger.debug("WebSocket heartbeat acknowledged")
 
+        elif msg_type == "register_ack":
+            logger.info(f"Registration acknowledged: {data.get('status')}")
+            self._registered = True
+
+        elif msg_type == "register_result":
+            status = data.get("status")
+            slot = data.get("slot_number")
+            logger.info(f"Registration result: status={status}, slot={slot}")
+            self._registered = status in ("assigned", "updated")
+
+        elif msg_type == "register_error":
+            logger.error(f"Registration failed: {data.get('error')}")
+            self._registered = False
+
         elif msg_type == "ping":
             # Respond to server ping
             if self._ws:
@@ -530,6 +589,61 @@ class SubnetCoreClient:
             await self._ws.send(json.dumps(message))
         except Exception as e:
             logger.warning(f"Failed to send WebSocket heartbeat: {e}")
+
+    async def register_via_websocket(
+        self,
+        url: str,
+        region: str,
+        max_workers: int = 10000,
+        uid: int = None,
+        fee_percentage: float = 0.0,
+    ) -> bool:
+        """
+        Register orchestrator via WebSocket.
+
+        Sends a register message over the WebSocket connection instead of HTTP POST.
+        The signature proves ownership of the hotkey.
+
+        Args:
+            url: Orchestrator's API URL (e.g., http://ip:port)
+            region: Geographic region
+            max_workers: Maximum workers this orchestrator can handle
+            uid: Bittensor UID (optional)
+            fee_percentage: Fee percentage charged to workers
+
+        Returns:
+            True if registration message was sent successfully
+        """
+        if not self._ws or not self._ws_connected:
+            logger.warning("Cannot register via WebSocket: not connected")
+            return False
+
+        # Sign registration data: "{hotkey}:{url}:{region}"
+        reg_message = f"{self.orchestrator_hotkey}:{url}:{region}"
+        signature = ""
+        if self.signer:
+            try:
+                signature = self.signer.sign(reg_message.encode()).hex()
+            except Exception as e:
+                logger.warning(f"Failed to sign registration: {e}")
+
+        message = {
+            "type": "register",
+            "url": url,
+            "region": region,
+            "max_workers": max_workers,
+            "uid": uid,
+            "fee_percentage": fee_percentage,
+            "signature": signature,
+        }
+
+        try:
+            await self._ws.send(json.dumps(message))
+            logger.info(f"Sent registration via WebSocket: region={region}, fee={fee_percentage}%")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send registration via WebSocket: {e}")
+            return False
 
     async def _heartbeat_loop(self, interval: float):
         """Send periodic heartbeats (HTTP + WebSocket)."""

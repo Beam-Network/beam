@@ -116,7 +116,7 @@ async def _connect_and_register_ws(settings, wallet, get_worker_count, get_balan
 
             async with websockets.connect(
                 ws_endpoint,
-                extra_headers=headers,
+                additional_headers=headers,
                 ping_interval=30,
                 ping_timeout=10,
             ) as ws:
