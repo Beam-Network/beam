@@ -54,15 +54,197 @@ from middleware.rate_limiting import RateLimitMiddleware, get_rate_limiter, Rate
 from middleware.metrics import MetricsMiddleware, get_metrics_collector, get_metrics_response
 
 # ---------------------------------------------------------------------------
-# Core API self-registration helpers
+# Core API WebSocket-based registration and heartbeat
 # ---------------------------------------------------------------------------
 import httpx
+import json
+import websockets
+from websockets.exceptions import ConnectionClosed, WebSocketException
 
+_core_api_ws_task: Optional[asyncio.Task] = None
+_core_api_ws: Optional[websockets.WebSocketClientProtocol] = None
+
+
+def _sign_message(wallet, message: str) -> str:
+    """Sign a message with the wallet's hotkey."""
+    try:
+        signature = wallet.hotkey.sign(message.encode())
+        return signature.hex()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Failed to sign message: {e}")
+        return ""
+
+
+async def _connect_and_register_ws(settings, wallet, get_worker_count, get_balance_info=None):
+    """
+    Connect to BeamCore via WebSocket and register/send heartbeats.
+
+    This replaces the HTTP-based registration and heartbeat with a single
+    persistent WebSocket connection.
+    """
+    global _core_api_ws
+    logger = logging.getLogger(__name__)
+    hotkey = wallet.hotkey.ss58_address
+
+    # Build WebSocket URL (convert https to wss, http to ws)
+    base_url = settings.subnet_core_url
+    if base_url.startswith("https://"):
+        ws_url = base_url.replace("https://", "wss://")
+    elif base_url.startswith("http://"):
+        ws_url = base_url.replace("http://", "ws://")
+    else:
+        ws_url = f"wss://{base_url}"
+
+    ws_endpoint = f"{ws_url}/ws/orchestrators/{hotkey}"
+
+    heartbeat_interval = 60  # seconds
+    reconnect_delay = 5  # seconds
+
+    while True:
+        try:
+            # Generate auth headers
+            timestamp = str(int(time.time()))
+            auth_message = f"{hotkey}:{timestamp}"
+            signature = _sign_message(wallet, auth_message)
+
+            headers = {
+                "x-signature": signature,
+                "x-timestamp": timestamp,
+            }
+
+            logger.info(f"Connecting to BeamCore WebSocket: {ws_endpoint}")
+
+            async with websockets.connect(
+                ws_endpoint,
+                extra_headers=headers,
+                ping_interval=30,
+                ping_timeout=10,
+            ) as ws:
+                _core_api_ws = ws
+                logger.info("WebSocket connected to BeamCore")
+
+                # Wait for connected message
+                try:
+                    connected_msg = await asyncio.wait_for(ws.recv(), timeout=10)
+                    connected_data = json.loads(connected_msg)
+                    if connected_data.get("type") == "connected":
+                        logger.info(f"BeamCore connection confirmed: buffer={connected_data.get('buffer_id')}")
+                except asyncio.TimeoutError:
+                    logger.warning("Timeout waiting for connected message")
+
+                # Send registration message
+                local_ip = settings.external_ip or _get_local_ip()
+                orch_url = f"http://{local_ip}:{settings.api_port}"
+
+                # Sign registration data: "{hotkey}:{url}:{region}"
+                reg_message = f"{hotkey}:{orch_url}:{settings.region}"
+                reg_signature = _sign_message(wallet, reg_message)
+
+                register_msg = {
+                    "type": "register",
+                    "url": orch_url,
+                    "region": settings.region,
+                    "max_workers": settings.max_workers,
+                    "uid": None,  # Will be set by BeamCore from metagraph
+                    "fee_percentage": settings.fee_percentage,
+                    "signature": reg_signature,
+                }
+
+                await ws.send(json.dumps(register_msg))
+                logger.info(f"Sent registration via WebSocket: region={settings.region}, fee={settings.fee_percentage}%")
+
+                # Wait for registration acknowledgment
+                try:
+                    reg_response = await asyncio.wait_for(ws.recv(), timeout=10)
+                    reg_data = json.loads(reg_response)
+                    if reg_data.get("type") == "register_ack":
+                        logger.info(f"Registration acknowledged: {reg_data.get('status')}")
+                    elif reg_data.get("type") == "register_error":
+                        logger.error(f"Registration failed: {reg_data.get('error')}")
+                    elif reg_data.get("type") == "register_result":
+                        logger.info(f"Registration result: status={reg_data.get('status')}, slot={reg_data.get('slot_number')}")
+                except asyncio.TimeoutError:
+                    logger.warning("Timeout waiting for registration ack (continuing anyway)")
+
+                # Heartbeat loop
+                loop = asyncio.get_event_loop()
+                last_heartbeat = time.time()
+
+                while True:
+                    try:
+                        # Check if it's time to send heartbeat
+                        now = time.time()
+                        if now - last_heartbeat >= heartbeat_interval:
+                            # Gather stats
+                            worker_count = get_worker_count() if callable(get_worker_count) else 0
+                            balance_tao = -1.0
+                            coldkey_balance_tao = -1.0
+                            pending_payments = 0
+
+                            if callable(get_balance_info):
+                                try:
+                                    balance_tao, coldkey_balance_tao, pending_payments = await asyncio.wait_for(
+                                        loop.run_in_executor(None, get_balance_info),
+                                        timeout=15.0,
+                                    )
+                                except asyncio.TimeoutError:
+                                    logger.warning("Balance fetch timed out")
+                                except Exception as e:
+                                    logger.debug(f"Balance fetch failed: {e}")
+
+                            heartbeat_msg = {
+                                "type": "heartbeat",
+                                "worker_count": worker_count,
+                                "avg_bandwidth_mbps": 0.0,
+                                "total_bytes_relayed": 0,
+                                "fee_percentage": settings.fee_percentage,
+                                "balance_tao": balance_tao,
+                                "coldkey_balance_tao": coldkey_balance_tao,
+                                "pending_payments": pending_payments,
+                            }
+
+                            await ws.send(json.dumps(heartbeat_msg))
+                            last_heartbeat = now
+                            logger.debug(f"Heartbeat sent: workers={worker_count}")
+
+                        # Receive messages (non-blocking with timeout)
+                        try:
+                            msg = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                            data = json.loads(msg)
+                            msg_type = data.get("type")
+
+                            if msg_type == "heartbeat_ack":
+                                pass  # Expected
+                            elif msg_type == "register_result":
+                                logger.info(f"Registration result: {data}")
+                            elif msg_type == "error":
+                                logger.warning(f"BeamCore error: {data.get('message')}")
+                            else:
+                                logger.debug(f"Received message: {msg_type}")
+
+                        except asyncio.TimeoutError:
+                            pass  # No message, continue heartbeat loop
+
+                    except ConnectionClosed as e:
+                        logger.warning(f"WebSocket connection closed: {e}")
+                        break
+
+        except WebSocketException as e:
+            logger.warning(f"WebSocket error: {e}")
+        except Exception as e:
+            logger.error(f"BeamCore WebSocket connection failed: {e}")
+
+        _core_api_ws = None
+        logger.info(f"Reconnecting to BeamCore in {reconnect_delay}s...")
+        await asyncio.sleep(reconnect_delay)
+
+
+# Legacy HTTP functions (kept for fallback, but deprecated)
 _core_api_heartbeat_task: Optional[asyncio.Task] = None
 
 
 async def _register_with_core_api(settings, hotkey: str) -> bool:
-    """Register this orchestrator with the Core API (BeamCore)."""
+    """DEPRECATED: Register this orchestrator with the Core API via HTTP."""
     url = f"{settings.subnet_core_url}/orchestrators/register"
     local_ip = settings.external_ip or _get_local_ip()
     orch_url = f"http://{local_ip}:{settings.api_port}"
@@ -80,70 +262,9 @@ async def _register_with_core_api(settings, hotkey: str) -> bool:
     }
 
     logging.getLogger(__name__).info(
-        f"Registering with Core API: fee_percentage={settings.fee_percentage}%"
+        f"[DEPRECATED] HTTP registration - switching to WebSocket"
     )
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(url, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            logging.getLogger(__name__).info(
-                f"Registered with Core API: {data}"
-            )
-            return True
-    except Exception as e:
-        logging.getLogger(__name__).warning(
-            f"Failed to register with Core API at {url}: {e}"
-        )
-        return False
-
-
-async def _send_heartbeat(settings, hotkey: str, worker_count: int = 0, balance_tao: float = -1.0, coldkey_balance_tao: float = -1.0, pending_payments: int = 0) -> bool:
-    """Send a heartbeat to the Core API."""
-    url = f"{settings.subnet_core_url}/orchestrators/heartbeat"
-    payload = {
-        "hotkey": hotkey,
-        "current_workers": worker_count,
-        "avg_bandwidth_mbps": 0.0,
-        "total_bytes_relayed": 0,
-        "signature": "local",
-        "balance_tao": balance_tao,
-        "coldkey_balance_tao": coldkey_balance_tao,
-        "pending_payments": pending_payments,
-        "fee_percentage": settings.fee_percentage,
-    }
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(url, json=payload)
-            resp.raise_for_status()
-            return True
-    except Exception as e:
-        logging.getLogger(__name__).debug(f"Core API heartbeat failed: {e}")
-        return False
-
-
-async def _heartbeat_loop(settings, hotkey: str, get_worker_count, get_balance_info=None):
-    """Periodically send heartbeats to the Core API."""
-    logger = logging.getLogger(__name__)
-    interval = 60  # seconds
-    loop = asyncio.get_event_loop()
-    while True:
-        await asyncio.sleep(interval)
-        count = get_worker_count() if callable(get_worker_count) else 0
-        balance_tao = -1.0
-        coldkey_balance_tao = -1.0
-        pending_payments = 0
-        if callable(get_balance_info):
-            try:
-                balance_tao, coldkey_balance_tao, pending_payments = await asyncio.wait_for(
-                    loop.run_in_executor(None, get_balance_info),
-                    timeout=15.0,
-                )
-            except asyncio.TimeoutError:
-                logger.warning("Balance fetch timed out after 15s")
-            except Exception as e:
-                logger.warning(f"Balance fetch failed: {e}")
-        await _send_heartbeat(settings, hotkey, count, balance_tao, coldkey_balance_tao, pending_payments)
+    return False  # Return False to trigger WebSocket path
 
 
 # Configure logging - both console and file
@@ -254,58 +375,67 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 60)
 
     # ======================================================================
-    # Register with Core API (BeamCore)
+    # Connect to BeamCore via WebSocket (registration + heartbeat)
     # ======================================================================
-    global _core_api_heartbeat_task
-    registered = await _register_with_core_api(settings, orchestrator.hotkey)
-    if registered:
-        logger.info("Successfully registered with Core API")
-        # Start periodic heartbeat
-        def _get_worker_count():
-            try:
-                return len(orchestrator.workers) if hasattr(orchestrator, 'workers') else 0
-            except Exception:
-                return 0
+    global _core_api_ws_task
 
-        def _get_balance_info():
-            balance = -1.0
-            coldkey_balance = -1.0
-            pending = 0
-            if orchestrator.subtensor and orchestrator.wallet:
-                try:
-                    bal = orchestrator.subtensor.get_balance(orchestrator.wallet.hotkey.ss58_address)
-                    balance = float(bal)
-                except Exception as e:
-                    logger.debug(f"Failed to fetch hotkey balance: {e}")
-                try:
-                    ck_bal = orchestrator.subtensor.get_balance(orchestrator.wallet.coldkeypub.ss58_address)
-                    coldkey_balance = float(ck_bal)
-                except Exception as e:
-                    logger.debug(f"Failed to fetch coldkey balance: {e}")
-            try:
-                if hasattr(orchestrator, '_reward_mgr'):
-                    pending = len(orchestrator._reward_mgr._payment_retry_queue)
-            except Exception:
-                pass
-            return balance, coldkey_balance, pending
+    def _get_worker_count():
+        try:
+            return len(orchestrator.workers) if hasattr(orchestrator, 'workers') else 0
+        except Exception:
+            return 0
 
-        _core_api_heartbeat_task = asyncio.create_task(
-            _heartbeat_loop(settings, orchestrator.hotkey, _get_worker_count, _get_balance_info)
+    def _get_balance_info():
+        balance = -1.0
+        coldkey_balance = -1.0
+        pending = 0
+        if orchestrator.subtensor and orchestrator.wallet:
+            try:
+                bal = orchestrator.subtensor.get_balance(orchestrator.wallet.hotkey.ss58_address)
+                balance = float(bal)
+            except Exception as e:
+                logger.debug(f"Failed to fetch hotkey balance: {e}")
+            try:
+                ck_bal = orchestrator.subtensor.get_balance(orchestrator.wallet.coldkeypub.ss58_address)
+                coldkey_balance = float(ck_bal)
+            except Exception as e:
+                logger.debug(f"Failed to fetch coldkey balance: {e}")
+        try:
+            if hasattr(orchestrator, '_reward_mgr'):
+                pending = len(orchestrator._reward_mgr._payment_retry_queue)
+        except Exception:
+            pass
+        return balance, coldkey_balance, pending
+
+    # Start WebSocket connection task (handles registration + heartbeats)
+    _core_api_ws_task = asyncio.create_task(
+        _connect_and_register_ws(
+            settings,
+            orchestrator.wallet,
+            _get_worker_count,
+            _get_balance_info,
         )
-    else:
-        logger.warning("Could not register with Core API - will retry on next startup")
+    )
+    logger.info("Started BeamCore WebSocket connection task")
 
     yield
 
     # Cleanup
     logger.info("Shutting down BEAM Orchestrator...")
 
-    # Cancel Core API heartbeat
-    if _core_api_heartbeat_task and not _core_api_heartbeat_task.done():
-        _core_api_heartbeat_task.cancel()
+    # Cancel BeamCore WebSocket connection
+    if _core_api_ws_task and not _core_api_ws_task.done():
+        _core_api_ws_task.cancel()
         try:
-            await _core_api_heartbeat_task
+            await _core_api_ws_task
         except asyncio.CancelledError:
+            pass
+
+    # Close WebSocket if open
+    if _core_api_ws:
+        try:
+            await _core_api_ws.close()
+        except Exception:
             pass
 
     await orchestrator.stop()
