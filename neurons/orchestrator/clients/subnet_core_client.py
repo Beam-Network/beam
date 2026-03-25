@@ -4,10 +4,12 @@ BeamCore API Client for Orchestrators
 Client for orchestrators to publish Proof-of-Bandwidth to the private
 BeamCore service.
 
-Uses HTTP polling instead of WebSocket for all communication.
+Uses WebSocket for real-time notifications (transfers, task results, stale tasks).
+Falls back to HTTP polling if WebSocket connection fails.
 """
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -15,6 +17,8 @@ from typing import Optional, List, Dict, Any, Callable
 from dataclasses import dataclass, asdict
 
 import httpx
+import websockets
+from websockets.exceptions import ConnectionClosed
 
 logger = logging.getLogger(__name__)
 
@@ -218,10 +222,13 @@ class BlindPaymentRequest:
 
 class SubnetCoreClient:
     """
-    Client for communicating with BeamCore via HTTP.
+    Client for communicating with BeamCore via WebSocket and HTTP.
 
-    Orchestrators use this client to publish PoB instead of direct DB access.
-    All communication is via HTTP polling - no WebSocket.
+    Orchestrators use this client to:
+    - Receive real-time notifications via WebSocket (transfers, task results)
+    - Submit PoB and task updates via HTTP
+
+    WebSocket is the primary communication method. HTTP polling is used as fallback.
     """
 
     def __init__(
@@ -249,13 +256,22 @@ class SubnetCoreClient:
         self.signer = signer
         self._client: Optional[httpx.AsyncClient] = None
 
-        # Polling state
+        # Polling state (used as fallback when WebSocket unavailable)
         self._last_event_id: int = 0  # Track last seen event for polling
         self._task_completion_handler: Optional[Callable] = None
         self._transfer_handler: Optional[Callable] = None
+        self._stale_task_handler: Optional[Callable] = None  # Handler for stale tasks
         self._stats_provider: Optional[Callable] = None  # Returns heartbeat stats
         self._polling_tasks: List[asyncio.Task] = []
         self._running = False
+
+        # WebSocket state
+        self._ws: Optional[websockets.WebSocketClientProtocol] = None
+        self._ws_connected = False
+        self._ws_task: Optional[asyncio.Task] = None
+        self._ws_heartbeat_task: Optional[asyncio.Task] = None
+        self._reconnect_delay = 5.0  # Seconds between reconnection attempts
+        self._max_reconnect_delay = 60.0  # Max backoff delay
 
     # =========================================================================
     # Handlers for polling notifications
@@ -278,6 +294,14 @@ class SubnetCoreClient:
         """
         self._transfer_handler = handler
 
+    def set_stale_task_handler(self, handler: Callable):
+        """
+        Set handler for stale task notifications.
+
+        Handler signature: async def handler(stale_task: dict) -> None
+        """
+        self._stale_task_handler = handler
+
     def set_stats_provider(self, provider: Callable):
         """
         Set provider for heartbeat stats.
@@ -295,8 +319,30 @@ class SubnetCoreClient:
         self._stats_provider = provider
 
     # =========================================================================
-    # HTTP Polling for Real-time Events
+    # WebSocket Connection (Primary) + HTTP Polling (Fallback)
     # =========================================================================
+
+    def _get_ws_url(self) -> str:
+        """Get WebSocket URL from base URL."""
+        # Convert http(s)://host to ws(s)://host
+        ws_url = self.base_url.replace("https://", "wss://").replace("http://", "ws://")
+        return f"{ws_url}/ws/orchestrators/{self.orchestrator_hotkey}"
+
+    def _sign_ws_auth(self) -> tuple[str, str]:
+        """Generate WebSocket authentication signature."""
+        timestamp = str(int(time.time()))
+        message = f"{self.orchestrator_hotkey}:{timestamp}"
+        signature = ""
+        if self.signer:
+            try:
+                sig_bytes = self.signer.sign(message.encode("utf-8"))
+                signature = "0x" + (sig_bytes.hex() if isinstance(sig_bytes, bytes) else str(sig_bytes))
+            except Exception as e:
+                logger.warning(f"Failed to sign WebSocket auth: {e}")
+                signature = "unsigned"
+        else:
+            signature = "unsigned"
+        return signature, timestamp
 
     async def start_polling(
         self,
@@ -305,84 +351,239 @@ class SubnetCoreClient:
         results_poll_interval: float = 5.0,
     ):
         """
-        Start background polling loops for heartbeat, transfers, and task results.
+        Start WebSocket connection for real-time notifications.
+
+        WebSocket replaces HTTP polling for transfers, task results, and stale tasks.
+        HTTP heartbeat is still sent periodically.
 
         Args:
             heartbeat_interval: Seconds between heartbeats (default 30s)
-            transfer_poll_interval: Seconds between transfer polls (default 5s)
-            results_poll_interval: Seconds between task result polls (default 5s)
+            transfer_poll_interval: Unused (WebSocket provides real-time updates)
+            results_poll_interval: Unused (WebSocket provides real-time updates)
         """
         if self._running:
-            logger.warning("Polling already running")
+            logger.warning("Already running")
             return
 
         self._running = True
-        self._polling_tasks = [
-            asyncio.create_task(self._heartbeat_loop(heartbeat_interval)),
-            asyncio.create_task(self._transfer_poll_loop(transfer_poll_interval)),
-            asyncio.create_task(self._results_poll_loop(results_poll_interval)),
-        ]
+
+        # Start WebSocket connection (handles transfers, results, stale tasks)
+        self._ws_task = asyncio.create_task(self._ws_connection_loop())
+
+        # Start heartbeat loop (still uses HTTP)
+        self._ws_heartbeat_task = asyncio.create_task(self._heartbeat_loop(heartbeat_interval))
+
         logger.info(
-            f"Started HTTP polling: heartbeat={heartbeat_interval}s, "
-            f"transfers={transfer_poll_interval}s, results={results_poll_interval}s"
+            f"Started WebSocket connection to {self._get_ws_url()}, "
+            f"heartbeat={heartbeat_interval}s"
         )
 
     async def stop_polling(self):
-        """Stop all polling loops."""
+        """Stop WebSocket connection and heartbeat loop."""
         self._running = False
-        for task in self._polling_tasks:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        self._polling_tasks = []
-        logger.info("HTTP polling stopped")
+        self._ws_connected = False
 
-    async def _heartbeat_loop(self, interval: float):
-        """Send periodic heartbeats to SubnetCore."""
+        # Close WebSocket
+        if self._ws:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
+
+        # Cancel tasks
+        for task in [self._ws_task, self._ws_heartbeat_task]:
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        self._ws_task = None
+        self._ws_heartbeat_task = None
+        logger.info("WebSocket connection stopped")
+
+    async def _ws_connection_loop(self):
+        """Maintain WebSocket connection with automatic reconnection."""
+        reconnect_delay = self._reconnect_delay
+
         while self._running:
             try:
+                await self._connect_websocket()
+                reconnect_delay = self._reconnect_delay  # Reset on successful connection
+                await self._ws_message_loop()
+            except ConnectionClosed as e:
+                logger.warning(f"WebSocket closed: {e}")
+            except Exception as e:
+                logger.error(f"WebSocket error: {e}")
+
+            self._ws_connected = False
+            self._ws = None
+
+            if self._running:
+                logger.info(f"Reconnecting WebSocket in {reconnect_delay}s...")
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 1.5, self._max_reconnect_delay)
+
+    async def _connect_websocket(self):
+        """Connect to WebSocket endpoint."""
+        signature, timestamp = self._sign_ws_auth()
+        url = self._get_ws_url()
+
+        headers = {
+            "x-signature": signature,
+            "x-timestamp": timestamp,
+        }
+
+        logger.info(f"Connecting to WebSocket: {url}")
+        self._ws = await websockets.connect(
+            url,
+            additional_headers=headers,
+            ping_interval=30,
+            ping_timeout=10,
+        )
+        self._ws_connected = True
+        logger.info(f"WebSocket connected to {url}")
+
+    async def _ws_message_loop(self):
+        """Process incoming WebSocket messages."""
+        while self._running and self._ws:
+            try:
+                message = await self._ws.recv()
+                data = json.loads(message)
+                await self._handle_ws_message(data)
+            except json.JSONDecodeError as e:
+                logger.warning(f"Invalid JSON from WebSocket: {e}")
+
+    async def _handle_ws_message(self, data: dict):
+        """Handle incoming WebSocket message."""
+        msg_type = data.get("type")
+
+        if msg_type == "connected":
+            logger.info(f"WebSocket connected to buffer: {data.get('buffer_id')}")
+
+        elif msg_type == "transfer_assignment":
+            # New transfer to process
+            logger.info(f"Received transfer assignment: {data.get('transfer_id')}")
+            if self._transfer_handler:
+                try:
+                    await self._transfer_handler(data)
+                except Exception as e:
+                    logger.error(f"Error handling transfer: {e}")
+
+        elif msg_type == "task_result":
+            # Task completion notification
+            logger.info(f"Received task result: {data.get('task_id')}")
+            if self._task_completion_handler:
+                try:
+                    verified = await self._task_completion_handler(data)
+                    if verified:
+                        task_id = data.get("task_id")
+                        if task_id:
+                            await self.acknowledge_task_completions([task_id])
+                except Exception as e:
+                    logger.error(f"Error handling task result: {e}")
+
+        elif msg_type == "stale_task":
+            # Stale task notification
+            logger.info(f"Received stale task: {data.get('task_id')}")
+            if self._stale_task_handler:
+                try:
+                    await self._stale_task_handler(data)
+                except Exception as e:
+                    logger.error(f"Error handling stale task: {e}")
+
+        elif msg_type == "worker_update":
+            # Worker status change
+            logger.debug(f"Worker update: {data.get('worker_id')} - {data.get('event')}")
+
+        elif msg_type == "heartbeat_ack":
+            logger.debug("WebSocket heartbeat acknowledged")
+
+        elif msg_type == "ping":
+            # Respond to server ping
+            if self._ws:
+                await self._ws.send(json.dumps({"type": "pong"}))
+
+        else:
+            logger.debug(f"Unknown WebSocket message type: {msg_type}")
+
+    async def _send_ws_heartbeat(self):
+        """Send heartbeat over WebSocket."""
+        if not self._ws or not self._ws_connected:
+            return
+
+        stats = {}
+        if self._stats_provider:
+            try:
+                stats = self._stats_provider()
+            except Exception as e:
+                logger.warning(f"Stats provider error: {e}")
+
+        message = {
+            "type": "heartbeat",
+            "worker_count": stats.get("current_workers", 0),
+        }
+
+        try:
+            await self._ws.send(json.dumps(message))
+        except Exception as e:
+            logger.warning(f"Failed to send WebSocket heartbeat: {e}")
+
+    async def _heartbeat_loop(self, interval: float):
+        """Send periodic heartbeats (HTTP + WebSocket)."""
+        while self._running:
+            try:
+                # Send HTTP heartbeat (for compatibility and stats reporting)
                 result = await self.send_heartbeat()
-                logger.debug(f"Heartbeat sent: {result}")
+                logger.debug(f"HTTP heartbeat sent: {result}")
+
+                # Also send WebSocket heartbeat if connected
+                if self._ws_connected:
+                    await self._send_ws_heartbeat()
             except Exception as e:
                 logger.warning(f"Heartbeat failed: {e}")
 
             await asyncio.sleep(interval)
 
+    # Legacy HTTP polling methods (kept for fallback/compatibility)
+
     async def _transfer_poll_loop(self, interval: float):
-        """Poll for pending transfers."""
+        """Poll for pending transfers (fallback if WebSocket unavailable)."""
         while self._running:
-            try:
-                transfers = await self.get_pending_transfers()
-                for transfer in transfers:
-                    if self._transfer_handler:
-                        try:
-                            await self._transfer_handler(transfer)
-                        except Exception as e:
-                            logger.error(f"Error handling transfer: {e}")
-            except Exception as e:
-                logger.warning(f"Transfer poll failed: {e}")
+            if not self._ws_connected:
+                try:
+                    transfers = await self.get_pending_transfers()
+                    for transfer in transfers:
+                        if self._transfer_handler:
+                            try:
+                                await self._transfer_handler(transfer)
+                            except Exception as e:
+                                logger.error(f"Error handling transfer: {e}")
+                except Exception as e:
+                    logger.warning(f"Transfer poll failed: {e}")
 
             await asyncio.sleep(interval)
 
     async def _results_poll_loop(self, interval: float):
-        """Poll for pending task results."""
+        """Poll for pending task results (fallback if WebSocket unavailable)."""
         while self._running:
-            try:
-                results = await self.get_pending_task_results()
-                for result in results:
-                    if self._task_completion_handler:
-                        try:
-                            verified = await self._task_completion_handler(result)
-                            if verified:
-                                task_id = result.get("task_id")
-                                if task_id:
-                                    await self.acknowledge_task_completions([task_id])
-                        except Exception as e:
-                            logger.error(f"Error handling task result: {e}")
-            except Exception as e:
-                logger.warning(f"Task results poll failed: {e}")
+            if not self._ws_connected:
+                try:
+                    results = await self.get_pending_task_results()
+                    for result in results:
+                        if self._task_completion_handler:
+                            try:
+                                verified = await self._task_completion_handler(result)
+                                if verified:
+                                    task_id = result.get("task_id")
+                                    if task_id:
+                                        await self.acknowledge_task_completions([task_id])
+                            except Exception as e:
+                                logger.error(f"Error handling task result: {e}")
+                except Exception as e:
+                    logger.warning(f"Task results poll failed: {e}")
 
             await asyncio.sleep(interval)
 

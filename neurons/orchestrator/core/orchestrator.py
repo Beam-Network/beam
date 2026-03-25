@@ -1287,8 +1287,8 @@ class Orchestrator:
         Periodically polls SubnetCore for stale tasks (acknowledged but not accepted)
         and reassigns them to different active workers.
         """
-        poll_interval = 2.0  # Check every 2 seconds
-        stale_timeout = 5    # Tasks stale after 5 seconds without completion
+        poll_interval = 15.0  # Check every 15 seconds (was 2s, reduced to lower SubnetCore load)
+        stale_timeout = 10    # Tasks stale after 10 seconds without completion
 
         logger.info("Stale task reassignment loop started")
 
@@ -1565,13 +1565,13 @@ class Orchestrator:
             self.subnet_core_client.set_transfer_handler(self._handle_transfer_notification)
             self.subnet_core_client.set_stats_provider(self._get_heartbeat_stats)
 
-            # Start HTTP polling loops
+            # Start WebSocket connection for real-time notifications
+            # WebSocket replaces HTTP polling for transfers and task results
+            # Heartbeat is still sent via HTTP for compatibility
             await self.subnet_core_client.start_polling(
                 heartbeat_interval=30.0,
-                transfer_poll_interval=5.0,
-                results_poll_interval=5.0,
             )
-            logger.info("SubnetCore HTTP polling started")
+            logger.info("SubnetCore WebSocket connection started")
 
         except Exception as e:
             logger.warning(f"Failed to initialize SubnetCoreClient: {e}")
