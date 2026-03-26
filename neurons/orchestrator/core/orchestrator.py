@@ -416,8 +416,7 @@ class Orchestrator:
         self.epoch_start_time: datetime = datetime.utcnow()
         self.epoch_summaries: Dict[int, EpochSummary] = {}
 
-        # Validator tracking
-        self.validators: Dict[str, dict] = {}
+        # Note: Validator tracking removed - BeamCore handles PoB centrally
 
         # Statistics
         self.total_bytes_relayed: int = 0
@@ -536,10 +535,9 @@ class Orchestrator:
             self._reward_mgr.last_emission_check = self._reward_mgr.epoch_start_emission
             logger.info(f"Initial emission: {self._reward_mgr.epoch_start_emission:.6f} ध")
 
-            # Discover validators
-            await self._meta_sync.discover_validators(self.validators, self.metagraph, self.our_uid, self.settings)
+            # Note: Validator discovery removed - BeamCore handles PoB centrally
         else:
-            logger.info("LOCAL MODE: Skipping chain sync, emission tracking, and validator discovery")
+            logger.info("LOCAL MODE: Skipping chain sync and emission tracking")
 
         # Initialize orchestrator manager for incentive mechanism
         await self._init_orch_manager()
@@ -563,22 +561,11 @@ class Orchestrator:
             asyncio.create_task(self._proof_agg.proof_aggregation_loop(
                 running, subnet_core_client_ref=lambda: self.subnet_core_client,
             )),
-            asyncio.create_task(
-                self._proof_agg.validator_report_loop(
-                    running,
-                    lambda: self.validators,
-                    lambda: self.metagraph,
-                    lambda: self.wallet,
-                    lambda: self.hotkey,
-                    lambda: self.current_epoch,
-                    subnet_core_client_ref=lambda: self.subnet_core_client,
-                )
-            ),
+            # Removed: validator_report_loop - BeamCore handles PoB centrally, validators read from BeamCore
             asyncio.create_task(self._epoch_management_loop()),
-            asyncio.create_task(self._stale_task_reassignment_loop()),
+            # Removed: _stale_task_reassignment_loop - deprecated endpoint replaced by WebSocket push
         ]
         logger.info("Worker sync loop started (syncs from SubnetCore every 60s)")
-        logger.info("Stale task reassignment loop started (checks every 2s)")
 
         if self.settings.registry_enabled:
             self._background_tasks.append(asyncio.create_task(self._registry_loop()))
@@ -1100,11 +1087,7 @@ class Orchestrator:
 
         return emission_alpha
 
-    async def _discover_validators(self) -> None:
-        await self._meta_sync.discover_validators(self.validators, self.metagraph, self.our_uid, self.settings)
-
-    async def _discover_validators_manual(self) -> None:
-        await self._meta_sync.discover_validators_manual(self.validators, self.settings)
+    # Note: _discover_validators removed - BeamCore handles PoB centrally
 
     # =========================================================================
     # Background Loops
@@ -1124,7 +1107,7 @@ class Orchestrator:
                     self._find_our_uid()
 
                 self.distribute_rewards_to_workers()
-                await self._discover_validators()
+                # Note: Validator discovery removed - BeamCore handles PoB centrally
 
             except asyncio.CancelledError:
                 break
@@ -1226,10 +1209,11 @@ class Orchestrator:
             logger.error(f"Error distributing epoch rewards: {e}")
 
         try:
+            # Submit payment proofs to BeamCore (central PoB authority)
             await self._epoch_mgr.generate_payment_proofs(
                 self.current_epoch, self.workers.values(),
                 self.hotkey or "", self.our_uid, self.db,
-                self.wallet, self.validators,
+                self.wallet,
                 subnet_core=self.subnet_core_client,
             )
         except Exception as e:
@@ -1463,7 +1447,7 @@ class Orchestrator:
             "pending_proofs": len(self.pending_proofs),
             "total_bytes_relayed": self.total_bytes_relayed,
             "total_tasks_completed": self.total_tasks_completed,
-            "validators_known": len(self.validators),
+            # validators_known removed - BeamCore handles PoB centrally
         }
 
     def get_worker_stats(self) -> List[dict]:

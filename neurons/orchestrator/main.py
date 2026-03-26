@@ -75,6 +75,65 @@ def _sign_message(wallet, message: str) -> str:
         return ""
 
 
+async def _get_api_key(settings, wallet) -> Optional[str]:
+    """
+    Get API key from BeamCore using challenge/verify flow.
+
+    Returns API key (b1m_xxx format) or None if auth fails.
+    """
+    import httpx
+    logger = logging.getLogger(__name__)
+    hotkey = wallet.hotkey.ss58_address
+    base_url = settings.subnet_core_url
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # Step 1: Request challenge
+            challenge_resp = await client.post(
+                f"{base_url}/auth/challenge",
+                json={"hotkey": hotkey, "role": "orchestrator"},
+            )
+            if challenge_resp.status_code != 200:
+                logger.error(f"Failed to get auth challenge: {challenge_resp.status_code}")
+                return None
+
+            challenge_data = challenge_resp.json()
+            challenge_id = challenge_data["challenge_id"]
+            message = challenge_data["message"]
+
+            # Step 2: Sign the challenge
+            signature = _sign_message(wallet, message)
+            if not signature:
+                logger.error("Failed to sign challenge")
+                return None
+
+            # Step 3: Verify and get API key
+            verify_resp = await client.post(
+                f"{base_url}/auth/verify",
+                json={
+                    "challenge_id": challenge_id,
+                    "hotkey": hotkey,
+                    "signature": "0x" + signature if not signature.startswith("0x") else signature,
+                    "key_name": "Orchestrator Main WebSocket Key",
+                },
+            )
+            if verify_resp.status_code != 200:
+                logger.error(f"Failed to verify signature: {verify_resp.status_code}")
+                return None
+
+            verify_data = verify_resp.json()
+            if verify_data.get("success") and verify_data.get("api_key"):
+                logger.info(f"Obtained API key for main WebSocket: {hotkey[:16]}...")
+                return verify_data["api_key"]
+
+            logger.error(f"Auth verify failed: {verify_data.get('message', 'Unknown')}")
+            return None
+
+    except Exception as e:
+        logger.error(f"Failed to get API key: {e}")
+        return None
+
+
 async def _connect_and_register_ws(settings, wallet, get_worker_count, get_balance_info=None, get_uid=None):
     """
     Connect to BeamCore via WebSocket and register/send heartbeats.
@@ -85,6 +144,12 @@ async def _connect_and_register_ws(settings, wallet, get_worker_count, get_balan
     global _core_api_ws
     logger = logging.getLogger(__name__)
     hotkey = wallet.hotkey.ss58_address
+
+    # Get API key for WebSocket auth
+    api_key = await _get_api_key(settings, wallet)
+    if not api_key:
+        logger.error("Failed to obtain API key - WebSocket connection will fail")
+        return
 
     # Build WebSocket URL (convert https to wss, http to ws)
     base_url = settings.subnet_core_url
@@ -416,37 +481,15 @@ async def lifespan(app: FastAPI):
         """Get UID from metagraph detection."""
         return orchestrator.our_uid
 
-    # Start WebSocket connection task (handles registration + heartbeats)
-    _core_api_ws_task = asyncio.create_task(
-        _connect_and_register_ws(
-            settings,
-            orchestrator.wallet,
-            _get_worker_count,
-            _get_balance_info,
-            _get_uid,
-        )
-    )
-    logger.info("Started BeamCore WebSocket connection task")
+    # NOTE: WebSocket connection is now handled by SubnetCoreClient
+    # The duplicate _connect_and_register_ws is no longer needed
+    # _core_api_ws_task = asyncio.create_task(...)
+    logger.info("WebSocket registration handled by SubnetCoreClient")
 
     yield
 
     # Cleanup
     logger.info("Shutting down BEAM Orchestrator...")
-
-    # Cancel BeamCore WebSocket connection
-    if _core_api_ws_task and not _core_api_ws_task.done():
-        _core_api_ws_task.cancel()
-        try:
-            await _core_api_ws_task
-        except asyncio.CancelledError:
-            pass
-
-    # Close WebSocket if open
-    if _core_api_ws:
-        try:
-            await _core_api_ws.close()
-        except Exception:
-            pass
 
     await orchestrator.stop()
     await metrics_collector.stop()

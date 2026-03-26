@@ -113,13 +113,14 @@ class EpochManager:
         our_uid,
         db,
         wallet,
-        validators: dict,
         subnet_core=None,
     ) -> Optional[str]:
         """
-        Generate merkle tree payment proofs for the epoch.
+        Generate merkle tree payment proofs for the epoch and submit to BeamCore.
 
         Returns the merkle root, or None if no payments to record.
+
+        BeamCore is the central PoB authority - validators read from BeamCore.
 
         Payment data source priority:
         1. Local worker stats (bytes_relayed_epoch, rewards_earned_epoch)
@@ -231,21 +232,8 @@ class EpochManager:
                 except Exception as e:
                     logger.debug(f"Failed to update BeamCore with merkle root: {e}")
 
-            # Legacy: submit to validators directly (optional, may not have endpoints configured)
-            await self._submit_payment_proof_to_validators(
-                epoch=epoch,
-                merkle_root=merkle_root,
-                total_distributed=total_distributed,
-                worker_count=len(payments),
-                total_bytes_relayed=total_bytes,
-                worker_payments=payments_with_proofs,
-                hotkey=hotkey,
-                our_uid=our_uid,
-                wallet=wallet,
-                validators=validators,
-                db=db,
-                subnet_core=subnet_core,
-            )
+            # Note: Validator submission is handled centrally by BeamCore
+            # Validators read PoB data from BeamCore, not from orchestrators directly
 
             return merkle_root
 
@@ -253,91 +241,3 @@ class EpochManager:
             logger.error(f"Error generating payment proofs: {e}")
             return merkle_root
 
-    async def _submit_payment_proof_to_validators(
-        self,
-        epoch: int,
-        merkle_root: str,
-        total_distributed: int,
-        worker_count: int,
-        total_bytes_relayed: int,
-        worker_payments: List[Dict],
-        hotkey: str,
-        our_uid,
-        wallet,
-        validators: dict,
-        db,
-        subnet_core=None,
-    ) -> None:
-        """Submit payment proof to all known validators."""
-        if not validators:
-            logger.error(
-                f"NO VALIDATORS KNOWN - payment proof for epoch {epoch} will NOT be submitted! "
-                f"Workers paid: {worker_count}, amount: {total_distributed/1e9:.6f} ध. "
-                "Fix: ensure metagraph is synced OR configure VALIDATOR_ENDPOINTS env var. "
-                "Example: VALIDATOR_ENDPOINTS='hotkey1:ip1:port1,hotkey2:ip2:port2'"
-            )
-            return
-
-        if not wallet:
-            logger.debug("No wallet available, skipping payment proof submission")
-            return
-
-        message = f"{hotkey}:{epoch}:{merkle_root}:{total_distributed}"
-        try:
-            signature = wallet.hotkey.sign(message.encode()).hex()
-        except Exception as e:
-            logger.error(f"Failed to sign payment proof: {e}")
-            return
-
-        payload = {
-            "epoch": epoch,
-            "orchestrator_hotkey": hotkey,
-            "orchestrator_uid": our_uid,
-            "merkle_root": merkle_root,
-            "total_distributed": total_distributed,
-            "worker_count": worker_count,
-            "total_bytes_relayed": total_bytes_relayed,
-            "worker_payments": worker_payments,
-            "signature": signature,
-        }
-
-        submitted_count = 0
-        for validator_hotkey, validator_info in validators.items():
-            try:
-                ip = validator_info.get("ip", "127.0.0.1")
-                port = validator_info.get("port", 8094)
-                url = f"http://{ip}:{port}/payment-proof/submit"
-
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        url,
-                        json=payload,
-                        timeout=aiohttp.ClientTimeout(total=30),
-                    ) as response:
-                        if response.status == 200:
-                            result = await response.json()
-                            logger.info(
-                                f"Payment proof submitted to validator {validator_hotkey[:16]}...: "
-                                f"status={result.get('status')}, valid={result.get('is_valid')}"
-                            )
-                            submitted_count += 1
-                        else:
-                            error_text = await response.text()
-                            logger.warning(
-                                f"Failed to submit payment proof to {validator_hotkey[:16]}...: "
-                                f"status={response.status}, error={error_text[:100]}"
-                            )
-
-            except asyncio.TimeoutError:
-                logger.warning(f"Timeout submitting payment proof to {validator_hotkey[:16]}...")
-            except Exception as e:
-                logger.warning(f"Error submitting payment proof to {validator_hotkey[:16]}...: {e}")
-
-        if submitted_count > 0:
-            logger.info(f"Payment proof for epoch {epoch} submitted to {submitted_count}/{len(validators)} validators")
-
-            if db:
-                try:
-                    await db.mark_epoch_submitted(epoch)
-                except Exception as e:
-                    logger.error(f"Failed to mark epoch as submitted: {e}")

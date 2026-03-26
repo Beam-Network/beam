@@ -277,6 +277,10 @@ class SubnetCoreClient:
         self._registered = False
         self._registration_config: Optional[Dict[str, Any]] = None
 
+        # API key authentication (for buffer service)
+        self._api_key: Optional[str] = None
+        self._api_key_expires: Optional[float] = None
+
     # =========================================================================
     # Handlers for polling notifications
     # =========================================================================
@@ -347,6 +351,103 @@ class SubnetCoreClient:
         else:
             signature = "unsigned"
         return signature, timestamp
+
+    async def _ensure_api_key(self) -> Optional[str]:
+        """
+        Ensure we have a valid API key for WebSocket authentication.
+
+        First checks BEAMCORE_API_KEY env var, then uses challenge/verify flow.
+        The key is cached and reused until it expires.
+
+        Returns:
+            API key string (b1m_xxx format) or None if auth fails
+        """
+        import os
+
+        # Check if we have a valid cached key
+        if self._api_key and self._api_key_expires:
+            if time.time() < self._api_key_expires - 60:  # 1 min buffer
+                return self._api_key
+
+        # Check for API key in environment variable
+        env_api_key = os.environ.get("BEAMCORE_API_KEY")
+        if env_api_key and env_api_key.startswith("b1m_"):
+            self._api_key = env_api_key
+            self._api_key_expires = time.time() + 86400 * 365  # Never expires
+            logger.info(f"Using BEAMCORE_API_KEY from environment for {self.orchestrator_hotkey[:16]}...")
+            return self._api_key
+
+        if not self.signer:
+            logger.error("Cannot get API key: no signer configured and BEAMCORE_API_KEY not set")
+            return None
+
+        client = await self._get_client()
+
+        try:
+            # Step 1: Request challenge
+            challenge_resp = await client.post(
+                f"{self.base_url}/auth/challenge",
+                json={
+                    "hotkey": self.orchestrator_hotkey,
+                    "role": "orchestrator",
+                },
+            )
+
+            if challenge_resp.status_code != 200:
+                logger.error(f"Failed to get auth challenge: {challenge_resp.status_code}")
+                return None
+
+            challenge_data = challenge_resp.json()
+            challenge_id = challenge_data["challenge_id"]
+            message = challenge_data["message"]
+
+            # Step 2: Sign the challenge message
+            try:
+                sig_bytes = self.signer.sign(message.encode("utf-8"))
+                signature = "0x" + (sig_bytes.hex() if isinstance(sig_bytes, bytes) else str(sig_bytes))
+            except Exception as e:
+                logger.error(f"Failed to sign challenge: {e}")
+                return None
+
+            # Step 3: Verify signature and get API key
+            verify_resp = await client.post(
+                f"{self.base_url}/auth/verify",
+                json={
+                    "challenge_id": challenge_id,
+                    "hotkey": self.orchestrator_hotkey,
+                    "signature": signature,
+                    "key_name": "Orchestrator WebSocket Key",
+                },
+            )
+
+            if verify_resp.status_code == 409:
+                logger.error(
+                    "API key already exists for this orchestrator. "
+                    "Set BEAMCORE_API_KEY env var with your existing key, or revoke the old key first."
+                )
+                return None
+
+            if verify_resp.status_code != 200:
+                logger.error(f"Failed to verify signature: {verify_resp.status_code} - {verify_resp.text}")
+                return None
+
+            verify_data = verify_resp.json()
+
+            if not verify_data.get("success") or not verify_data.get("api_key"):
+                logger.error(f"Auth verify failed: {verify_data.get('message', 'Unknown error')}")
+                return None
+
+            self._api_key = verify_data["api_key"]
+            # Default to 24h expiry if not specified
+            self._api_key_expires = time.time() + 86400
+
+            logger.info(f"Obtained API key for orchestrator {self.orchestrator_hotkey[:16]}...")
+            logger.info(f"Save this key as BEAMCORE_API_KEY={self._api_key}")
+            return self._api_key
+
+        except Exception as e:
+            logger.error(f"Failed to get API key: {e}")
+            return None
 
     async def start_polling(
         self,
@@ -462,10 +563,17 @@ class SubnetCoreClient:
 
     async def _connect_websocket(self):
         """Connect to WebSocket endpoint."""
+        # Get API key for authentication (required by buffer service)
+        api_key = await self._ensure_api_key()
+        if not api_key:
+            logger.error("Failed to obtain API key for WebSocket connection")
+            raise ConnectionError("Cannot connect without API key")
+
         signature, timestamp = self._sign_ws_auth()
         url = self._get_ws_url()
 
         headers = {
+            "x-api-key": api_key,
             "x-signature": signature,
             "x-timestamp": timestamp,
         }
@@ -979,7 +1087,7 @@ class SubnetCoreClient:
         else:
             signature = "unsigned"
 
-        return {
+        headers = {
             "X-Orchestrator-Hotkey": self.orchestrator_hotkey,
             "X-Orchestrator-Uid": str(self.orchestrator_uid),
             "X-Orchestrator-Timestamp": timestamp,
@@ -987,6 +1095,12 @@ class SubnetCoreClient:
             "X-Orchestrator-Signature": signature,
             "X-Orchestrator-Action": action,
         }
+
+        # Include API key if available (preferred auth method)
+        if self._api_key:
+            headers["X-Api-Key"] = self._api_key
+
+        return headers
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client with auth headers injected per-request."""
@@ -1001,6 +1115,12 @@ class SubnetCoreClient:
 
     async def _inject_auth_headers(self, request: httpx.Request):
         """Inject fresh auth headers into every outgoing request."""
+        # Skip API key fetch for auth endpoints (they're public)
+        if "/auth/challenge" not in str(request.url) and "/auth/verify" not in str(request.url):
+            # Ensure we have an API key for protected endpoints
+            if not self._api_key:
+                await self._ensure_api_key()
+
         headers = self._auth_headers()
         for key, value in headers.items():
             request.headers[key] = value
