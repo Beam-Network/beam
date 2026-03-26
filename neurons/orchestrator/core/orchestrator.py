@@ -1852,8 +1852,8 @@ class Orchestrator:
             from beam.orchestrator import OrchestratorManager
             self.orch_manager = OrchestratorManager()
             logger.info("Orchestrator manager initialized (in-memory mode)")
-        except ImportError as e:
-            logger.warning(f"Could not import OrchestratorManager: {e}")
+        except ImportError:
+            # OrchestratorManager is optional - not needed for normal operation
             self.orch_manager = None
         except Exception as e:
             logger.error(f"Failed to initialize orchestrator manager: {e}")
