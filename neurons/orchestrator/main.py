@@ -313,8 +313,8 @@ async def _connect_and_register_ws(settings, wallet, get_worker_count, get_balan
 _core_api_heartbeat_task: Optional[asyncio.Task] = None
 
 
-async def _register_with_core_api(settings, hotkey: str) -> bool:
-    """DEPRECATED: Register this orchestrator with the Core API via HTTP."""
+async def _register_with_core_api(settings, hotkey: str, uid: int = None, api_key: str = None) -> bool:
+    """Register this orchestrator with BeamCore to get a slot."""
     url = f"{settings.subnet_core_url}/orchestrators/register"
     local_ip = settings.external_ip or _get_local_ip()
     orch_url = f"http://{local_ip}:{settings.api_port}"
@@ -326,15 +326,30 @@ async def _register_with_core_api(settings, hotkey: str) -> bool:
         "port": settings.api_port,
         "region": settings.region,
         "max_workers": settings.max_workers,
-        "uid": None,
+        "uid": uid,
         "fee_percentage": settings.fee_percentage,
         "signature": "local",
     }
 
-    logging.getLogger(__name__).info(
-        f"[DEPRECATED] HTTP registration - switching to WebSocket"
-    )
-    return False  # Return False to trigger WebSocket path
+    headers = {}
+    if api_key:
+        headers["X-Api-Key"] = api_key
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                logging.getLogger(__name__).info(f"Registered with BeamCore: {data}")
+                return True
+            else:
+                logging.getLogger(__name__).warning(
+                    f"Registration failed: {resp.status_code} - {resp.text[:200]}"
+                )
+                return False
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Registration error: {e}")
+        return False
 
 
 # Configure logging - both console and file
@@ -481,10 +496,21 @@ async def lifespan(app: FastAPI):
         """Get UID from metagraph detection."""
         return orchestrator.our_uid
 
-    # NOTE: WebSocket connection is now handled by SubnetCoreClient
-    # The duplicate _connect_and_register_ws is no longer needed
-    # _core_api_ws_task = asyncio.create_task(...)
-    logger.info("WebSocket registration handled by SubnetCoreClient")
+    # Register with BeamCore to get a slot
+    api_key = None
+    if orchestrator.subnet_core_client:
+        api_key = orchestrator.subnet_core_client._api_key
+        logger.info(f"Got API key for registration: {api_key[:20] if api_key else 'None'}...")
+    else:
+        logger.warning("No subnet_core_client available for registration")
+    registered = await _register_with_core_api(settings, orchestrator.hotkey, orchestrator.our_uid, api_key)
+    if registered:
+        logger.info("Successfully registered with BeamCore - slot assigned")
+    else:
+        logger.warning("Failed to register with BeamCore - may not have a slot")
+
+    # NOTE: WebSocket connection is handled by SubnetCoreClient
+    logger.info("WebSocket connection handled by SubnetCoreClient")
 
     yield
 
