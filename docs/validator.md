@@ -152,7 +152,7 @@ You need a Bittensor wallet with:
 
 ```bash
 # Install bittensor CLI
-pip install bittensor
+pip install bittensor-cli
 
 # Create a new wallet (if you don't have one)
 btcli wallet new_coldkey --wallet.name validator

@@ -151,7 +151,7 @@ You need a Bittensor wallet with:
 
 ```bash
 # Install bittensor CLI
-pip install bittensor
+pip install bittensor-cli
 
 # Create wallet
 btcli wallet new_coldkey --wallet.name orchestrator
