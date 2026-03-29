@@ -513,6 +513,7 @@ class WorkerManager:
                     existing.success_rate = w.get("success_rate", existing.success_rate)
                     existing.total_tasks = w.get("total_tasks", existing.total_tasks)
                     existing.bytes_relayed_total = w.get("bytes_relayed_total", existing.bytes_relayed_total)
+                    existing.global_pending_tasks = w.get("pending_tasks", 0)  # Global task count from BeamCore
                     existing.last_seen = datetime.utcnow()
                     if existing.status == WorkerStatus.OFFLINE:
                         existing.status = WorkerStatus.ACTIVE
@@ -530,6 +531,7 @@ class WorkerManager:
                         success_rate=w.get("success_rate", 1.0),
                         total_tasks=w.get("total_tasks", 0),
                         bytes_relayed_total=w.get("bytes_relayed_total", 0),
+                        global_pending_tasks=w.get("pending_tasks", 0),  # Global task count from BeamCore
                     )
                     self.workers[worker_id] = worker
                     # No hotkey/region indexing since anonymous

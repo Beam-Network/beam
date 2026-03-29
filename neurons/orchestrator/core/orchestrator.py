@@ -151,7 +151,8 @@ class Worker:
     total_tasks: int = 0
     successful_tasks: int = 0
     failed_tasks: int = 0
-    active_tasks: int = 0
+    active_tasks: int = 0  # Local: tasks this orchestrator assigned
+    global_pending_tasks: int = 0  # Global: tasks across ALL orchestrators (from BeamCore)
     max_concurrent_tasks: int = 10
 
     # Bytes relayed
@@ -176,10 +177,13 @@ class Worker:
 
     @property
     def load_factor(self) -> float:
-        """Current load as fraction of capacity."""
+        """Current load as fraction of capacity, using max of local and global counts."""
         if self.max_concurrent_tasks == 0:
             return 1.0
-        return self.active_tasks / self.max_concurrent_tasks
+        # Use max of local active_tasks and global pending_tasks from BeamCore
+        # This ensures we see tasks assigned by OTHER orchestrators too
+        effective_tasks = max(self.active_tasks, self.global_pending_tasks)
+        return effective_tasks / self.max_concurrent_tasks
 
     def update_bandwidth_ema(self, bandwidth: float, alpha: float = 0.3) -> None:
         """Update bandwidth EMA with new measurement."""
