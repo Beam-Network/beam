@@ -1100,6 +1100,7 @@ class SubnetCoreClient:
             signature = "unsigned"
 
         headers = {
+            "X-Hotkey": self.orchestrator_hotkey,  # Required for rate limiting
             "X-Orchestrator-Hotkey": self.orchestrator_hotkey,
             "X-Orchestrator-Uid": str(self.orchestrator_uid),
             "X-Orchestrator-Timestamp": timestamp,
