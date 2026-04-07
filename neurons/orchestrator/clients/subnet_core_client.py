@@ -1429,6 +1429,81 @@ class SubnetCoreClient:
             logger.error(f"Error getting epoch payments: {e}")
             raise
 
+    # =========================================================================
+    # ALPHA Payment - Transfer Validation & Recording
+    # =========================================================================
+
+    async def validate_transfer_for_payment(self, task_id: str) -> Dict[str, Any]:
+        """
+        Validate that a transfer is eligible for ALPHA payment.
+
+        GET /pob/{task_id}/validate-transfer
+
+        Returns:
+            {"valid": true, "transfer_id": "xfer-xxx"} if eligible
+            {"valid": false, "error": "..."} if not eligible
+
+        Rejection rules:
+        - Transfer status is 'cancelled' or 'failed'
+        - Transfer created_at > 60 minutes ago (expired)
+        """
+        client = await self._get_client()
+
+        try:
+            response = await client.get(
+                f"{self.base_url}/pob/{task_id}/validate-transfer",
+            )
+            response.raise_for_status()
+            return response.json()
+
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"HTTP error validating transfer for task {task_id[:16]}...: {e.response.status_code}")
+            return {"valid": False, "error": f"HTTP {e.response.status_code}"}
+        except Exception as e:
+            logger.warning(f"Error validating transfer for task {task_id[:16]}...: {e}")
+            return {"valid": False, "error": str(e)}
+
+    async def record_pob_payment(
+        self,
+        task_id: str,
+        tx_hash: str,
+        amount_rao: int,
+    ) -> Dict[str, Any]:
+        """
+        Record ALPHA payment for a PoB after successful on-chain transfer.
+
+        POST /pob/{task_id}/payment
+
+        Args:
+            task_id: The task ID linked to the PoB
+            tx_hash: On-chain transaction hash (extrinsic_hash:block_hash format)
+            amount_rao: Amount paid in RAO (1 ALPHA = 1e9 RAO)
+
+        Returns:
+            Response dict with status, task_id, payment_status, message
+        """
+        client = await self._get_client()
+
+        try:
+            response = await client.post(
+                f"{self.base_url}/pob/{task_id}/payment",
+                json={
+                    "tx_hash": tx_hash,
+                    "amount_rao": amount_rao,
+                },
+            )
+            response.raise_for_status()
+            result = response.json()
+            logger.info(f"Recorded ALPHA payment for task {task_id[:16]}...: tx={tx_hash[:24]}...")
+            return result
+
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error recording PoB payment: {e.response.status_code} - {e.response.text}")
+            raise
+        except Exception as e:
+            logger.error(f"Error recording PoB payment: {e}")
+            raise
+
     async def backfill_unpaid_tasks(self, max_tasks: int = 100) -> Dict[str, Any]:
         """
         Backfill WorkerPayment records for acknowledged tasks that never got payments.

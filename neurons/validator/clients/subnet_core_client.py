@@ -226,10 +226,7 @@ class SubnetCoreClient:
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
         if self._client is None:
-            self._client = httpx.AsyncClient(
-                timeout=self.timeout,
-                follow_redirects=True,  # Handle any network-level redirects
-            )
+            self._client = httpx.AsyncClient(timeout=self.timeout)
         return self._client
 
     async def _request(
@@ -759,6 +756,58 @@ class SubnetCoreClient:
     # =========================================================================
     # Payment Verification
     # =========================================================================
+
+    async def get_paid_proofs_for_pop_verification(
+        self,
+        epoch: Optional[int] = None,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """
+        Get paid PoB proofs with data needed for independent PoP verification.
+
+        Returns proofs that have payment_status='paid' along with their
+        tx_hash, pop_verified flag, transfer_id, and worker_coldkey.
+
+        Validators can use this to independently verify ALPHA payments on-chain
+        using AlphaPaymentVerifier from chain/tx_verifier.py.
+
+        Args:
+            epoch: Filter by epoch (optional)
+            limit: Max proofs to return
+
+        Returns:
+            Dict with count and proofs list containing:
+            - task_id: PoB task ID
+            - tx_hash: On-chain transaction hash (extrinsic_hash:block_hash)
+            - payment_status: Should be 'paid'
+            - payment_amount: Amount in RAO
+            - pop_verified: BeamCore's verification result (True/False/None)
+            - pop_error: Error message if BeamCore verification failed
+            - transfer_id: For memo verification
+            - worker_hotkey: Worker's hotkey
+            - worker_coldkey: Worker's coldkey (for recipient verification)
+            - orchestrator_hotkey: Orchestrator who made payment
+        """
+        params = {"limit": limit}
+        if epoch is not None:
+            params["epoch"] = epoch
+
+        try:
+            response = await self._request(
+                "GET",
+                "/pob/paid",
+                action="get_paid_proofs",
+                params=params,
+            )
+            response.raise_for_status()
+            return response.json()
+
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error fetching paid proofs: {e.response.status_code}")
+            return {"proofs": [], "count": 0}
+        except Exception as e:
+            logger.error(f"Error fetching paid proofs: {e}")
+            return {"proofs": [], "count": 0}
 
     async def get_verified_proofs(
         self,

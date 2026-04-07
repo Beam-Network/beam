@@ -107,6 +107,9 @@ class RewardManager:
         db,
         subnet_core_client,
         fee_percentage: float = 12.0,
+        use_alpha: bool = False,
+        netuid: int = 105,
+        alpha_per_chunk: float = 1.0,
     ) -> Optional[float]:
         """
         Calculate, transfer, and record immediate payment for a completed task.
@@ -126,6 +129,24 @@ class RewardManager:
                 f"DEDUP: task {proof.task_id[:16]}... already paid — skipping"
             )
             return None
+
+        # ALPHA payment: Validate transfer before payment
+        transfer_id = None
+        if use_alpha and SUBNET_CORE_CLIENT_AVAILABLE and subnet_core_client:
+            try:
+                validation = await subnet_core_client.validate_transfer_for_payment(proof.task_id)
+                if not validation.get("valid"):
+                    error = validation.get("error", "Unknown validation error")
+                    logger.warning(
+                        f"ALPHA payment REJECTED for task {proof.task_id[:16]}...: {error}"
+                    )
+                    return None
+                transfer_id = validation.get("transfer_id")
+                logger.debug(f"Transfer validated for ALPHA payment: {transfer_id}")
+            except Exception as e:
+                logger.warning(f"Transfer validation failed for task {proof.task_id[:16]}...: {e}")
+                # Fall through to TAO payment if validation fails
+                use_alpha = False
 
         # Extract worker info from proof (always available, even when worker object is None)
         worker_id = proof.worker_id
@@ -246,7 +267,64 @@ class RewardManager:
 
         tx_hash = ""
         transfer_success = False
-        if wallet and subtensor and reward > 0:
+        alpha_amount_rao = 0
+
+        # =====================================================================
+        # ALPHA Payment Path: transfer_stake with on-chain memo
+        # =====================================================================
+        if use_alpha and transfer_id and wallet and subtensor:
+            try:
+                # Resolve worker's coldkey (required for transfer_stake)
+                worker_coldkey = await self._resolve_worker_coldkey(worker_hotkey, subtensor, netuid)
+                if not worker_coldkey:
+                    logger.error(
+                        f"Cannot pay ALPHA: failed to resolve coldkey for worker {worker_hotkey[:16]}..."
+                    )
+                    self._queue_failed_payment(worker, proof, reward)
+                    self.last_emission_check = current_emission
+                    return None
+
+                # Transfer ALPHA with on-chain memo (transfer_id embedded in remark)
+                alpha_amount_rao = int(alpha_per_chunk * 1e9)
+                tx_hash = await self.transfer_alpha_with_memo(
+                    worker_coldkey=worker_coldkey,
+                    amount_alpha=alpha_per_chunk,
+                    transfer_id=transfer_id,
+                    wallet=wallet,
+                    subtensor=subtensor,
+                    netuid=netuid,
+                )
+
+                if tx_hash:
+                    transfer_success = True
+                    # Record payment on PoB record via BeamCore
+                    if SUBNET_CORE_CLIENT_AVAILABLE and subnet_core_client:
+                        try:
+                            await subnet_core_client.record_pob_payment(
+                                task_id=proof.task_id,
+                                tx_hash=tx_hash,
+                                amount_rao=alpha_amount_rao,
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to record PoB payment: {e}")
+                    logger.info(
+                        f"ALPHA payment SUCCESS: {alpha_per_chunk} ALPHA to {worker_coldkey[:16]}... "
+                        f"transfer={transfer_id} tx={tx_hash[:24]}..."
+                    )
+                else:
+                    logger.error(
+                        f"ALPHA payment FAILED for task {proof.task_id[:16]}... — queuing for retry"
+                    )
+                    self._queue_failed_payment(worker, proof, reward)
+
+            except Exception as e:
+                logger.error(f"Error in ALPHA payment: {e}", exc_info=True)
+                self._queue_failed_payment(worker, proof, reward)
+
+        # =====================================================================
+        # TAO Payment Path: standard transfer (fallback when use_alpha=False)
+        # =====================================================================
+        elif wallet and subtensor and reward > 0:
             try:
                 # Convert reward to Balance object (required by new bittensor API)
                 amount = Balance.from_tao(reward) if Balance else reward
@@ -357,11 +435,18 @@ class RewardManager:
                     logger.warning(f"Failed to immediately acknowledge task {proof.task_id[:16]}...: {e}")
 
         status = "PAID" if transfer_success else "QUEUED FOR RETRY"
-        logger.info(
-            f"Immediate payment [{status}]: Worker {worker_id[:8]} ({worker_hotkey[:12]}...) "
-            f"earned {reward:.9f} TAO for {proof.bytes_relayed:,} bytes "
-            f"(quality={quality_multiplier:.2f})"
-        )
+        if use_alpha and transfer_success:
+            logger.info(
+                f"Immediate payment [{status}]: Worker {worker_id[:8]} ({worker_hotkey[:12]}...) "
+                f"earned {alpha_per_chunk} ALPHA for {proof.bytes_relayed:,} bytes "
+                f"(transfer={transfer_id})"
+            )
+        else:
+            logger.info(
+                f"Immediate payment [{status}]: Worker {worker_id[:8]} ({worker_hotkey[:12]}...) "
+                f"earned {reward:.9f} TAO for {proof.bytes_relayed:,} bytes "
+                f"(quality={quality_multiplier:.2f})"
+            )
 
         return reward if transfer_success else None
 
@@ -612,6 +697,140 @@ class RewardManager:
                 f"Retry queue: {len(completed)} paid, {len(expired)} expired, "
                 f"{len(self._payment_retry_queue)} remaining"
             )
+
+    # =========================================================================
+    # ALPHA Token Transfer with On-Chain Memo
+    # =========================================================================
+
+    async def transfer_alpha_with_memo(
+        self,
+        worker_coldkey: str,
+        amount_alpha: float,
+        transfer_id: str,
+        wallet,
+        subtensor,
+        netuid: int,
+    ) -> Optional[str]:
+        """
+        Transfer ALPHA tokens to a worker with on-chain memo via utility.batch_all.
+
+        Batches atomically:
+        1. system.remarkWithEvent(transfer_id) - on-chain memo for validator verification
+        2. SubtensorModule.transfer_stake(...) - actual ALPHA transfer
+
+        Args:
+            worker_coldkey: Destination coldkey address (worker's coldkey)
+            amount_alpha: Amount of ALPHA to transfer (e.g., 1.0 for 1 ALPHA)
+            transfer_id: Transfer ID to embed as on-chain memo (e.g., "xfer-abc123")
+            wallet: Bittensor wallet with coldkey for signing
+            subtensor: Subtensor connection
+            netuid: Network UID (105 for mainnet, 304 for testnet)
+
+        Returns:
+            Transaction hash in "extrinsic_hash:block_hash" format, or None if failed
+        """
+        if not wallet or not subtensor:
+            logger.warning("Cannot transfer ALPHA: wallet or subtensor not available")
+            return None
+
+        # Convert to RAO (1 ALPHA = 1e9 RAO)
+        amount_rao = int(amount_alpha * 1e9)
+
+        # Minimum transfer is 500,000 RAO (0.0005 TAO equivalent)
+        MIN_TRANSFER_RAO = 500_000
+        if amount_rao < MIN_TRANSFER_RAO:
+            logger.debug(f"ALPHA amount {amount_rao} RAO topped up to minimum {MIN_TRANSFER_RAO} RAO")
+            amount_rao = MIN_TRANSFER_RAO
+
+        try:
+            # Access the underlying substrate interface
+            substrate = subtensor.substrate
+
+            # Compose remark call with transfer_id as memo
+            remark_call = substrate.compose_call(
+                call_module='System',
+                call_function='remark_with_event',
+                call_params={'remark': transfer_id.encode()}
+            )
+
+            # Compose transfer_stake call
+            # Note: Parameter names may vary by SDK version
+            transfer_call = substrate.compose_call(
+                call_module='SubtensorModule',
+                call_function='transfer_stake',
+                call_params={
+                    'destination_coldkey': worker_coldkey,
+                    'hotkey': wallet.hotkey.ss58_address,
+                    'origin_netuid': netuid,
+                    'destination_netuid': netuid,
+                    'alpha_amount': amount_rao,
+                }
+            )
+
+            # Batch both calls atomically - if either fails, both are reverted
+            batch_call = substrate.compose_call(
+                call_module='Utility',
+                call_function='batch_all',
+                call_params={'calls': [remark_call, transfer_call]}
+            )
+
+            # Sign with coldkey (required for transfer_stake)
+            extrinsic = substrate.create_signed_extrinsic(
+                call=batch_call,
+                keypair=wallet.coldkey,
+            )
+
+            # Submit and wait for inclusion
+            receipt = substrate.submit_extrinsic(
+                extrinsic,
+                wait_for_inclusion=True,
+                wait_for_finalization=False,
+            )
+
+            if receipt.is_success:
+                tx_hash = f"{receipt.extrinsic_hash}:{receipt.block_hash}"
+                logger.info(
+                    f"ALPHA transfer SUCCESS: {amount_alpha} ALPHA to {worker_coldkey[:16]}... "
+                    f"memo={transfer_id} tx={tx_hash[:32]}..."
+                )
+                return tx_hash
+            else:
+                error_msg = getattr(receipt, 'error_message', 'Unknown error')
+                logger.error(f"ALPHA transfer FAILED: {error_msg}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Error transferring ALPHA: {e}", exc_info=True)
+            return None
+
+    async def _resolve_worker_coldkey(
+        self,
+        worker_hotkey: str,
+        subtensor,
+        netuid: int,
+    ) -> Optional[str]:
+        """
+        Resolve a worker's hotkey to their coldkey via metagraph.
+
+        Args:
+            worker_hotkey: Worker's hotkey address
+            subtensor: Subtensor connection
+            netuid: Network UID
+
+        Returns:
+            Worker's coldkey address, or None if not found
+        """
+        try:
+            metagraph = subtensor.metagraph(netuid)
+            for neuron in metagraph.neurons:
+                if neuron.hotkey == worker_hotkey:
+                    logger.debug(f"Resolved coldkey for {worker_hotkey[:16]}...: {neuron.coldkey[:16]}...")
+                    return neuron.coldkey
+            logger.warning(f"Worker hotkey {worker_hotkey[:16]}... not found in metagraph")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to resolve coldkey for {worker_hotkey[:16]}...: {e}")
+            return None
 
     def _calculate_quality_multiplier(self, worker) -> float:
         """

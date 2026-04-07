@@ -331,7 +331,9 @@ async def _register_with_core_api(settings, hotkey: str, uid: int = None, api_ke
         "signature": "local",
     }
 
-    headers = {}
+    headers = {
+        "X-Hotkey": hotkey,  # Required for rate limiting
+    }
     if api_key:
         headers["X-Api-Key"] = api_key
 
