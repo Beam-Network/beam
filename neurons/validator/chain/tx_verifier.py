@@ -590,7 +590,9 @@ class AlphaPaymentVerifier:
         for proof in proofs:
             task_id = proof.get("task_id")
             tx_hash = proof.get("tx_hash")
-            transfer_id = proof.get("transfer_id")
+            # Use expected_memo (format: {transfer_id}:{task_id}) for verification
+            # This ensures each payment is unique per worker/task
+            expected_memo = proof.get("expected_memo")
             worker_coldkey = proof.get("worker_coldkey")
             beamcore_verified = proof.get("pop_verified")
 
@@ -606,12 +608,12 @@ class AlphaPaymentVerifier:
                 }
                 continue
 
-            if not transfer_id:
+            if not expected_memo:
                 results[task_id] = {
                     "verified": False,
                     "beamcore_verified": beamcore_verified,
                     "match": beamcore_verified is False or beamcore_verified is None,
-                    "error": "Missing transfer_id for memo verification",
+                    "error": "Missing expected_memo for memo verification",
                     "amount_alpha": None,
                     "memo": None,
                 }
@@ -631,7 +633,7 @@ class AlphaPaymentVerifier:
             # Verify on-chain
             result = self.verify_alpha_payment(
                 tx_hash=tx_hash,
-                expected_transfer_id=transfer_id,
+                expected_transfer_id=expected_memo,
                 expected_worker_coldkey=worker_coldkey,
                 min_amount_alpha=min_amount_alpha,
             )

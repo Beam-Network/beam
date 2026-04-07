@@ -284,12 +284,15 @@ class RewardManager:
                     self.last_emission_check = current_emission
                     return None
 
-                # Transfer ALPHA with on-chain memo (transfer_id embedded in remark)
+                # Transfer ALPHA with on-chain memo
+                # Memo format: {transfer_id}:{task_id} to ensure uniqueness per worker/task
+                # This prevents reusing the same memo for multiple payments
+                payment_memo = f"{transfer_id}:{proof.task_id}"
                 alpha_amount_rao = int(alpha_per_chunk * 1e9)
                 tx_hash = await self.transfer_alpha_with_memo(
                     worker_coldkey=worker_coldkey,
                     amount_alpha=alpha_per_chunk,
-                    transfer_id=transfer_id,
+                    transfer_id=payment_memo,
                     wallet=wallet,
                     subtensor=subtensor,
                     netuid=netuid,
