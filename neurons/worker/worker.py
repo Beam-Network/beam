@@ -18,7 +18,7 @@ Tech Stack:
     - httpx >= 0.24.0
 
 Installation:
-    pip install bittensor httpx
+    pip install bittensor httpx websockets
 
 Usage:
     # Using default wallet (~/.bittensor/wallets/default/hotkeys/default):
@@ -45,6 +45,13 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 try:
+    import websockets
+    from websockets.exceptions import ConnectionClosed, InvalidStatusCode
+    WEBSOCKETS_AVAILABLE = True
+except ImportError:
+    WEBSOCKETS_AVAILABLE = False
+
+try:
     import bittensor as bt
     BITTENSOR_AVAILABLE = True
 except ImportError:
@@ -61,9 +68,19 @@ except ImportError:
 MAINNET_URL = "https://beamcore.b1m.ai"
 TESTNET_URL = "https://beamcore-dev.b1m.ai"
 
+# Connection mode: "websocket", "http", or "auto" (try WS first, fallback to HTTP)
+CONNECTION_MODE = os.environ.get("CONNECTION_MODE", "auto")
+
 # Intervals
 HEARTBEAT_INTERVAL = 30  # seconds
 TASK_POLL_INTERVAL = 5   # seconds
+
+# WebSocket settings
+WS_RECONNECT_MIN_DELAY = 12.0   # must exceed server's 10s cooldown
+WS_RECONNECT_MAX_DELAY = 60.0
+WS_RECONNECT_MULTIPLIER = 2.0
+WS_MAX_RECONNECT_ATTEMPTS = 10
+WS_HEARTBEAT_INTERVAL = 25      # seconds
 
 # Transfer settings
 MAX_CONCURRENT_TASKS = 8
@@ -88,6 +105,10 @@ class WorkerState:
     bytes_relayed: int = 0
     running: bool = True
     http_client: Optional[httpx.AsyncClient] = None
+    ws_connected: bool = False
+    ws_reconnect_attempts: int = 0
+    use_websocket: bool = True
+    pending_probe_id: Optional[str] = None
 
 
 # =============================================================================
@@ -658,6 +679,287 @@ async def handle_task(state: WorkerState, task: dict) -> bool:
 
 
 # =============================================================================
+# WebSocket Communication
+# =============================================================================
+
+
+def get_ws_url(worker_id: str, api_key: str, api_url: str) -> str:
+    """Convert API URL to WebSocket URL for worker connection."""
+    base = api_url.rstrip("/")
+    if base.startswith("https://"):
+        ws_base = "wss://" + base[8:]
+    elif base.startswith("http://"):
+        ws_base = "ws://" + base[7:]
+    else:
+        ws_base = "ws://" + base
+    url = f"{ws_base}/workers/ws/{worker_id}"
+    if api_key:
+        url = f"{url}?api_key={api_key}"
+    return url
+
+
+async def ws_send_heartbeat(websocket, state: WorkerState) -> bool:
+    """Send heartbeat message over WebSocket."""
+    try:
+        msg = {
+            "type": "heartbeat",
+            "worker_id": state.worker_id,
+            "hotkey": state.wallet.hotkey.ss58_address,
+            "bandwidth_mbps": 100.0,
+            "tasks_active": state.active_tasks,
+            "bytes_relayed": state.bytes_relayed,
+        }
+        if state.pending_probe_id:
+            msg["echo_probe_id"] = state.pending_probe_id
+            state.pending_probe_id = None
+        await websocket.send(json.dumps(msg))
+        return True
+    except Exception as e:
+        print(f"[Worker] WS heartbeat error: {e}")
+        return False
+
+
+async def ws_send_task_accept(websocket, state: WorkerState, task_id: str) -> bool:
+    """Send task acceptance over WebSocket."""
+    try:
+        msg = {
+            "type": "task_accept",
+            "offer_id": task_id,
+            "task_id": task_id,
+            "worker_id": state.worker_id,
+        }
+        await websocket.send(json.dumps(msg))
+        return True
+    except Exception as e:
+        print(f"[Worker] WS task_accept error: {e}")
+        return False
+
+
+async def ws_send_task_result(
+    websocket,
+    state: WorkerState,
+    task_id: str,
+    success: bool,
+    bytes_transferred: int,
+    bandwidth_mbps: float,
+    duration_ms: float,
+    chunk_hash: str = "",
+    error: str = None,
+) -> bool:
+    """Send task result over WebSocket."""
+    try:
+        msg = {
+            "type": "task_result",
+            "task_id": task_id,
+            "worker_id": state.worker_id,
+            "success": success,
+            "bytes_transferred": bytes_transferred,
+            "bandwidth_mbps": bandwidth_mbps,
+            "latency_ms": duration_ms,
+            "duration_ms": int(duration_ms),
+        }
+        if chunk_hash:
+            msg["chunk_hash"] = chunk_hash
+        if error:
+            msg["error"] = error
+        await websocket.send(json.dumps(msg))
+        return True
+    except Exception as e:
+        print(f"[Worker] WS task_result error: {e}")
+        return False
+
+
+async def handle_ws_task(state: WorkerState, websocket, task: dict) -> bool:
+    """Handle a task received via WebSocket push."""
+    task_id = task.get("task_id") or task.get("offer_id")
+    chunk_size = task.get("chunk_size", 0)
+    deadline_us = task.get("deadline_us", 0)
+    execution_context = task.get("execution_context", {})
+
+    print(f"[Worker] [WS] Task: {task_id[:16] if task_id else 'unknown'}...")
+
+    gateway_url = execution_context.get("gateway_url")
+    destination_url = execution_context.get("destination_url")
+
+    if not gateway_url or not destination_url:
+        print(f"[Worker] [WS] Skipping task: missing gateway_url or destination_url")
+        return False
+
+    if deadline_us > 0:
+        now_us = time.time() * 1_000_000
+        remaining_sec = (deadline_us - now_us) / 1_000_000
+        if remaining_sec < 5:
+            print(f"[Worker] [WS] Skipping task: deadline too close ({remaining_sec:.1f}s)")
+            return False
+
+    accepted = await ws_send_task_accept(websocket, state, task_id)
+    if not accepted:
+        print(f"[Worker] [WS] Failed to send task accept")
+        return False
+
+    state.active_tasks += 1
+    start_time = time.time()
+    success = False
+    bytes_transferred = 0
+    error_msg = None
+    chunk_hash = ""
+
+    try:
+        async with task_semaphore:
+            if deadline_us > 0:
+                now_us = time.time() * 1_000_000
+                remaining_sec = (deadline_us - now_us) / 1_000_000
+                if remaining_sec < 2:
+                    error_msg = f"Deadline expired while waiting ({remaining_sec:.1f}s)"
+                    print(f"[Worker] [WS] {error_msg}")
+                else:
+                    bytes_transferred, success, error_msg, chunk_hash = await execute_transfer(
+                        state, task_id, execution_context, task, deadline_us
+                    )
+            else:
+                bytes_transferred, success, error_msg, chunk_hash = await execute_transfer(
+                    state, task_id, execution_context, task, deadline_us
+                )
+    except Exception as e:
+        error_msg = str(e)
+        print(f"[Worker] [WS] Task error: {e}")
+
+    duration_ms = (time.time() - start_time) * 1000
+    duration_sec = duration_ms / 1000
+    bandwidth_mbps = (bytes_transferred * 8 / 1_000_000) / duration_sec if duration_sec > 0 else 0
+
+    await ws_send_task_result(
+        websocket, state, task_id, success, bytes_transferred,
+        round(bandwidth_mbps, 2), round(duration_ms, 1),
+        chunk_hash=chunk_hash, error=error_msg,
+    )
+
+    if success:
+        state.bytes_relayed += bytes_transferred
+
+    state.active_tasks -= 1
+
+    status = "OK" if success else f"FAIL: {error_msg}"
+    print(f"[Worker] [WS] Task {task_id[:16]}: {status} | {bytes_transferred} bytes | {bandwidth_mbps:.1f} Mbps")
+
+    return success
+
+
+async def websocket_loop(state: WorkerState):
+    """WebSocket communication loop with automatic reconnection."""
+    if not WEBSOCKETS_AVAILABLE:
+        print(f"[Worker] websockets library not available, using HTTP polling")
+        state.use_websocket = False
+        return
+
+    ws_url = get_ws_url(state.worker_id, state.api_key, state.api_url)
+    print(f"[Worker] Connecting to WebSocket: {ws_url.split('?')[0]}")
+    reconnect_delay = WS_RECONNECT_MIN_DELAY
+
+    while state.running and state.use_websocket:
+        try:
+            async with websockets.connect(
+                ws_url,
+                ping_interval=WS_HEARTBEAT_INTERVAL,
+                ping_timeout=10,
+                close_timeout=5,
+            ) as websocket:
+                state.ws_connected = True
+                state.ws_reconnect_attempts = 0
+                reconnect_delay = WS_RECONNECT_MIN_DELAY
+                print(f"[Worker] [WS] Connected!")
+
+                last_heartbeat = time.time()
+
+                while state.running:
+                    try:
+                        try:
+                            msg_str = await asyncio.wait_for(
+                                websocket.recv(),
+                                timeout=WS_HEARTBEAT_INTERVAL,
+                            )
+                            message = json.loads(msg_str)
+                            msg_type = message.get("type")
+
+                            if msg_type == "connected":
+                                print(f"[Worker] [WS] Server confirmed connection")
+
+                            elif msg_type == "heartbeat_ack":
+                                probe_id = message.get("probe_id")
+                                if probe_id:
+                                    state.pending_probe_id = probe_id
+
+                                bw_challenge = message.get("bw_challenge")
+                                if bw_challenge:
+                                    challenge_id = bw_challenge.get("challenge_id")
+                                    if challenge_id:
+                                        bw_response = {
+                                            "type": "bw_challenge_response",
+                                            "challenge_id": challenge_id,
+                                            "worker_id": state.worker_id,
+                                        }
+                                        await websocket.send(json.dumps(bw_response))
+
+                            elif msg_type == "task_offer":
+                                asyncio.create_task(handle_ws_task(state, websocket, message))
+
+                            elif msg_type == "task_accept_ack":
+                                if not message.get("accepted", True):
+                                    print(f"[Worker] [WS] Task accept rejected: {message.get('reason', 'unknown')}")
+
+                            elif msg_type == "task_result_ack":
+                                pass
+
+                            elif msg_type == "error":
+                                print(f"[Worker] [WS] Server error: {message.get('message', 'unknown')}")
+
+                        except asyncio.TimeoutError:
+                            pass
+
+                        now = time.time()
+                        if now - last_heartbeat >= WS_HEARTBEAT_INTERVAL:
+                            await ws_send_heartbeat(websocket, state)
+                            last_heartbeat = now
+
+                    except ConnectionClosed as e:
+                        print(f"[Worker] [WS] Connection closed: {e.code} {e.reason}")
+                        break
+
+        except InvalidStatusCode as e:
+            print(f"[Worker] [WS] Connection rejected: HTTP {e.status_code}")
+            if e.status_code == 4001:
+                print(f"[Worker] [WS] Server has WebSocket disabled, falling back to HTTP polling")
+                state.use_websocket = False
+                return
+
+        except ConnectionRefusedError:
+            print(f"[Worker] [WS] Connection refused")
+
+        except Exception as e:
+            print(f"[Worker] [WS] Connection error: {type(e).__name__}: {e}")
+
+        state.ws_connected = False
+        state.ws_reconnect_attempts += 1
+
+        if state.ws_reconnect_attempts >= WS_MAX_RECONNECT_ATTEMPTS:
+            print(f"[Worker] [WS] Max reconnect attempts reached, falling back to HTTP polling")
+            state.use_websocket = False
+            return
+
+        if state.running and not shutdown_event.is_set():
+            print(f"[Worker] [WS] Reconnecting in {reconnect_delay:.1f}s (attempt {state.ws_reconnect_attempts}/{WS_MAX_RECONNECT_ATTEMPTS})...")
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=reconnect_delay)
+                break
+            except asyncio.TimeoutError:
+                pass
+            reconnect_delay = min(reconnect_delay * WS_RECONNECT_MULTIPLIER, WS_RECONNECT_MAX_DELAY)
+
+    state.ws_connected = False
+    print(f"[Worker] [WS] Loop stopped")
+
+
+# =============================================================================
 # Main Polling Loop
 # =============================================================================
 
@@ -736,9 +1038,23 @@ async def run_worker(state: WorkerState):
             state.api_key = result.get("api_key")
             print(f"[Worker] Registered: {state.worker_id}")
 
-        # Start polling loop
-        print(f"[Worker] Starting HTTP polling (interval: {TASK_POLL_INTERVAL}s)")
-        await polling_loop(state)
+        # Start connection loop
+        if CONNECTION_MODE == "http":
+            state.use_websocket = False
+        elif CONNECTION_MODE == "websocket":
+            state.use_websocket = WEBSOCKETS_AVAILABLE
+        else:  # "auto" — try WS first, fallback to HTTP
+            state.use_websocket = WEBSOCKETS_AVAILABLE
+
+        if state.use_websocket:
+            print(f"[Worker] Starting WebSocket connection (instant task push)")
+            await websocket_loop(state)
+            if not state.use_websocket and state.running:
+                print(f"[Worker] Falling back to HTTP polling")
+                await polling_loop(state)
+        else:
+            print(f"[Worker] Starting HTTP polling (interval: {TASK_POLL_INTERVAL}s)")
+            await polling_loop(state)
 
     except asyncio.CancelledError:
         print(f"[Worker] Cancelled")
