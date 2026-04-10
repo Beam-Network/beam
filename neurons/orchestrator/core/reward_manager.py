@@ -280,8 +280,12 @@ class RewardManager:
         # =====================================================================
         if transfer_id and wallet and subtensor:
             try:
-                # Resolve worker's coldkey (required for transfer_stake)
-                worker_coldkey = await self._resolve_worker_coldkey(worker_hotkey, subtensor, netuid)
+                # Use pre-resolved coldkey from BeamCore if available (skips metagraph lookup)
+                # This is set when the task_result is pushed via WS — workers_v2.coldkey
+                worker_coldkey = getattr(proof, "worker_coldkey", "") or ""
+                if not worker_coldkey:
+                    # Fallback: resolve from metagraph via hotkey
+                    worker_coldkey = await self._resolve_worker_coldkey(worker_hotkey, subtensor, netuid)
                 if not worker_coldkey:
                     logger.error(
                         f"Cannot pay ALPHA: failed to resolve coldkey for worker {worker_hotkey[:16]}..."

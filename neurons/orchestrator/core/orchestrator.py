@@ -310,6 +310,7 @@ class BandwidthProof:
     # Signatures
     worker_signature: str = ""
     orchestrator_signature: str = ""
+    worker_coldkey: str = ""
 
     # Metadata
     source_region: str = ""
@@ -1600,7 +1601,8 @@ class Orchestrator:
         task_id = message.get("task_id")
         worker_id = message.get("worker_id")
         worker_hotkey = message.get("worker_hotkey", "")
-        bytes_transferred = message.get("bytes_transferred", 0)
+        worker_coldkey = message.get("worker_coldkey", "")
+        bytes_transferred = message.get("bytes_relayed", 0) or message.get("bytes_transferred", 0)
         bandwidth_mbps = message.get("bandwidth_mbps", 0.0)
 
         logger.info(
@@ -1688,6 +1690,7 @@ class Orchestrator:
                     task_id=task_id,
                     worker_id=worker_id,
                     worker_hotkey=worker_hotkey,
+                    worker_coldkey=worker_coldkey,
                     start_time_us=start_time_us,
                     end_time_us=end_time_us,
                     bytes_relayed=bytes_transferred,
