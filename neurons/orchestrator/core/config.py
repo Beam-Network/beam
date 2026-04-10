@@ -241,9 +241,6 @@ class OrchestratorSettings(BaseSettings):
     # Whitelisted hotkeys that bypass metagraph check (comma-separated)
     subnet_auth_whitelist: Optional[str] = Field(default=None, env="SUBNET_AUTH_WHITELIST")
 
-    # SubnetCore trust secret (shared secret for trusted forwarding from SubnetCore)
-    subnetcore_trust_secret: str = Field(default="", env="SUBNETCORE_TRUST_SECRET")
-
     # ==========================================================================
     # Subnet Partner Program (free access for other Bittensor subnets)
     # ==========================================================================

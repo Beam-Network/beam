@@ -306,10 +306,6 @@ SUBNET_CORE_URL=https://beamcore-dev.b1m.ai
 # Mainnet (uncomment for production)
 # SUBNET_CORE_URL=https://beamcore.b1m.ai
 
-# Trust secret for SubnetCore communication (generate a strong random value)
-# python3 -c "import secrets; print(secrets.token_urlsafe(48))"
-SUBNETCORE_TRUST_SECRET=your_secret_here
-
 # =============================================================================
 # WORKER MANAGEMENT
 # =============================================================================
@@ -578,7 +574,6 @@ ERROR | Failed to connect to BeamCore
 **Solutions:**
 - Verify `SUBNET_CORE_URL` is correct
 - Check network connectivity: `curl https://beamcore-dev.b1m.ai/health`
-- Verify `SUBNETCORE_TRUST_SECRET` is set
 
 #### 4. No tasks being assigned
 
@@ -586,7 +581,6 @@ ERROR | Failed to connect to BeamCore
 - Verify BeamCore connection is working
 - Ensure orchestrator is registered and staked
 - Check logs for assignment polling errors
-- Verify `SUBNETCORE_TRUST_SECRET` is correct
 
 #### 5. Worker payments failing
 
@@ -686,7 +680,6 @@ Workers default to #1 until they choose to affiliate with another orchestrator.
 - [ ] Hotkey unencrypted for server use
 - [ ] Repository cloned and dependencies installed
 - [ ] `.env` configured correctly
-- [ ] `SUBNETCORE_TRUST_SECRET` set
 - [ ] Orchestrator started and health check passes
 - [ ] BeamCore connection working (check logs)
 - [ ] Wallet funded for worker payments
