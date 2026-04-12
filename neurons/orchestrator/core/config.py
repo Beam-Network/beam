@@ -81,7 +81,7 @@ class OrchestratorSettings(BaseSettings):
     # ALPHA Payment Settings (mandatory for worker payments)
     # ==========================================================================
     # Amount of ALPHA to pay per completed task/chunk
-    alpha_per_chunk: float = Field(default=100.0, env="ALPHA_PER_CHUNK")
+    alpha_per_chunk: float = Field(default=0.5, env="ALPHA_PER_CHUNK")
 
     # ==========================================================================
     # Worker Management

@@ -108,7 +108,7 @@ class RewardManager:
         subnet_core_client,
         fee_percentage: float = 12.0,
         netuid: int = 105,
-        alpha_per_chunk: float = 100.0,
+        alpha_per_chunk: float = 0.5,
     ) -> Optional[float]:
         """
         Calculate, transfer, and record immediate ALPHA payment for a completed task.
