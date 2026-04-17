@@ -2572,6 +2572,7 @@ class Validator:
                     all_proof_ids = [p.get("task_id", "") for p in proofs if p.get("task_id")]
                     sample_size = min(sample_size, len(all_proof_ids))
                     return random.sample(all_proof_ids, sample_size) if all_proof_ids else []
+                return []  # BeamCore responded — no proofs for this orchestrator, don't connect directly
             except Exception as e:
                 logger.warning(f"SubnetCore proof query failed, falling back: {e}")
 
