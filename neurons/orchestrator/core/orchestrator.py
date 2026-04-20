@@ -491,7 +491,7 @@ class Orchestrator:
         if self.settings.local_mode:
             logger.info("Running in LOCAL MODE - skipping Bittensor wallet/subtensor initialization")
             self.wallet = None
-            self.hotkey = "local-dev-hotkey"
+            self.hotkey = self.settings.local_orchestrator_hotkey
             self.subtensor = None
             self.metagraph = None
             self.our_uid = 0

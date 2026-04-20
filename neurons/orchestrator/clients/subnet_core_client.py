@@ -462,18 +462,19 @@ class SubnetCoreClient:
     async def start_polling(
         self,
         heartbeat_interval: float = 30.0,
-        transfer_poll_interval: float = 5.0,
+        transfer_poll_interval: float = 11.0,
         results_poll_interval: float = 5.0,
     ):
         """
         Start WebSocket connection for real-time notifications.
 
-        WebSocket replaces HTTP polling for transfers, task results, and stale tasks.
-        HTTP heartbeat is still sent periodically.
+        WebSocket replaces HTTP polling when available.
+        HTTP transfer polling is still kept as a fallback for local or
+        degraded environments where the buffer/WebSocket path is unavailable.
 
         Args:
             heartbeat_interval: Seconds between heartbeats (default 30s)
-            transfer_poll_interval: Unused (WebSocket provides real-time updates)
+            transfer_poll_interval: Seconds between HTTP fallback polls when WebSocket is unavailable
             results_poll_interval: Unused (WebSocket provides real-time updates)
         """
         if self._running:
@@ -485,12 +486,19 @@ class SubnetCoreClient:
         # Start WebSocket connection (handles transfers, results, stale tasks)
         self._ws_task = asyncio.create_task(self._ws_connection_loop())
 
+        # Start HTTP fallback transfer polling. The loop is dormant while the
+        # WebSocket is connected, and becomes active only when WS is unavailable.
+        safe_transfer_poll_interval = max(transfer_poll_interval, 11.0)
+        self._polling_tasks.append(
+            asyncio.create_task(self._transfer_poll_loop(safe_transfer_poll_interval))
+        )
+
         # Start heartbeat loop (still uses HTTP)
         self._ws_heartbeat_task = asyncio.create_task(self._heartbeat_loop(heartbeat_interval))
 
         logger.info(
             f"Started WebSocket connection to {self._get_ws_url()}, "
-            f"heartbeat={heartbeat_interval}s"
+            f"heartbeat={heartbeat_interval}s, fallback_transfer_poll={safe_transfer_poll_interval}s"
         )
 
     async def stop_polling(self):

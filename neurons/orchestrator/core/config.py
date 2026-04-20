@@ -27,6 +27,7 @@ class OrchestratorSettings(BaseSettings):
 
     # Local mode - skip Bittensor wallet/subtensor initialization for development
     local_mode: bool = Field(default=False, env="LOCAL_MODE")
+    local_orchestrator_hotkey: str = Field(default="local-dev-hotkey", env="LOCAL_ORCHESTRATOR_HOTKEY")
 
     # Add mock worker for testing (use with real wallet but no real miners)
     add_mock_worker: bool = Field(default=False, env="ADD_MOCK_WORKER")

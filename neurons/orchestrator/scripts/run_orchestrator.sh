@@ -8,12 +8,13 @@ set -e
 MODE=${1:-testnet}
 PORT=${2:-8001}
 
-# Get script directory and project root
+# Get script directory, orchestrator root, and repository root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+ORCHESTRATOR_ROOT="$(dirname "$SCRIPT_DIR")"
+REPO_ROOT="$(cd "$ORCHESTRATOR_ROOT/../.." && pwd)"
 
 # Create logs directory
-LOGS_DIR="$PROJECT_ROOT/logs"
+LOGS_DIR="$ORCHESTRATOR_ROOT/logs"
 mkdir -p "$LOGS_DIR"
 LOG_FILE="$LOGS_DIR/orchestrator_${PORT}.log"
 
@@ -27,13 +28,13 @@ if [ -n "$PIDS" ]; then
 fi
 
 # Change to orchestrator directory
-cd "$PROJECT_ROOT/neurons/orchestrator"
+cd "$ORCHESTRATOR_ROOT"
 
 # Activate virtual environment
-source "$PROJECT_ROOT/.venv/bin/activate"
+source "$REPO_ROOT/.venv/bin/activate"
 
-# Set PYTHONPATH (beam library is at src/beam/beam)
-export PYTHONPATH=".:$PROJECT_ROOT/src/beam"
+# Ensure repo packages are importable when running from the orchestrator di
+export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 # Enable verbose logging
 export LOG_LEVEL=${LOG_LEVEL:-DEBUG}
