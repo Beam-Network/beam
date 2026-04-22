@@ -6,7 +6,6 @@ Orchestrators coordinate data transfers and manage worker pools on the Beam subn
 
 - Python 3.10+
 - Bittensor wallet with registered hotkey on the subnet
-- TAO stake (see Staking Requirements below)
 
 ## Installation
 
@@ -28,12 +27,6 @@ SUBNET_CORE_URL=https://beamcore-dev.b1m.ai \
 REGISTRY_URL=https://beamcore-dev.b1m.ai \
 python main.py
 ```
-
-## Staking Requirements
-
-Orchestrators must stake TAO to participate in the subnet (minimum 2 TAO required).
-
-**Note:** Slot assignment is handled automatically during registration. No separate slot claiming step is needed.
 
 ## Configuration
 
@@ -102,8 +95,7 @@ python main.py
 ## How It Works
 
 1. **Bittensor Registration**: Register as a miner on the subnet (`btcli subnet register`)
-2. **Stake TAO**: Stake at least 2 TAO on the subnet
-3. **Start Orchestrator**: Run the orchestrator software (auto-registers with BeamCore and claims a slot)
+2. **Start Orchestrator**: Run the orchestrator software (auto-registers with BeamCore and claims a slot)
 4. **Worker Management**: Workers connect and join the orchestrator's pool
 5. **Task Assignment**: BeamCore assigns transfer chunks based on orchestrator weight
 6. **Proof Aggregation**: Orchestrator collects worker delivery proofs

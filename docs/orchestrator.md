@@ -16,6 +16,7 @@ Complete guide for setting up and running a BEAM Network orchestrator on Bittens
 10. [Troubleshooting](#troubleshooting)
 11. [Economics and Rewards](#economics-and-rewards)
 
+
 ---
 
 ## Overview
@@ -64,7 +65,7 @@ In the BEAM Network, orchestrators are the "miners" on Bittensor. Unlike traditi
 
 **Flow:**
 1. Client creates transfer via BeamCore API
-2. BeamCore assigns chunks to orchestrators by stake-weighted allocation
+2. BeamCore assigns chunks to orchestrators based on performance-based routing scores
 3. Orchestrator polls BeamCore for chunk assignments
 4. Orchestrator creates tasks and submits to BeamCore
 5. BeamCore pushes tasks to workers via WebSocket (Buffer service)
@@ -76,7 +77,7 @@ In the BEAM Network, orchestrators are the "miners" on Bittensor. Unlike traditi
 
 Orchestrators are responsible for:
 
-1. **Polling Assignments** - Fetch chunk assignments from BeamCore based on stake weight
+1. **Polling Assignments** - Fetch chunk assignments from BeamCore based on performance routing score
 2. **Task Creation** - Create tasks for assigned chunks and submit to BeamCore
 3. **Proof Aggregation** - Collect and sign Proof-of-Bandwidth (PoB) from workers
 4. **Worker Payments** - Pay workers for completed work using dTAO
@@ -182,17 +183,7 @@ btcli wallet overview --wallet.name orchestrator --subtensor.network test
 
 You should see your UID (2-151 for public orchestrators).
 
-### 4. Stake TAO
-
-Orchestrators must stake TAO to participate in the subnet:
-
-```bash
-# Add stake (minimum 2 TAO required)
-btcli stake add --wallet.name orchestrator --wallet.hotkey default \
-    --subtensor.network test --amount 10
-```
-
-### 5. Prepare Hotkey for Server Use
+### 4. Prepare Hotkey for Server Use
 
 For automated deployments, use an unencrypted hotkey:
 
@@ -341,12 +332,6 @@ REDIS_URL=redis://localhost:6379
 # =============================================================================
 METAGRAPH_SYNC_INTERVAL=300
 
-# =============================================================================
-# OPERATOR FEE (Your profit margin)
-# =============================================================================
-# Percentage of emissions you keep (0-100, default 0)
-# Rest goes to workers
-FEE_PERCENTAGE=0
 ```
 
 ### Configuration Reference
@@ -359,7 +344,6 @@ FEE_PERCENTAGE=0
 | `SUBNET_CORE_URL` | Required | BeamCore API endpoint |
 | `MAX_WORKERS` | `10000` | Max workers to accept |
 | `WORKER_TIMEOUT` | `300` | Worker heartbeat timeout (seconds) |
-| `FEE_PERCENTAGE` | `0` | Your fee (0-100%) |
 | `METAGRAPH_SYNC_INTERVAL` | `300` | Metagraph sync interval (seconds) |
 
 ### Firewall Configuration
@@ -448,29 +432,9 @@ Worker completes → Buffer Service → BeamCore → PoB recorded
 
 Workers affiliate with orchestrators based on:
 
-1. **Operator Fee** - Lower fee = more worker earnings
-2. **Uptime** - Reliable orchestrators get more tasks assigned
-3. **Task Volume** - Higher stake = more chunk assignments from BeamCore
-4. **Geographic Coverage** - Workers in diverse regions improve performance
-
-### Setting Your Operator Fee
-
-```bash
-# Update fee via API
-curl -X PATCH https://beamcore-dev.b1m.ai/orchestrators/{your_hotkey}/fee \
-  -H "Content-Type: application/json" \
-  -H "X-Orchestrator-Hotkey: {your_hotkey}" \
-  -H "X-Orchestrator-Signature: {signature}" \
-  -d '{"fee_percentage": 10.0}'
-```
-
-**Fee strategies:**
-
-| Fee | Strategy | Use Case |
-|-----|----------|----------|
-| 0% | Maximum worker attraction | Building initial pool |
-| 5-10% | Balanced | Standard operation |
-| 15-20% | Higher profit | Established with loyal workers |
+1. **Uptime** - Reliable orchestrators get more tasks assigned
+2. **Performance** - BeamCore routes more chunks to orchestrators with higher Prism scores
+3. **Geographic Coverage** - Workers in diverse regions improve performance
 
 ### Monitoring Workers
 
@@ -579,7 +543,7 @@ ERROR | Failed to connect to BeamCore
 
 **Solutions:**
 - Verify BeamCore connection is working
-- Ensure orchestrator is registered and staked
+- Ensure orchestrator is registered on the subnet
 - Check logs for assignment polling errors
 
 #### 5. Worker payments failing
@@ -609,64 +573,35 @@ LOG_LEVEL=DEBUG python main.py
 Bittensor Emissions
         │
         ▼
-Validator sets weights based on SLA score
+Validator sets weights based on Prism performance score
         │
         ▼
 Orchestrator receives emissions
         │
-        ├─► Operator Fee (your %) → Your wallet
-        │
-        └─► Worker Pool (remainder) → Workers
+        └─► Workers (paid per completed task)
 ```
 
-### SLA Scoring
+### Performance Scoring (Prism)
 
-Validators score orchestrators on:
+BeamCore scores orchestrators using the Prism engine, which computes a routing score from real task outcomes over a 24-hour window:
 
-| Metric | Weight | Description |
-|--------|--------|-------------|
-| Uptime | 20% | 24h rolling availability |
-| Bandwidth | 35% | Throughput of your workers |
-| Latency | 25% | Response time |
-| Success Rate | 15% | Task completion rate |
-| Worker Payments | 5% | Paying workers on time |
+| Metric | Description |
+|--------|-------------|
+| Task success rate | Completed vs total tasks |
+| Bandwidth throughput | Average Mbps across workers |
+| Reassignment rate | Tasks handed off due to worker failure |
+| Timeout rate | Tasks that exceeded deadline |
+| Payment compliance | Epoch payments submitted and verified |
 
-**SLA score formula:**
-```
-SLA = uptime × bandwidth × latency × success × payment_compliance
-```
-
-Scores are multiplicative - poor performance in any area significantly impacts total score.
+Validators read these scores from BeamCore and set on-chain weights accordingly. Higher scores → more chunk assignments → more emissions.
 
 ### Maximizing Rewards
 
 1. **Maintain high uptime** (99%+)
-2. **Attract quality workers** with competitive fees
+2. **Attract quality workers** with reliable infrastructure
 3. **Keep wallet funded** for worker payments
 4. **Use reliable infrastructure** (low latency, good bandwidth)
 5. **Monitor and fix issues quickly**
-6. **Stake more TAO** for higher traffic allocation
-
-### Penalty Redirects
-
-When your SLA drops, a portion of your rewards redirects to Orchestrator #1:
-
-```
-penalty_percent = (1 - SLA_multiplier) × 100
-
-Example: SLA = 0.70 → 30% of rewards redirected
-```
-
-### Subnet-Owned Orchestrator (#1)
-
-| Feature | Description |
-|---------|-------------|
-| 0% operator fee | Workers get 100% |
-| Always available | Fallback for all workers |
-| Receives penalties | Gets redirected rewards |
-| No stake required | Subnet-maintained |
-
-Workers default to #1 until they choose to affiliate with another orchestrator.
 
 ---
 
@@ -676,7 +611,6 @@ Workers default to #1 until they choose to affiliate with another orchestrator.
 - [ ] Python 3.10+, Redis installed
 - [ ] Bittensor wallet created
 - [ ] Registered as miner on subnet (304 or 105)
-- [ ] TAO staked (minimum 2 TAO required)
 - [ ] Hotkey unencrypted for server use
 - [ ] Repository cloned and dependencies installed
 - [ ] `.env` configured correctly

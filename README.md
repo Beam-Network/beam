@@ -84,7 +84,7 @@ These workflows involve terabytes or petabytes moving across regions and indepen
 ```
 
 1. Clients create transfers via BeamCore API or SDK
-2. BeamCore assigns chunks to orchestrators by stake-weighted allocation
+2. BeamCore assigns chunks to orchestrators based on performance-based routing scores
 3. Orchestrators poll BeamCore for assignments and create tasks
 4. BeamCore pushes tasks to workers via WebSocket
 5. Workers fetch data from source and deliver to destinations
