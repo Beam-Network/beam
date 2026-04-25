@@ -40,13 +40,6 @@ class OrchestratorRegistrationRequest(BaseModel):
         description=f"Orchestrator UID ({PUBLIC_ORCHESTRATOR_UID_START}-{PUBLIC_ORCHESTRATOR_UID_END})"
     )
     hotkey: str = Field(..., min_length=48, description="Bittensor hotkey")
-    stake_tao: float = Field(..., ge=100.0, description="Stake amount in TAO (min 100)")
-    registration_cost_tao: Optional[float] = Field(
-        None,
-        ge=0.0,
-        description="Hotkey registration cost in TAO (burned to register miner hotkey and receive UID). "
-                    "Should be fetched from chain via subtensor.recycle(netuid). Uses default if not provided."
-    )
     name: Optional[str] = Field(None, max_length=100, description="Orchestrator name")
     description: Optional[str] = Field(None, max_length=500, description="Description")
     contact: Optional[str] = Field(None, max_length=100, description="Contact info (email/discord)")
@@ -59,9 +52,6 @@ class OrchestratorRegistrationResponse(BaseModel):
     hotkey: Optional[str] = None
     status: Optional[str] = None
     grace_period_ends: Optional[datetime] = None
-    stake_tao: Optional[float] = None
-    registration_cost_tao: Optional[float] = None
-    total_cost_tao: Optional[float] = None
     message: str
 
 
@@ -76,7 +66,6 @@ class DatastreamCreateRequest(BaseModel):
     """Request to create a new datastream."""
     datastream_id: str = Field(..., min_length=1, max_length=64, description="Unique datastream ID")
     name: str = Field(..., min_length=1, max_length=100, description="Datastream name")
-    stake_tao: float = Field(10.0, ge=10.0, description="Stake amount in TAO (min 10)")
     description: Optional[str] = Field(None, max_length=500, description="Description")
 
 
@@ -85,7 +74,6 @@ class DatastreamResponse(BaseModel):
     datastream_id: str
     orchestrator_uid: int
     name: str
-    stake_tao: float
     status: str
     created_at: datetime
     total_bytes_transferred: int = 0
@@ -97,9 +85,6 @@ class OrchestratorInfo(BaseModel):
     """Orchestrator information response."""
     uid: int
     hotkey: str
-    stake_tao: float
-    registration_cost_tao: float = 0.0
-    total_cost_tao: float = 0.0
     status: str
     is_subnet_owned: bool
     name: Optional[str] = None
@@ -110,7 +95,6 @@ class OrchestratorInfo(BaseModel):
     worker_count: int = 0
     datastream_count: int = 0
     sla_score: Optional[float] = None
-    stake_weight: Optional[float] = None  # Stake-based routing weight multiplier
 
 
 class OrchestratorSLAResponse(BaseModel):
@@ -132,7 +116,6 @@ class WorkerAffiliationRequest(BaseModel):
     """Request to affiliate a worker with an orchestrator."""
     worker_id: str = Field(..., description="Worker ID")
     worker_hotkey: str = Field(..., description="Worker's hotkey")
-    stake_tao: float = Field(0.0, ge=0.0, description="Worker stake in TAO")
 
 
 class WorkerAffiliationResponse(BaseModel):
@@ -140,7 +123,6 @@ class WorkerAffiliationResponse(BaseModel):
     success: bool
     worker_id: str
     orchestrator_uid: int
-    has_stake_bonus: bool
     message: str
 
 
@@ -167,14 +149,7 @@ async def register_orchestrator(
 
     Requirements:
     - UID must be between 2-256 (valid orchestrator range)
-    - Minimum stake of 100 TAO
     - Valid Bittensor hotkey
-
-    Higher stake amounts increase traffic routing priority (alongside SLA scores).
-    Stake weight formula: min((stake / 100) ^ 0.5, 3.0)
-    - 100 TAO -> 1.0x weight
-    - 400 TAO -> 2.0x weight
-    - 900+ TAO -> 3.0x weight (capped)
 
     New orchestrators enter a 24-hour grace period during which
     SLA penalties are not applied.
@@ -192,21 +167,17 @@ async def register_orchestrator(
             orch = await orchestrator.orch_manager.register_orchestrator_async(
                 uid=request.uid,
                 hotkey=request.hotkey,
-                stake_tao=request.stake_tao,
                 name=request.name,
                 description=request.description,
                 contact=request.contact,
-                registration_cost_tao=request.registration_cost_tao,
             )
         else:
             orch = orchestrator.orch_manager.register_orchestrator(
                 uid=request.uid,
                 hotkey=request.hotkey,
-                stake_tao=request.stake_tao,
                 name=request.name,
                 description=request.description,
                 contact=request.contact,
-                registration_cost_tao=request.registration_cost_tao,
             )
 
         return OrchestratorRegistrationResponse(
@@ -215,13 +186,7 @@ async def register_orchestrator(
             hotkey=orch.hotkey,
             status=orch.status.value,
             grace_period_ends=orch.grace_period_ends,
-            stake_tao=orch.stake_tao,
-            registration_cost_tao=orch.registration_cost_tao,
-            total_cost_tao=orch.total_cost_tao,
             message=f"Orchestrator UID {orch.uid} registered successfully. "
-                    f"Stake: {orch.stake_tao} TAO (refundable), "
-                    f"Registration cost: {orch.registration_cost_tao} TAO (burned), "
-                    f"Total: {orch.total_cost_tao} TAO. "
                     f"Grace period ends: {orch.grace_period_ends}",
         )
 
@@ -298,9 +263,6 @@ async def update_orchestrator(
     return OrchestratorInfo(
         uid=orch.uid,
         hotkey=orch.hotkey,
-        stake_tao=orch.stake_tao,
-        registration_cost_tao=getattr(orch, 'registration_cost_tao', 0.0),
-        total_cost_tao=getattr(orch, 'total_cost_tao', orch.stake_tao),
         status=orch.status.value,
         is_subnet_owned=orch.is_subnet_owned,
         name=orch.name,
@@ -334,9 +296,6 @@ async def get_orchestrator_info(
     return OrchestratorInfo(
         uid=orch.uid,
         hotkey=orch.hotkey,
-        stake_tao=orch.stake_tao,
-        registration_cost_tao=getattr(orch, 'registration_cost_tao', 0.0),
-        total_cost_tao=getattr(orch, 'total_cost_tao', orch.stake_tao),
         status=orch.status.value,
         is_subnet_owned=orch.is_subnet_owned,
         name=orch.name,
@@ -353,7 +312,6 @@ async def get_orchestrator_info(
 @router.get("/", response_model=List[OrchestratorInfo])
 async def list_orchestrators(
     status: Optional[str] = Query(None, description="Filter by status"),
-    min_stake: float = Query(0.0, description="Minimum stake TAO"),
     include_subnet: bool = Query(True, description="Include subnet orchestrator #1"),
     limit: int = Query(100, le=256, description="Max results"),
     orchestrator: Orchestrator = Depends(get_orchestrator_instance),
@@ -371,9 +329,6 @@ async def list_orchestrators(
     if status:
         orchestrators = [o for o in orchestrators if o.status.value == status]
 
-    if min_stake > 0:
-        orchestrators = [o for o in orchestrators if o.stake_tao >= min_stake]
-
     # Sort by UID
     orchestrators.sort(key=lambda o: o.uid)
 
@@ -384,9 +339,6 @@ async def list_orchestrators(
         OrchestratorInfo(
             uid=o.uid,
             hotkey=o.hotkey,
-            stake_tao=o.stake_tao,
-            registration_cost_tao=getattr(o, 'registration_cost_tao', 0.0),
-            total_cost_tao=getattr(o, 'total_cost_tao', o.stake_tao),
             status=o.status.value,
             is_subnet_owned=o.is_subnet_owned,
             name=o.name,
@@ -462,7 +414,6 @@ async def create_datastream(
     Create a new datastream for an orchestrator.
 
     Requirements:
-    - Minimum stake of 10 TAO per datastream
     - Maximum 50 datastreams per orchestrator
     - Unique datastream ID
     """
@@ -475,23 +426,19 @@ async def create_datastream(
                 orchestrator_uid=uid,
                 datastream_id=request.datastream_id,
                 name=request.name,
-                stake_tao=request.stake_tao,
                 description=request.description,
             )
         else:
-            # Base OrchestratorManager doesn't have description param
             ds = orchestrator.orch_manager.create_datastream(
                 orchestrator_uid=uid,
                 datastream_id=request.datastream_id,
                 name=request.name,
-                stake_tao=request.stake_tao,
             )
 
         return DatastreamResponse(
             datastream_id=ds.datastream_id,
             orchestrator_uid=uid,
             name=ds.name,
-            stake_tao=ds.stake_tao,
             status=ds.status.value,
             created_at=ds.created_at,
             total_bytes_transferred=ds.total_bytes_transferred,
@@ -530,7 +477,6 @@ async def list_datastreams(
             datastream_id=d.datastream_id,
             orchestrator_uid=uid,
             name=d.name,
-            stake_tao=d.stake_tao,
             status=d.status.value,
             created_at=d.created_at,
             total_bytes_transferred=d.total_bytes_transferred,
@@ -563,7 +509,6 @@ async def get_datastream(
         datastream_id=ds.datastream_id,
         orchestrator_uid=uid,
         name=ds.name,
-        stake_tao=ds.stake_tao,
         status=ds.status.value,
         created_at=ds.created_at,
         total_bytes_transferred=ds.total_bytes_transferred,
@@ -613,8 +558,7 @@ async def affiliate_worker(
     """
     Affiliate a worker with this orchestrator.
 
-    Workers can voluntarily choose an orchestrator. Workers with
-    stake >= 1 TAO receive a 1.5x traffic bonus.
+    Workers can voluntarily choose an orchestrator to route their traffic through.
     """
     try:
         if not hasattr(orchestrator, 'orch_manager'):
@@ -625,32 +569,26 @@ async def affiliate_worker(
                 worker_id=request.worker_id,
                 worker_hotkey=request.worker_hotkey,
                 orchestrator_uid=uid,
-                stake_tao=request.stake_tao,
             )
         else:
             success = orchestrator.orch_manager.affiliate_worker(
                 worker_id=request.worker_id,
                 worker_hotkey=request.worker_hotkey,
                 orchestrator_uid=uid,
-                stake_tao=request.stake_tao,
             )
 
         if success:
-            has_bonus = request.stake_tao >= 1.0
             return WorkerAffiliationResponse(
                 success=True,
                 worker_id=request.worker_id,
                 orchestrator_uid=uid,
-                has_stake_bonus=has_bonus,
-                message=f"Worker affiliated with orchestrator UID {uid}. "
-                        f"Stake bonus: {'Yes (1.5x traffic)' if has_bonus else 'No (stake < 1 TAO)'}",
+                message=f"Worker affiliated with orchestrator UID {uid}",
             )
         else:
             return WorkerAffiliationResponse(
                 success=False,
                 worker_id=request.worker_id,
                 orchestrator_uid=uid,
-                has_stake_bonus=False,
                 message=f"Failed to affiliate worker with orchestrator UID {uid}",
             )
 
@@ -703,9 +641,6 @@ async def get_orchestrator_stats(
         status = o.status.value
         status_counts[status] = status_counts.get(status, 0) + 1
 
-    # Total stake
-    total_stake = sum(o.stake_tao for o in non_subnet)
-
     # Total workers
     total_workers = sum(len(o.worker_hotkeys) for o in orchestrators)
 
@@ -727,7 +662,6 @@ async def get_orchestrator_stats(
         "total_orchestrators": len(orchestrators),
         "non_subnet_orchestrators": len(non_subnet),
         "orchestrators_by_status": status_counts,
-        "total_stake_tao": total_stake,
         "total_workers": total_workers,
         "total_datastreams": total_datastreams,
         "avg_sla_score": round(avg_sla_score, 4),

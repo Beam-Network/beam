@@ -1010,7 +1010,6 @@ class SubnetCoreClient:
     async def get_orchestrators(
         self,
         active_only: bool = True,
-        min_stake: float = 0.0,
         limit: int = 256,
     ) -> Dict[str, Any]:
         """
@@ -1020,7 +1019,6 @@ class SubnetCoreClient:
 
         Args:
             active_only: Only return active orchestrators
-            min_stake: Minimum stake filter
             limit: Max results
 
         Returns:
@@ -1033,7 +1031,6 @@ class SubnetCoreClient:
                 action="get_orchestrators",
                 params={
                     "active_only": active_only,
-                    "min_stake": min_stake,
                     "limit": limit,
                 },
             )

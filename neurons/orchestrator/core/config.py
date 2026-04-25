@@ -118,7 +118,6 @@ class OrchestratorSettings(BaseSettings):
     # Validator Communication
     # ==========================================================================
     validator_report_interval: int = Field(default=300, env="VALIDATOR_REPORT_INTERVAL")
-    min_validator_stake: float = Field(default=10.0, env="MIN_VALIDATOR_STAKE")  # Lowered for testnet
 
     # Manual validator endpoints for local testing (comma-separated: hotkey:ip:port)
     # Example: "5EkRrn...:127.0.0.1:8001"
@@ -217,11 +216,8 @@ class OrchestratorSettings(BaseSettings):
     # Master toggle for client authentication
     client_auth_enabled: bool = Field(default=True, env="CLIENT_AUTH_ENABLED")
 
-    # If true, only whitelisted clients can register (no stake-gated)
+    # If true, only whitelisted clients can register
     client_whitelist_only: bool = Field(default=False, env="CLIENT_WHITELIST_ONLY")
-
-    # Enable stake-gated self-registration
-    client_stake_gated_enabled: bool = Field(default=True, env="CLIENT_STAKE_GATED_ENABLED")
 
     # Pre-approved hotkeys (comma-separated SS58 addresses)
     client_pre_approved_hotkeys: Optional[str] = Field(default=None, env="CLIENT_PRE_APPROVED_HOTKEYS")
@@ -241,12 +237,6 @@ class OrchestratorSettings(BaseSettings):
     # Require metagraph verification (hotkey must be registered on subnet)
     subnet_auth_require_metagraph: bool = Field(default=True, env="SUBNET_AUTH_REQUIRE_METAGRAPH")
 
-    # Minimum stake required for validators (in alpha/TAO)
-    subnet_auth_min_validator_stake: float = Field(default=100.0, env="SUBNET_AUTH_MIN_VALIDATOR_STAKE")
-
-    # Minimum stake required for workers (in alpha/TAO, 0 = no minimum)
-    subnet_auth_min_worker_stake: float = Field(default=0.0, env="SUBNET_AUTH_MIN_WORKER_STAKE")
-
     # Whitelisted hotkeys that bypass metagraph check (comma-separated)
     subnet_auth_whitelist: Optional[str] = Field(default=None, env="SUBNET_AUTH_WHITELIST")
 
@@ -257,22 +247,19 @@ class OrchestratorSettings(BaseSettings):
     subnet_partner_enabled: bool = Field(default=True, env="SUBNET_PARTNER_ENABLED")
 
     # ==========================================================================
-    # Client Stake Tiers (dTAO amounts - 1 dTAO = 1e9 rao)
+    # Client Tiers
     # ==========================================================================
     # Basic tier
-    client_tier_basic_stake: int = Field(default=10_000_000_000, env="CLIENT_TIER_BASIC_STAKE")  # 10 dTAO
     client_tier_basic_rpm: int = Field(default=30, env="CLIENT_TIER_BASIC_RPM")
     client_tier_basic_daily_bytes: int = Field(default=1_073_741_824, env="CLIENT_TIER_BASIC_DAILY_BYTES")  # 1GB
     client_tier_basic_concurrent: int = Field(default=2, env="CLIENT_TIER_BASIC_CONCURRENT")
 
     # Standard tier
-    client_tier_standard_stake: int = Field(default=100_000_000_000, env="CLIENT_TIER_STANDARD_STAKE")  # 100 dTAO
     client_tier_standard_rpm: int = Field(default=120, env="CLIENT_TIER_STANDARD_RPM")
     client_tier_standard_daily_bytes: int = Field(default=10_737_418_240, env="CLIENT_TIER_STANDARD_DAILY_BYTES")  # 10GB
     client_tier_standard_concurrent: int = Field(default=10, env="CLIENT_TIER_STANDARD_CONCURRENT")
 
     # Premium tier
-    client_tier_premium_stake: int = Field(default=1_000_000_000_000, env="CLIENT_TIER_PREMIUM_STAKE")  # 1000 dTAO
     client_tier_premium_rpm: int = Field(default=600, env="CLIENT_TIER_PREMIUM_RPM")
     client_tier_premium_daily_bytes: int = Field(default=107_374_182_400, env="CLIENT_TIER_PREMIUM_DAILY_BYTES")  # 100GB
     client_tier_premium_concurrent: int = Field(default=50, env="CLIENT_TIER_PREMIUM_CONCURRENT")
@@ -348,48 +335,26 @@ class OrchestratorSettings(BaseSettings):
             tier: "basic", "standard", or "premium"
 
         Returns:
-            Dict with stake, rpm, daily_bytes, concurrent limits
+            Dict with rpm, daily_bytes, concurrent limits
         """
         tier_configs = {
             "basic": {
-                "min_stake": self.client_tier_basic_stake,
                 "rate_limit_rpm": self.client_tier_basic_rpm,
                 "daily_transfer_limit_bytes": self.client_tier_basic_daily_bytes,
                 "max_concurrent_transfers": self.client_tier_basic_concurrent,
             },
             "standard": {
-                "min_stake": self.client_tier_standard_stake,
                 "rate_limit_rpm": self.client_tier_standard_rpm,
                 "daily_transfer_limit_bytes": self.client_tier_standard_daily_bytes,
                 "max_concurrent_transfers": self.client_tier_standard_concurrent,
             },
             "premium": {
-                "min_stake": self.client_tier_premium_stake,
                 "rate_limit_rpm": self.client_tier_premium_rpm,
                 "daily_transfer_limit_bytes": self.client_tier_premium_daily_bytes,
                 "max_concurrent_transfers": self.client_tier_premium_concurrent,
             },
         }
         return tier_configs.get(tier, tier_configs["basic"])
-
-    def determine_tier_from_stake(self, stake_amount: int) -> str:
-        """
-        Determine the appropriate tier based on stake amount.
-
-        Args:
-            stake_amount: Amount staked in rao (1e-9 dTAO)
-
-        Returns:
-            Tier name: "basic", "standard", or "premium"
-        """
-        if stake_amount >= self.client_tier_premium_stake:
-            return "premium"
-        elif stake_amount >= self.client_tier_standard_stake:
-            return "standard"
-        elif stake_amount >= self.client_tier_basic_stake:
-            return "basic"
-        else:
-            return "basic"  # Default to basic even if under minimum
 
     def get_cors_origins(self) -> List[str]:
         """

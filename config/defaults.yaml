@@ -56,7 +56,6 @@ orchestrator:
 
   # Validator communication
   validator_report_interval: 300
-  min_validator_stake: 1000.0
 
   # Anti-fraud
   enable_geo_verification: true
@@ -92,8 +91,6 @@ validator:
 # =============================================================================
 connection:
   port: 9000
-  operator_fee_percent: 5
-  min_stake_dtao: 100
   probation_tasks: 10
   ws_enabled: true
 
@@ -105,23 +102,20 @@ worker:
   max_concurrent_tasks: 10
 
 # =============================================================================
-# Client Tier Settings (dTAO amounts - 1 dTAO = 1e9 rao)
+# Client Tier Settings
 # =============================================================================
 client_tiers:
   basic:
-    min_stake: 10000000000      # 10 dTAO
     rate_limit_rpm: 30
     daily_transfer_bytes: 1073741824  # 1 GB
     max_concurrent: 2
 
   standard:
-    min_stake: 100000000000     # 100 dTAO
     rate_limit_rpm: 120
     daily_transfer_bytes: 10737418240  # 10 GB
     max_concurrent: 10
 
   premium:
-    min_stake: 1000000000000    # 1000 dTAO
     rate_limit_rpm: 600
     daily_transfer_bytes: 107374182400  # 100 GB
     max_concurrent: 50

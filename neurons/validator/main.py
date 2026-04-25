@@ -999,7 +999,6 @@ async def get_network_analytics():
     # Get orchestrator data
     orchestrators = []
     total_bandwidth = 0.0
-    total_stake = 0.0
     healthy_count = 0
 
     if hasattr(validator, 'orchestrator_manager'):
@@ -1018,7 +1017,6 @@ async def get_network_analytics():
                 healthy_count += 1
 
             total_bandwidth += bandwidth
-            total_stake += getattr(orch, 'stake_tao', 0.0)
 
             orchestrators.append({
                 "uid": orch.uid,
@@ -1026,7 +1024,6 @@ async def get_network_analytics():
                 "is_healthy": is_healthy,
                 "sla_multiplier": round(sla_multiplier, 4),
                 "bandwidth_mbps": round(bandwidth, 2),
-                "stake_tao": round(getattr(orch, 'stake_tao', 0.0), 2),
                 "worker_count": getattr(orch, 'worker_count', 0),
                 "is_subnet_owned": getattr(orch, 'is_subnet_owned', False),
             })
@@ -1059,7 +1056,6 @@ async def get_network_analytics():
             "healthy": healthy_count,
             "unhealthy": len(orchestrators) - healthy_count,
             "total_bandwidth_mbps": round(total_bandwidth, 2),
-            "total_stake_tao": round(total_stake, 2),
         },
         "anti_gaming": sybil_stats,
         "orchestrator_list": sorted(orchestrators, key=lambda x: x["sla_multiplier"], reverse=True),
@@ -1081,7 +1077,6 @@ async def get_orchestrator_analytics():
             orch_data = {
                 "uid": orch.uid,
                 "hotkey": orch.hotkey,
-                "stake_tao": round(getattr(orch, 'stake_tao', 0.0), 2),
                 "is_subnet_owned": getattr(orch, 'is_subnet_owned', False),
                 "worker_count": getattr(orch, 'worker_count', 0),
             }
@@ -1180,7 +1175,6 @@ async def get_leaderboard():
                 "sla_multiplier": round(effective_mult, 4),
                 "bandwidth_mbps": round(bandwidth, 2),
                 "latency_p95_ms": round(latency, 2),
-                "stake_tao": round(getattr(orch, 'stake_tao', 0.0), 2),
                 "worker_count": getattr(orch, 'worker_count', 0),
             })
 

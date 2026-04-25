@@ -28,24 +28,19 @@ validator:
 
 connection:
   port: 9000
-  min_stake_dtao: 0
 
-# No stake requirements for local dev
 client_tiers:
   basic:
-    min_stake: 0
     rate_limit_rpm: 1000
     daily_transfer_bytes: 1099511627776  # 1 TB
     max_concurrent: 100
 
   standard:
-    min_stake: 0
     rate_limit_rpm: 1000
     daily_transfer_bytes: 1099511627776
     max_concurrent: 100
 
   premium:
-    min_stake: 0
     rate_limit_rpm: 1000
     daily_transfer_bytes: 1099511627776
     max_concurrent: 100

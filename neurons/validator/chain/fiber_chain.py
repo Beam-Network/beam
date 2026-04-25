@@ -25,9 +25,6 @@ class FiberNode:
     coldkey: str
     node_id: int  # UID
     netuid: int
-    stake: float
-    alpha_stake: float
-    tao_stake: float
     incentive: float
     trust: float
     vtrust: float
@@ -46,9 +43,6 @@ class FiberNode:
             coldkey=metagraph.coldkeys[uid],
             node_id=uid,
             netuid=netuid,
-            stake=float(metagraph.S[uid]),
-            alpha_stake=float(metagraph.S[uid]),  # Using stake as alpha_stake
-            tao_stake=float(metagraph.S[uid]),    # Using stake as tao_stake
             incentive=float(metagraph.I[uid]),
             trust=float(metagraph.T[uid]),
             vtrust=float(metagraph.Tv[uid]) if hasattr(metagraph, 'Tv') else 0.0,
@@ -71,11 +65,6 @@ class FiberNode:
             protocol = "https" if self.protocol == 4 else "http"
             return f"{protocol}://{self.ip}:{self.port}"
         return None
-
-    def has_stake(self, min_stake: float = 0.0) -> bool:
-        """Check if node has minimum stake."""
-        return self.stake >= min_stake
-
 
 class FiberChain:
     """

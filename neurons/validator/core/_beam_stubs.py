@@ -281,7 +281,6 @@ except ImportError:
 SUBNET_ORCHESTRATOR_UID = int(os.getenv("SUBNET_ORCHESTRATOR_UID", "1"))
 PUBLIC_ORCHESTRATOR_UID_START = int(os.getenv("PUBLIC_ORCHESTRATOR_UID_START", "2"))
 PUBLIC_ORCHESTRATOR_UID_END = int(os.getenv("PUBLIC_ORCHESTRATOR_UID_END", "256"))
-MIN_ORCHESTRATOR_STAKE_TAO = 100.0
 NEW_ORCHESTRATOR_GRACE_PERIOD_HOURS = 24
 
 
@@ -378,7 +377,6 @@ class OrchestratorSLAState:
     """SLA state for an orchestrator."""
     uid: int = 0
     hotkey: str = ""
-    stake_tao: float = 0.0
     metrics: Optional[SLAMetrics] = None
     score: Optional[SLAScore] = None
     in_grace_period: bool = False
@@ -433,13 +431,6 @@ class SLARewardCalculator:
         return {}
 
 
-def calculate_stake_weight(stake_tao: float) -> float:
-    """Calculate stake weight from TAO stake."""
-    if stake_tao <= 0:
-        return 0.0
-    return min((stake_tao / 100) ** 0.5, 3.0)
-
-
 # ============================================================================
 # beam.orchestrator
 # ============================================================================
@@ -450,7 +441,6 @@ class Orchestrator:
     uid: int = 0
     hotkey: str = ""
     url: str = ""
-    stake_tao: float = 0.0
     status: str = "active"
     worker_count: int = 0
     is_subnet_owned: bool = False
@@ -472,11 +462,11 @@ class OrchestratorManager:
     def list_orchestrators(self) -> List[Orchestrator]:
         return list(self.orchestrators.values())
 
-    def register_orchestrator(self, uid: int, hotkey: str, stake_tao: float = 0.0, **kwargs) -> Orchestrator:
+    def register_orchestrator(self, uid: int, hotkey: str, **kwargs) -> Orchestrator:
         """Register a new orchestrator."""
         if uid in self.orchestrators:
             raise ValueError(f"Orchestrator UID {uid} already registered")
-        orch = Orchestrator(uid=uid, hotkey=hotkey, stake_tao=stake_tao)
+        orch = Orchestrator(uid=uid, hotkey=hotkey)
         self.orchestrators[uid] = orch
         return orch
 
@@ -510,7 +500,6 @@ class OrchestratorManager:
             "total_orchestrators": len(self.orchestrators),
             "active_orchestrators": len(self.orchestrators),
             "total_bandwidth_mbps": 0.0,
-            "total_stake_tao": sum(o.stake_tao for o in self.orchestrators.values()),
         }
 
 

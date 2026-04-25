@@ -78,9 +78,6 @@ class Settings(BaseSettings):
     blocks_between_weights: int = 100  # ~20 minutes
     weight_alpha: float = 0.3  # EMA smoothing factor
 
-    # Minimum stake to be considered valid connection
-    min_connection_stake: float = 10.0  # TAO
-
     # ==========================================================================
     # Scoring Weights
     # ==========================================================================

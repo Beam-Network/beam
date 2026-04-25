@@ -20,22 +20,18 @@ validator:
   epoch_length_seconds: 300
   bandwidth_challenge_size: 10485760  # 10 MB
 
-# Production tier requirements
 client_tiers:
   basic:
-    min_stake: 10000000000      # 10 dTAO
     rate_limit_rpm: 30
     daily_transfer_bytes: 1073741824  # 1 GB
     max_concurrent: 2
 
   standard:
-    min_stake: 100000000000     # 100 dTAO
     rate_limit_rpm: 120
     daily_transfer_bytes: 10737418240  # 10 GB
     max_concurrent: 10
 
   premium:
-    min_stake: 1000000000000    # 1000 dTAO
     rate_limit_rpm: 600
     daily_transfer_bytes: 107374182400  # 100 GB
     max_concurrent: 50

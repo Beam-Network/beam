@@ -45,8 +45,7 @@ from core._beam_stubs import (
     # beam.scoring.sla
     SLAScorer, SLAMetrics, SLAScore, SLARewardCalculator,
     OrchestratorSLAState, WorkerSLAState,
-    calculate_stake_weight, SUBNET_ORCHESTRATOR_UID,
-    MIN_ORCHESTRATOR_STAKE_TAO, NEW_ORCHESTRATOR_GRACE_PERIOD_HOURS,
+    SUBNET_ORCHESTRATOR_UID, NEW_ORCHESTRATOR_GRACE_PERIOD_HOURS,
     # beam.orchestrator
     OrchestratorManager, Orchestrator, WorkerRegistry, ReassignmentManager,
     # beam.validation.sybil_detector
@@ -92,7 +91,6 @@ class OrchestratorInfo:
     url: str
     hotkey: str
     uid: Optional[int] = None
-    stake_tao: float = 0.0
     last_seen: datetime = field(default_factory=datetime.utcnow)
     registered_at: Optional[datetime] = None
     is_healthy: bool = True
@@ -386,7 +384,6 @@ class Validator:
         self.connections[1] = {
             "uid": 1,
             "hotkey": "local-orchestrator",
-            "stake": 1000.0,
             "ip": "127.0.0.1",
             "port": 8000,
             "url": self.settings.orchestrator_url,
@@ -957,7 +954,6 @@ class Validator:
                     url=f"http://unknown",  # Not needed for SubnetCore flow
                     hotkey=orch_hotkey,
                     uid=orch_uid,
-                    stake_tao=0.0,  # Will be updated from metagraph if available
                     is_healthy=True,
                 )
                 logger.info(f"Auto-registered orchestrator {orch_hotkey[:16]}... from SubnetCore proofs")
@@ -1404,26 +1400,22 @@ class Validator:
         skipped_unregistered = 0
 
         for uid in range(len(self.metagraph.hotkeys)):
-            stake = float(self.metagraph.S[uid])
+            hotkey = self.metagraph.hotkeys[uid]
 
-            if stake >= self.settings.min_connection_stake:
-                hotkey = self.metagraph.hotkeys[uid]
+            # Only track orchestrators registered with BeamCore
+            if hotkey not in registered_hotkeys:
+                skipped_unregistered += 1
+                continue
 
-                # Only track orchestrators registered with BeamCore
-                if hotkey not in registered_hotkeys:
-                    skipped_unregistered += 1
-                    continue
+            axon = self.metagraph.axons[uid]
 
-                axon = self.metagraph.axons[uid]
-
-                self.connections[uid] = {
-                    "uid": uid,
-                    "hotkey": hotkey,
-                    "stake": stake,
-                    "ip": axon.ip,
-                    "port": axon.port,
-                    "last_seen": datetime.utcnow(),
-                }
+            self.connections[uid] = {
+                "uid": uid,
+                "hotkey": hotkey,
+                "ip": axon.ip,
+                "port": axon.port,
+                "last_seen": datetime.utcnow(),
+            }
 
         logger.info(
             f"Updated connections: {len(self.connections)} registered, "
@@ -1449,7 +1441,6 @@ class Validator:
                             continue
                         uid = o.get("uid")
                         url = o.get("url", "")
-                        stake = o.get("stake_tao", 0.0)
                         is_healthy = o.get("is_healthy", True)
 
                         if hotkey not in self.orchestrators:
@@ -1457,17 +1448,13 @@ class Validator:
                                 url=url or "via-subnetcore",
                                 hotkey=hotkey,
                                 uid=uid,
-                                stake_tao=stake,
                                 is_healthy=is_healthy,
                             )
                             added += 1
                         else:
-                            # Update UID and stake if missing
                             existing = self.orchestrators[hotkey]
                             if uid is not None and existing.uid is None:
                                 existing.uid = uid
-                            if stake > 0 and existing.stake_tao == 0:
-                                existing.stake_tao = stake
                             if url and existing.url in ("via-subnetcore", "http://unknown"):
                                 existing.url = url
 
@@ -1619,26 +1606,18 @@ class Validator:
             return
 
         for uid in range(len(self.metagraph.hotkeys)):
-            stake = float(self.metagraph.S[uid])
             hotkey = self.metagraph.hotkeys[uid]
+            existing = self.orchestrator_manager.get_orchestrator(uid)
 
-            if stake >= MIN_ORCHESTRATOR_STAKE_TAO:
-                existing = self.orchestrator_manager.get_orchestrator(uid)
-
-                if existing is None and uid != SUBNET_ORCHESTRATOR_UID:
-                    try:
-                        self.orchestrator_manager.register_orchestrator(
-                            uid=uid,
-                            hotkey=hotkey,
-                            stake_tao=stake,
-                        )
-                        logger.info(f"Registered new orchestrator UID {uid}")
-                    except ValueError as e:
-                        logger.warning(f"Could not register orchestrator UID {uid}: {e}")
-
-                elif existing is not None:
-                    if existing.stake_tao != stake:
-                        existing.stake_tao = stake
+            if existing is None and uid != SUBNET_ORCHESTRATOR_UID:
+                try:
+                    self.orchestrator_manager.register_orchestrator(
+                        uid=uid,
+                        hotkey=hotkey,
+                    )
+                    logger.info(f"Registered new orchestrator UID {uid}")
+                except ValueError as e:
+                    logger.warning(f"Could not register orchestrator UID {uid}: {e}")
 
         self.orchestrator_manager.update_all_statuses()
 
@@ -2763,18 +2742,15 @@ class Validator:
 
             if not summary:
                 # Give idle orchestrators a minimal baseline so they appear in weights
-                stake_weight = calculate_stake_weight(info.stake_tao)
                 baseline_multiplier = _baseline_multiplier
                 if info.is_subnet_owned:
                     baseline_multiplier = 1.0
-                    stake_weight = 1.0
-                final_score = baseline_multiplier * stake_weight
+                final_score = baseline_multiplier
                 self.orchestrator_scores[hotkey] = final_score
                 info.last_score = final_score
                 logger.info(
                     f"_update_scores: {hotkey[:16]}... UID={info.uid} "
-                    f"no work summary — baseline score={final_score:.4f} "
-                    f"(stake_weight={stake_weight:.4f})"
+                    f"no work summary — baseline score={final_score:.4f}"
                 )
                 continue
 
@@ -2800,7 +2776,6 @@ class Validator:
             sla_state = OrchestratorSLAState(
                 uid=info.uid or 0,
                 hotkey=hotkey,
-                stake_tao=info.stake_tao,
                 metrics=metrics,
                 is_subnet_owned=info.is_subnet_owned,
                 registered_at=info.registered_at,
@@ -2823,8 +2798,7 @@ class Validator:
                 payment_multiplier
             )
 
-            stake_weight = calculate_stake_weight(info.stake_tao)
-            final_score = effective_multiplier * stake_weight
+            final_score = effective_multiplier
 
             self.orchestrator_sla_scores[hotkey] = sla_score
             self.orchestrator_scores[hotkey] = final_score
@@ -2839,7 +2813,6 @@ class Validator:
                 f"fraud_mult={fraud_multiplier:.4f} "
                 f"payment_mult={payment_multiplier:.4f} "
                 f"combined_mult={effective_multiplier:.4f} "
-                f"stake_weight={stake_weight:.4f} "
                 f"final_score={final_score:.6f}"
                 + (f" violations={[v.value for v in sla_score.violations]}" if sla_score.violations else "")
                 + (f" redirect={sla_score.penalty_redirect_percent:.1f}%" if sla_score.penalty_redirect_percent > 0 else "")
@@ -3080,8 +3053,7 @@ class Validator:
                     "Unknown error. Common causes: "
                     "(1) Too soon since last weight update - wait for rate limit, "
                     "(2) Wallet not registered on subnet, "
-                    "(3) Insufficient stake, "
-                    "(4) Subtensor connection issue"
+                    "(3) Subtensor connection issue"
                 )
                 logger.error(f"Failed to set weights: {error_msg}")
 
@@ -3376,7 +3348,7 @@ class Validator:
                 # Use acceptance as a proxy for compliance
                 compliance_score = sla_score.multipliers.acceptance
 
-            # Compute final_score = effective_multiplier (before stake weighting)
+            # Compute final_score = effective_multiplier
             final_score = sla_score.effective_multiplier if sla_score else 0.0
 
             # Gather metrics from work summary
@@ -3490,7 +3462,6 @@ class Validator:
                 "score": round(self.connection_scores.get(uid, 0), 4),
                 "bandwidth_mbps": round(self.connection_bandwidth.get(uid, 0), 2),
                 "hotkey": conn["hotkey"],
-                "stake": conn["stake"],
             }
             for uid, conn in self.connections.items()
         }
@@ -3523,8 +3494,6 @@ class Validator:
             result[hotkey] = {
                 "uid": uid,
                 "score": round(self.orchestrator_scores.get(hotkey, 0), 4),
-                "stake_tao": info.stake_tao,
-                "stake_weight": round(calculate_stake_weight(info.stake_tao), 2),
                 "url": info.url,
                 "is_healthy": info.is_healthy,
                 "is_subnet_owned": info.is_subnet_owned,

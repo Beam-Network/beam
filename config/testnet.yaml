@@ -19,22 +19,18 @@ validator:
   epoch_length_seconds: 120
   bandwidth_challenge_size: 1048576  # 1 MB for faster tests
 
-# Lower tier requirements for testnet
 client_tiers:
   basic:
-    min_stake: 1000000000       # 1 dTAO
     rate_limit_rpm: 60
     daily_transfer_bytes: 10737418240  # 10 GB
     max_concurrent: 5
 
   standard:
-    min_stake: 10000000000      # 10 dTAO
     rate_limit_rpm: 300
     daily_transfer_bytes: 107374182400  # 100 GB
     max_concurrent: 20
 
   premium:
-    min_stake: 100000000000     # 100 dTAO
     rate_limit_rpm: 1200
     daily_transfer_bytes: 1099511627776  # 1 TB
     max_concurrent: 100

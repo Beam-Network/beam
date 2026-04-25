@@ -176,7 +176,6 @@ async def register_worker(client: httpx.AsyncClient, state: WorkerState) -> Dict
         "hotkey": hotkey,
         "ip": ip,
         "port": port,
-        "initial_stake": 0,
         "claimed_bandwidth_mbps": 100,
         "region": "auto",
         "coldkey": wallet.coldkeypub.ss58_address if wallet.coldkeypub else hotkey,
