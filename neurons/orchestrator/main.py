@@ -64,6 +64,9 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 _core_api_ws_task: Optional[asyncio.Task] = None
 _core_api_ws: Optional[websockets.WebSocketClientProtocol] = None
 
+# Pending worker-list requests keyed by transfer_id.
+_worker_list_futures: dict[str, asyncio.Future] = {}
+
 
 def _sign_message(wallet, message: str) -> str:
     """Sign a message with the wallet's hotkey."""
@@ -132,6 +135,58 @@ async def _get_api_key(settings, wallet) -> Optional[str]:
     except Exception as e:
         logger.error(f"Failed to get API key: {e}")
         return None
+
+
+async def _handle_transfer_assigned(
+    ws: websockets.WebSocketClientProtocol,
+    data: dict,
+) -> None:
+    log = logging.getLogger(__name__)
+    assignment_id = data.get("assignment_id")
+    transfer_id = data.get("transfer_id")
+    chunk_start = int(data.get("chunk_start", 0))
+    chunk_end = int(data.get("chunk_end", 0))
+
+    log.info(f"transfer_assigned: transfer={transfer_id} chunks={chunk_start}-{chunk_end}")
+
+    # Request affiliated worker pool over WS.
+    fut: asyncio.Future = asyncio.get_event_loop().create_future()
+    _worker_list_futures[transfer_id] = fut
+    try:
+        await ws.send(json.dumps({"type": "list_workers", "transfer_id": transfer_id}))
+        workers = await asyncio.wait_for(fut, timeout=10.0)
+    except asyncio.TimeoutError:
+        log.error(f"Timed out waiting for worker_list for transfer {transfer_id}")
+        _worker_list_futures.pop(transfer_id, None)
+        return
+    except Exception as e:
+        log.error(f"Failed to get worker list for transfer {transfer_id}: {e}")
+        _worker_list_futures.pop(transfer_id, None)
+        return
+
+    if not workers:
+        log.warning(f"No workers available for assignment {assignment_id}")
+        return
+
+    def sla_score(w: dict) -> float:
+        trust = float(w.get("trustScore", 0.5))
+        bw = float(w.get("bandwidthMbps", 100.0))
+        return trust * min(2.0, bw / 100.0)
+
+    sorted_workers = sorted(workers, key=sla_score, reverse=True)
+    worker_ids = [w["workerId"] for w in sorted_workers]
+
+    assignments = [
+        {"chunk_index": i, "worker_id": worker_ids[i % len(worker_ids)]}
+        for i in range(chunk_start, chunk_end + 1)
+    ]
+
+    await ws.send(json.dumps({
+        "type": "chunk_assignments",
+        "assignment_id": assignment_id,
+        "assignments": assignments,
+    }))
+    log.info(f"Sent {len(assignments)} chunk_assignments for assignment {assignment_id}")
 
 
 async def _connect_and_register_ws(settings, wallet, get_worker_count, get_balance_info=None, get_uid=None):
@@ -285,6 +340,15 @@ async def _connect_and_register_ws(settings, wallet, get_worker_count, get_balan
 
                             if msg_type == "heartbeat_ack":
                                 pass  # Expected
+                            elif msg_type == "transfer_assigned":
+                                asyncio.create_task(_handle_transfer_assigned(ws, data))
+                            elif msg_type == "worker_list":
+                                tid = data.get("transfer_id")
+                                fut = _worker_list_futures.pop(tid, None)
+                                if fut and not fut.done():
+                                    fut.set_result(data.get("workers", []))
+                            elif msg_type == "chunks_queued":
+                                logger.info(f"Chunks queued: assignment={data.get('assignment_id')} count={data.get('task_count')}")
                             elif msg_type == "register_result":
                                 logger.info(f"Registration result: {data}")
                             elif msg_type == "error":

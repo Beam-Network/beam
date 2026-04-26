@@ -42,9 +42,11 @@ export LOG_LEVEL=${LOG_LEVEL:-DEBUG}
 # =============================================================================
 # Wallet Configuration (edit these or set as environment variables)
 # =============================================================================
-export WALLET_NAME=${WALLET_NAME:-<your_coldkey>}
-export WALLET_HOTKEY=${WALLET_HOTKEY:-<your_hotkey>}
+export WALLET_NAME=${WALLET_NAME:-terapipe_orchestrator1_cold}
+export WALLET_HOTKEY=${WALLET_HOTKEY:-terapipe_orchestrator1_hot}
 export WALLET_PATH=${WALLET_PATH:-~/.bittensor/wallets}
+export SUBNET_CORE_URL=${SUBNET_CORE_URL:-http://157.245.126.211:8000}
+export REGISTRY_URL=${REGISTRY_URL:-http://157.245.126.211:8000}
 
 # =============================================================================
 # Run based on mode

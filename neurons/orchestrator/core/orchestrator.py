@@ -1574,6 +1574,25 @@ class Orchestrator:
             self.subnet_core_client.set_stats_provider(self._get_heartbeat_stats)
             self.subnet_core_client.set_worker_update_handler(self._worker_mgr.handle_worker_update)
 
+            # Configure registration message sent on every WS connect
+            import socket as _socket
+            try:
+                _s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+                _s.connect(("8.8.8.8", 80))
+                local_ip = self.settings.external_ip or _s.getsockname()[0]
+                _s.close()
+            except Exception:
+                local_ip = self.settings.external_ip or "127.0.0.1"
+            orch_url = f"http://{local_ip}:{self.settings.api_port}"
+            self.subnet_core_client.set_registration_config(
+                url=orch_url,
+                region=self.settings.region,
+                max_workers=self.settings.max_workers,
+                uid=self.our_uid,
+                fee_percentage=self.settings.fee_percentage,
+            )
+            logger.info(f"WS registration config set: url={orch_url}, region={self.settings.region}")
+
             # Start WebSocket connection for real-time notifications
             # WebSocket replaces HTTP polling for transfers and task results
             # Heartbeat is still sent via HTTP for compatibility

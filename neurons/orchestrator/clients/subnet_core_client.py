@@ -282,6 +282,9 @@ class SubnetCoreClient:
         self._api_key: Optional[str] = None
         self._api_key_expires: Optional[float] = None
 
+        # Pending worker-list requests keyed by transfer_id (WS protocol)
+        self._worker_list_futures: dict[str, asyncio.Future] = {}
+
     # =========================================================================
     # Handlers for polling notifications
     # =========================================================================
@@ -381,7 +384,7 @@ class SubnetCoreClient:
 
         # Check for API key in environment variable
         env_api_key = os.environ.get("BEAMCORE_API_KEY")
-        if env_api_key and env_api_key.startswith("b1m_"):
+        if env_api_key and (env_api_key.startswith("b1m_") or env_api_key.startswith("bck_")):
             self._api_key = env_api_key
             self._api_key_expires = time.time() + 86400 * 365  # Never expires
             logger.info(f"Using BEAMCORE_API_KEY from environment for {self.orchestrator_hotkey[:16]}...")
@@ -687,6 +690,18 @@ class SubnetCoreClient:
                 except Exception as e:
                     logger.error(f"Error handling worker_update: {e}")
 
+        elif msg_type == "transfer_assigned":
+            asyncio.create_task(self._handle_transfer_assigned(data))
+
+        elif msg_type == "worker_list":
+            tid = data.get("transfer_id")
+            fut = self._worker_list_futures.pop(tid, None)
+            if fut and not fut.done():
+                fut.set_result(data.get("workers", []))
+
+        elif msg_type == "chunks_queued":
+            logger.info(f"Chunks queued: assignment={data.get('assignment_id')} count={data.get('task_count')}")
+
         elif msg_type == "heartbeat_ack":
             logger.debug("WebSocket heartbeat acknowledged")
 
@@ -711,6 +726,56 @@ class SubnetCoreClient:
 
         else:
             logger.debug(f"Unknown WebSocket message type: {msg_type}")
+
+    async def _handle_transfer_assigned(self, data: dict) -> None:
+        assignment_id = data.get("assignment_id")
+        transfer_id = data.get("transfer_id")
+        chunk_start = int(data.get("chunk_start", 0))
+        chunk_end = int(data.get("chunk_end", 0))
+
+        logger.info(f"transfer_assigned: transfer={transfer_id} chunks={chunk_start}-{chunk_end}")
+
+        if not self._ws:
+            logger.error(f"No WS connection for transfer_assigned {transfer_id}")
+            return
+
+        fut: asyncio.Future = asyncio.get_event_loop().create_future()
+        self._worker_list_futures[transfer_id] = fut
+        try:
+            await self._ws.send(json.dumps({"type": "list_workers", "transfer_id": transfer_id}))
+            workers = await asyncio.wait_for(fut, timeout=10.0)
+        except asyncio.TimeoutError:
+            logger.error(f"Timed out waiting for worker_list for transfer {transfer_id}")
+            self._worker_list_futures.pop(transfer_id, None)
+            return
+        except Exception as e:
+            logger.error(f"Failed to get worker list for transfer {transfer_id}: {e}")
+            self._worker_list_futures.pop(transfer_id, None)
+            return
+
+        if not workers:
+            logger.warning(f"No workers available for assignment {assignment_id}")
+            return
+
+        def sla_score(w: dict) -> float:
+            trust = float(w.get("trustScore", 0.5))
+            bw = float(w.get("bandwidthMbps", 100.0))
+            return trust * min(2.0, bw / 100.0)
+
+        sorted_workers = sorted(workers, key=sla_score, reverse=True)
+        worker_ids = [w["workerId"] for w in sorted_workers]
+
+        assignments = [
+            {"chunk_index": i, "worker_id": worker_ids[i % len(worker_ids)]}
+            for i in range(chunk_start, chunk_end + 1)
+        ]
+
+        await self._ws.send(json.dumps({
+            "type": "chunk_assignments",
+            "assignment_id": assignment_id,
+            "assignments": assignments,
+        }))
+        logger.info(f"Sent {len(assignments)} chunk_assignments for assignment {assignment_id}")
 
     async def _send_ws_heartbeat(self):
         """Send heartbeat over WebSocket with full stats."""
@@ -773,7 +838,8 @@ class SubnetCoreClient:
         signature = ""
         if self.signer:
             try:
-                signature = self.signer.sign(reg_message.encode()).hex()
+                sig_bytes = self.signer.sign(reg_message.encode())
+                signature = "0x" + (sig_bytes.hex() if isinstance(sig_bytes, bytes) else str(sig_bytes))
             except Exception as e:
                 logger.warning(f"Failed to sign registration: {e}")
 
