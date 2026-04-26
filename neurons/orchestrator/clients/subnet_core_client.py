@@ -281,6 +281,7 @@ class SubnetCoreClient:
         # API key authentication (for buffer service)
         self._api_key: Optional[str] = None
         self._api_key_expires: Optional[float] = None
+        self._skip_env_key: bool = False
 
         # Pending worker-list requests keyed by transfer_id (WS protocol)
         self._worker_list_futures: dict[str, asyncio.Future] = {}
@@ -384,7 +385,7 @@ class SubnetCoreClient:
 
         # Check for API key in environment variable
         env_api_key = os.environ.get("BEAMCORE_API_KEY")
-        if env_api_key and (env_api_key.startswith("b1m_") or env_api_key.startswith("bck_")):
+        if env_api_key and not self._skip_env_key and (env_api_key.startswith("b1m_") or env_api_key.startswith("bck_")):
             self._api_key = env_api_key
             self._api_key_expires = time.time() + 86400 * 365  # Never expires
             logger.info(f"Using BEAMCORE_API_KEY from environment for {self.orchestrator_hotkey[:16]}...")
@@ -429,6 +430,7 @@ class SubnetCoreClient:
                     "challenge_id": challenge_id,
                     "hotkey": self.orchestrator_hotkey,
                     "signature": signature,
+                    "role": "orchestrator",
                     "key_name": "Orchestrator WebSocket Key",
                 },
             )
@@ -451,8 +453,8 @@ class SubnetCoreClient:
                 return None
 
             self._api_key = verify_data["api_key"]
-            # Default to 24h expiry if not specified
             self._api_key_expires = time.time() + 86400
+            self._skip_env_key = False
 
             logger.info(f"Obtained API key for orchestrator {self.orchestrator_hotkey[:16]}...")
             logger.info(f"Save this key as BEAMCORE_API_KEY={self._api_key}")
@@ -541,6 +543,10 @@ class SubnetCoreClient:
                 await self._ws_message_loop()
             except ConnectionClosed as e:
                 logger.warning(f"WebSocket closed: {e}")
+                if e.rcvd and e.rcvd.code == 1008:
+                    self._api_key = None
+                    self._api_key_expires = None
+                    self._skip_env_key = True
             except Exception as e:
                 logger.error(f"WebSocket error: {e}")
 
