@@ -106,6 +106,17 @@ RETRY_BACKOFF = 1.0  # Base backoff in seconds
 FETCH_STREAM_CHUNK_SIZE = 64 * 1024
 WS_TASK_RESULT_ACK_TIMEOUT = float(os.environ.get("WORKER_TASK_RESULT_ACK_TIMEOUT", "3.0"))
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    return str(raw).strip().lower() in ("1", "true", "yes")
+
+
+# Participant workers default to recording a payment obligation unless opted out.
+WORKER_REQUIRED_PAYMENT = _env_bool("WORKER_REQUIRED_PAYMENT", True)
+
 # Global semaphore for task concurrency
 task_semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 
@@ -435,7 +446,7 @@ async def submit_worker_payment_evidence(
         "end_time_us": int(end_time_us),
         "chunk_hash": chunk_hash or "",
         "worker_signature": worker_signature,
-        "required_payment": True,
+        "required_payment": WORKER_REQUIRED_PAYMENT,
     }
     url = f"{state.api_url.rstrip('/')}/workers/{state.worker_id}/tasks/{task_id}/payment-evidence"
 

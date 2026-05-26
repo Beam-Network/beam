@@ -283,6 +283,7 @@ class Validator:
         # Weight history
         self.last_weight_block: int = 0
         self.weights_history: List[Dict] = []
+        self._chain_weights_rate_limit: int = 0  # cached from subtensor at startup
 
         # Penalty history
         self.penalty_history: List[dict] = []
@@ -305,17 +306,17 @@ class Validator:
 
     async def initialize(self) -> None:
         """Initialize the Validator node"""
-        logger.info("Initializing Validator node...")
+        logger.debug("Initializing Validator node...")
 
         if self.settings.local_mode:
             # Local development mode - skip Bittensor network connection
-            logger.info("Running in LOCAL MODE - skipping Bittensor network connection")
+            logger.debug("Running in LOCAL MODE - skipping Bittensor network connection")
             await self._initialize_local_mode()
         else:
             # Mainnet mode with Bittensor
             await self._initialize_bittensor_mode()
 
-        logger.info("Validator node initialized")
+        logger.debug("Validator node initialized")
 
     async def _initialize_local_mode(self) -> None:
         """Initialize validator in local development mode (no Bittensor connection)"""
@@ -336,7 +337,7 @@ class Validator:
             self.subtensor = bt.Subtensor(network=self.settings.subtensor_address)
         else:
             self.subtensor = bt.Subtensor(network=self.settings.subtensor_network)
-        logger.info(f"Connected to subtensor: {self.subtensor.network}")
+        logger.debug(f"Connected to subtensor: {self.subtensor.network}")
 
         # Load metagraph for mainnet data
         try:
@@ -345,7 +346,7 @@ class Validator:
                 network=self.subtensor.network,
             )
             self.metagraph.sync(subtensor=self.subtensor)
-            logger.info(f"Metagraph loaded with {len(self.metagraph.hotkeys)} neurons")
+            logger.debug(f"Metagraph loaded with {len(self.metagraph.hotkeys)} neurons")
         except Exception as e:
             logger.warning(f"Failed to load metagraph: {e}")
             self.metagraph = None
@@ -358,9 +359,9 @@ class Validator:
                 netuid=self.settings.netuid,
             )
             self._fiber_nodes = self.fiber_chain.get_nodes_by_hotkey()
-            logger.info(f"Fiber chain initialized with {len(self._fiber_nodes)} nodes")
+            logger.debug(f"Fiber chain initialized with {len(self._fiber_nodes)} nodes")
         except Exception as e:
-            logger.warning(f"Fiber not available: {e}")
+            logger.warning("Fiber chain init failed: %s", e, exc_info=True)
             self.fiber_chain = None
 
         # Create HTTP session for local mode communication
@@ -380,7 +381,7 @@ class Validator:
         # Discover orchestrators
         await self._discover_orchestrators()
 
-        logger.info(f"Local mode initialized with hotkey: {self.hotkey}")
+        logger.debug(f"Local mode initialized with hotkey: {self.hotkey}")
 
     async def _initialize_bittensor_mode(self) -> None:
         """Initialize validator in Bittensor network mode"""
@@ -391,14 +392,14 @@ class Validator:
             path=self.settings.wallet_path,
         )
         self.hotkey = self.wallet.hotkey.ss58_address
-        logger.info(f"Wallet loaded: {self.hotkey}")
+        logger.debug(f"Wallet loaded: {self.hotkey}")
 
         # Connect to subtensor
         if self.settings.subtensor_address:
             self.subtensor = bt.Subtensor(network=self.settings.subtensor_address)
         else:
             self.subtensor = bt.Subtensor(network=self.settings.subtensor_network)
-        logger.info(f"Connected to subtensor: {self.subtensor.network}")
+        logger.debug(f"Connected to subtensor: {self.subtensor.network}")
 
         # Load metagraph
         self.metagraph = bt.Metagraph(
@@ -415,13 +416,47 @@ class Validator:
                 netuid=self.settings.netuid,
             )
             self._fiber_nodes = self.fiber_chain.get_nodes_by_hotkey()
-            logger.info(f"Fiber chain initialized with {len(self._fiber_nodes)} nodes")
+            logger.debug(f"Fiber chain initialized with {len(self._fiber_nodes)} nodes")
         except Exception as e:
-            logger.warning(f"Fiber not available: {e}")
+            logger.warning("Fiber chain init failed: %s", e, exc_info=True)
             self.fiber_chain = None
 
         # Check registration
         await self._check_registration()
+
+        # Seed last_weight_block from chain so a restart doesn't immediately retry set_weights
+        if self.uid is not None and self.subtensor is not None:
+            try:
+                last_update_vec = self.subtensor.query_module(
+                    "SubtensorModule", "LastUpdate", [self.settings.netuid]
+                )
+                vec = (last_update_vec.value or []) if last_update_vec else []
+                if self.uid < len(vec):
+                    self.last_weight_block = int(vec[self.uid])
+                    _sw_rows = [
+                        ("UID",        str(self.uid)),
+                        ("Last Block", str(self.last_weight_block)),
+                    ]
+                    _sw_kw = max(len(k) for k, _ in _sw_rows)
+                    _sw_vw = max(len(v) for _, v in _sw_rows)
+                    _sw_in = _sw_kw + _sw_vw + 5
+                    print("\n".join([
+                        f"┌{'─' * _sw_in}┐",
+                        f"│{'Chain Weight Block':^{_sw_in}}│",
+                        f"├{'─' * (_sw_kw + 2)}┬{'─' * (_sw_vw + 2)}┤",
+                        *[f"│ {k:<{_sw_kw}} │ {v:<{_sw_vw}} │" for k, v in _sw_rows],
+                        f"└{'─' * (_sw_kw + 2)}┴{'─' * (_sw_vw + 2)}┘",
+                    ]), flush=True)
+            except Exception as _exc:
+                logger.debug("Could not read LastUpdate from chain: %s", _exc)
+
+        # Cache the chain's weights_rate_limit so we can compute wait times without hitting chain
+        if self.subtensor is not None:
+            try:
+                self._chain_weights_rate_limit = self.subtensor.weights_rate_limit(self.settings.netuid) or 0
+                logger.info("Chain weights_rate_limit for netuid %s: %s blocks", self.settings.netuid, self._chain_weights_rate_limit)
+            except Exception as _exc:
+                logger.debug("Could not read weights_rate_limit: %s", _exc)
 
         # Setup dendrite for querying connections
         self.dendrite = bt.Dendrite(wallet=self.wallet)
@@ -437,7 +472,7 @@ class Validator:
         if uid is not None:
             self.uid = uid
             self.is_registered = True
-            logger.info(f"Registered on subnet {self.settings.netuid} with UID {self.uid}")
+            logger.debug(f"Registered on subnet {self.settings.netuid} with UID {self.uid}")
         else:
             self.is_registered = False
             logger.warning(f"Hotkey {self.hotkey} not registered on subnet")
@@ -543,6 +578,53 @@ class Validator:
 
         logger.info("Validator node stopped")
 
+    async def _submit_beamcore_heartbeat(self) -> None:
+        """POST /validators/heartbeat to BeamCore."""
+        if not SUBNET_CORE_AVAILABLE or not self.subnet_core_client:
+            return
+
+        health_info = None
+        if self.health_monitor:
+            try:
+                report = await self.health_monitor.run_health_checks()
+                health_info = {
+                    "status": report.get("status"),
+                    "checks_passed": report.get("checks_passed", 0),
+                    "checks_failed": report.get("checks_failed", 0),
+                }
+            except Exception:
+                pass
+
+        status = "online"
+        if health_info and health_info.get("checks_failed", 0) > 0:
+            status = "degraded"
+
+        result = await self.subnet_core_client.submit_heartbeat(
+            validator_uid=self.uid,
+            status=status,
+            last_epoch_scored=self.current_epoch or None,
+            health_info=health_info,
+            external_url=self.settings.external_url,
+        )
+        api_key = result.get("api_key")
+        if api_key:
+            self.subnet_core_client._api_key = api_key
+        _hb_items = [
+            ("Status", status),
+            ("UID",    str(self.uid)),
+            ("Epoch",  str(self.current_epoch) if self.current_epoch else "—"),
+        ]
+        if api_key:
+            _hb_items.append(("API Key", "received"))
+        _hk, _hv = 7, max(len(v) for _, v in _hb_items)
+        _hv = max(_hv, 8)
+        _top   = f"┌{'─' * (_hk + _hv + 5)}┐"
+        _title = f"│{'Heartbeat':^{_hk + _hv + 5}}│"
+        _sep   = f"├{'─' * (_hk + 2)}┬{'─' * (_hv + 2)}┤"
+        _body  = "\n".join(f"│ {k:<{_hk}} │ {v:<{_hv}} │" for k, v in _hb_items)
+        _bot   = f"└{'─' * (_hk + 2)}┴{'─' * (_hv + 2)}┘"
+        print("\n".join([_top, _title, _sep, _body, _bot]), flush=True)
+
     async def _heartbeat_loop(self) -> None:
         """Send periodic heartbeats to SubnetCore while running."""
         heartbeat_interval = 60  # seconds
@@ -554,34 +636,7 @@ class Validator:
                 if not self._running:
                     break
 
-                if not SUBNET_CORE_AVAILABLE or not self.subnet_core_client:
-                    continue
-
-                # Gather health info if available
-                health_info = None
-                if self.health_monitor:
-                    try:
-                        report = await self.health_monitor.run_health_checks()
-                        health_info = {
-                            "status": report.get("status"),
-                            "checks_passed": report.get("checks_passed", 0),
-                            "checks_failed": report.get("checks_failed", 0),
-                        }
-                    except Exception:
-                        pass
-
-                # Determine status
-                status = "online"
-                if health_info and health_info.get("checks_failed", 0) > 0:
-                    status = "degraded"
-
-                await self.subnet_core_client.submit_heartbeat(
-                    validator_uid=self.uid,
-                    status=status,
-                    last_epoch_scored=getattr(self, "current_epoch", None),
-                    health_info=health_info,
-                    external_url=self.settings.external_url,
-                )
+                await self._submit_beamcore_heartbeat()
 
             except asyncio.CancelledError:
                 break
@@ -2003,8 +2058,17 @@ class Validator:
             return
 
         current_block = self.subtensor.block
+        blocks_since = current_block - self.last_weight_block
 
-        if current_block - self.last_weight_block < self.settings.blocks_between_weights:
+        def _fmt_wait(blocks: int) -> str:
+            secs = blocks * 12
+            return f"~{secs // 60}m {secs % 60}s" if secs >= 60 else f"~{secs}s"
+
+        # Chain uses strict `blocks_since > rate_limit`, so we must wait for blocks_since >= rate_limit + 1
+        effective_limit = max(self.settings.blocks_between_weights, self._chain_weights_rate_limit)
+        if blocks_since <= effective_limit:
+            blocks_remaining = effective_limit - blocks_since + 1
+            logger.info("Next weight set window in %s (%d blocks)", _fmt_wait(blocks_remaining), blocks_remaining)
             return
 
         await self._set_weights()
@@ -2020,12 +2084,7 @@ class Validator:
             logger.warning("No persisted BeamCore weight snapshot available")
             return
 
-        uids, weights, formula_version, params_hash, data_epoch = weight_snapshot
-
-        logger.info(
-            f"_set_weights: setting weights for {len(uids)} UIDs ({formula_version}), "
-            f"top weights: {sorted(zip(uids, weights), key=lambda x: -x[1])[:5]}"
-        )
+        uids, weights, formula_version, params_hash, data_epoch, _no_weight_period, _burn_reason = weight_snapshot
 
         # Set weights on chain
         try:
@@ -2041,9 +2100,6 @@ class Validator:
                     logger.debug(f"Could not check commit-reveal status: {e}")
 
             if commit_reveal_enabled and self.subtensor is not None:
-                # Use set_weights for subnets with commit-reveal enabled
-                # set_weights() handles the full time-locked commit-reveal flow automatically
-                logger.info("Using set_weights with time-locked commit-reveal")
                 result = self.subtensor.set_weights(
                     wallet=self.wallet,
                     netuid=self.settings.netuid,
@@ -2082,10 +2138,40 @@ class Validator:
 
             if success:
                 self.last_weight_block = self.subtensor.block if self.subtensor else 0
-                logger.info(
-                    f"Weights set successfully via {weight_method} at block {self.last_weight_block} "
-                    f"(formula={formula_version})"
-                )
+                _kw, _uw, _ww = 9, 4, 10
+                _info_items = [
+                    ("Block",   str(self.last_weight_block)),
+                    ("Epoch",   str(data_epoch)),
+                    ("Method",  weight_method),
+                    ("Formula", formula_version),
+                ]
+                if _no_weight_period:
+                    _info_items.append(("Period", f"BURN — {_burn_reason}"))
+                _vw = max(len(v) for _, v in _info_items)
+                _hw = _kw + _vw - _uw - _ww - 3  # derived: header_outer == uid_outer
+                _hw = max(_hw, 20)                # ensure hotkey col is readable
+                _vw = _uw + _hw + _ww + 3 - _kw  # recompute in case _hw was clamped
+                _hotkeys = getattr(self.metagraph, "hotkeys", []) if self.metagraph else []
+                _sorted_w = sorted(zip(uids, weights), key=lambda x: -x[1])
+                _uid_rows = []
+                for _uid, _w in _sorted_w:
+                    if _uid == 0 and _w > 0:
+                        _hk = "(burn)"
+                    elif 0 <= _uid < len(_hotkeys):
+                        _hk = (_hotkeys[_uid][:_hw - 3] + "...") if len(_hotkeys[_uid]) > _hw else _hotkeys[_uid]
+                    else:
+                        _hk = "unknown"
+                    _uid_rows.append(f"│ {_uid:>{_uw}} │ {_hk:<{_hw}} │ {_w:>{_ww}.4f} │")
+                _inner = _kw + _vw + 5
+                _top    = f"┌{'─' * _inner}┐"
+                _title  = f"│{'Weight Set Successfully':^{_inner}}│"
+                _hsep1  = f"├{'─' * (_kw + 2)}┬{'─' * (_vw + 2)}┤"
+                _info   = "\n".join(f"│ {k:<{_kw}} │ {v:<{_vw}} │" for k, v in _info_items)
+                _hsep2  = f"├{'─' * (_uw + 2)}┬{'─' * (_hw + 2)}┬{'─' * (_ww + 2)}┤"
+                _uidhdr = f"│ {'UID':>{_uw}} │ {'Hotkey':<{_hw}} │ {'Weight':>{_ww}} │"
+                _hsep3  = f"├{'─' * (_uw + 2)}┼{'─' * (_hw + 2)}┼{'─' * (_ww + 2)}┤"
+                _bot    = f"└{'─' * (_uw + 2)}┴{'─' * (_hw + 2)}┴{'─' * (_ww + 2)}┘"
+                print("\n".join([_top, _title, _hsep1, _info, _hsep2, _uidhdr, _hsep3] + _uid_rows + [_bot]), flush=True)
 
                 self.weights_history.append(
                     {
@@ -2100,21 +2186,39 @@ class Validator:
                 if len(self.weights_history) > 100:
                     self.weights_history = self.weights_history[-100:]
 
+                if self.subnet_core_client:
+                    try:
+                        await self.subnet_core_client.submit_weight_proof(
+                            epoch=data_epoch,
+                            block_number=self.last_weight_block,
+                            netuid=self.settings.netuid,
+                            uids=list(uids),
+                            weights=list(weights),
+                            formula_version=formula_version,
+                            params_hash=params_hash,
+                        )
+                        logger.debug("Weight proof submitted to BeamCore")
+                    except Exception as _e:
+                        _body = getattr(getattr(_e, "response", None), "text", None)
+                        logger.warning("Failed to submit weight proof: %s%s", _e, f" — {_body}" if _body else "")
+
             else:
-                error_msg = message or (
-                    "Unknown error. Common causes: "
-                    "(1) Too soon since last weight update - wait for rate limit, "
-                    "(2) Wallet not registered on subnet, "
-                    "(3) Subtensor connection issue"
+                _cur_block = self.subtensor.block if self.subtensor else "?"
+                _msg = message or "(empty — likely chain rate limit or rejection)"
+                logger.error(
+                    "Failed to set weights: method=%s block=%s last_weight_block=%s message=%r",
+                    weight_method, _cur_block, self.last_weight_block, _msg,
                 )
-                logger.error(f"Failed to set weights: {error_msg}")
+                # Back off: treat this attempt as the new baseline so we don't
+                # retry every block after a chain rejection.
+                self.last_weight_block = self.subtensor.block if self.subtensor else self.last_weight_block
 
         except Exception as e:
             logger.error(f"Error setting weights: {e}", exc_info=True)
 
     async def _get_persisted_weight_snapshot(
         self,
-    ) -> Optional[Tuple[List[int], List[float], str, Optional[str], int]]:
+    ) -> Optional[Tuple[List[int], List[float], str, Optional[str], int, bool, str]]:
         """Fetch recommended weights from BeamCore epoch summary (ops-materialized)."""
         if not self.subnet_core_client:
             return None
@@ -2136,7 +2240,10 @@ class Validator:
         else:
             params_hash = None
         data_epoch = int(snapshot.get("epoch", self.current_epoch))
-        return (list(uids), list(weights), fv, params_hash, data_epoch)
+
+        _no_weight_period = bool(snapshot.get("no_weight_period"))
+        _burn_reason = snapshot.get("reason", "") if _no_weight_period else ""
+        return (list(uids), list(weights), fv, params_hash, data_epoch, _no_weight_period, _burn_reason)
 
     # =========================================================================
     # Epoch Management
@@ -2164,7 +2271,7 @@ class Validator:
             self.current_epoch = current_epoch
             self.epoch_start_block = current_epoch * epoch_length_blocks
 
-            logger.info(f"New epoch: {self.current_epoch} (was {previous_epoch})")
+            logger.info("══════════════ EPOCH %s ══════════════ (prev=%s)", self.current_epoch, previous_epoch)
             self.tasks_this_epoch = 0
 
             # Reset PoB verification stats for the new epoch

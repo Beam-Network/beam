@@ -214,6 +214,37 @@ class SubnetCoreClient:
         response.raise_for_status()
         return response.json()
 
+    async def submit_weight_proof(
+        self,
+        epoch: int,
+        block_number: int,
+        netuid: int,
+        uids: list,
+        weights: list,
+        formula_version: Optional[str] = None,
+        params_hash: Optional[str] = None,
+        tx_hash: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Record a successful on-chain weight set so the dashboard can reflect it."""
+        body = {
+            "epoch": epoch,
+            "block_number": block_number,
+            "netuid": netuid,
+            "uids": uids,
+            "weights": weights,
+            "formula_version": formula_version,
+            "params_hash": params_hash,
+            "tx_hash": tx_hash,
+        }
+        response = await self._request(
+            "POST",
+            "/validators/weights/proof",
+            action="submit_weight_proof",
+            json={k: v for k, v in body.items() if v is not None},
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def submit_heartbeat(
         self,
         validator_uid: int,

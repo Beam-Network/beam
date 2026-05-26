@@ -241,6 +241,7 @@ class HealthMonitor:
 
     async def _health_loop(self) -> None:
         """Main health checking loop"""
+        await asyncio.sleep(HEALTH_CHECK_INTERVAL_SECONDS)
         while self._running:
             try:
                 report = await self.run_health_checks()

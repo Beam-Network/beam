@@ -74,7 +74,8 @@ class Settings(BaseSettings):
     # Weight Setting
     # ==========================================================================
 
-    blocks_between_weights: int = 100  # ~20 minutes
+    # Override via BEAM_VALIDATOR_BLOCKS_BETWEEN_WEIGHTS env var (e.g., =360 for testnet ~100s/block)
+    blocks_between_weights: int = 100  # ~20 minutes on mainnet
     weight_alpha: float = 0.3  # EMA smoothing factor
 
     # ==========================================================================

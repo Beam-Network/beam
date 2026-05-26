@@ -45,7 +45,7 @@ class FiberNode:
             node_id=uid,
             netuid=netuid,
             incentive=float(metagraph.I[uid]),
-            trust=float(metagraph.T[uid]) if hasattr(metagraph, "T") else 0.0,
+            trust=float(metagraph.TS[uid]) if hasattr(metagraph, "TS") else float(metagraph.T[uid]),
             vtrust=float(metagraph.Tv[uid]) if hasattr(metagraph, "Tv") else 0.0,
             last_updated=float(metagraph.last_update[uid]),
             ip=axon.ip,

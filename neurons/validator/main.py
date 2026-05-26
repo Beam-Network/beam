@@ -49,13 +49,10 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     logging.getLogger().setLevel(settings.log_level)
 
-    if settings.core_server_url:
-        logger.info(f"Initializing SubnetCore API client: {settings.core_server_url}")
-
-    logger.info(f"Initializing Validator (local_mode={settings.local_mode})")
     validator = Validator(settings)
     await validator.initialize()
 
+    signed_auth = "disabled"
     if settings.core_server_url and validator.hotkey:
         subnet_core_client = init_subnet_core_client(
             base_url=settings.core_server_url,
@@ -65,16 +62,29 @@ async def lifespan(app: FastAPI):
         )
         validator.subnet_core_client = subnet_core_client
         signed_auth = "enabled" if validator.wallet else "disabled"
-        logger.info(
-            f"SubnetCore API client initialized for hotkey {validator.hotkey[:16]}... "
-            f"(signed_auth={signed_auth})"
-        )
 
-    asyncio.create_task(validator.start())
+    network = validator.subtensor.network if validator.subtensor else "unknown"
+    fiber_status = "available" if validator.fiber_chain else "unavailable"
+    _rows = [
+        ("Hotkey",       validator.hotkey or "—"),
+        ("UID",          str(validator.uid) if validator.uid is not None else "—"),
+        ("Subnet",       f"{settings.netuid} ({network})"),
+        ("BeamCore",     settings.core_server_url or "—"),
+        ("Signed Auth",  signed_auth),
+        ("Fiber",        fiber_status),
+        ("Local Mode",   str(settings.local_mode)),
+        ("Port",         str(settings.port)),
+        ("External URL", settings.external_url or "—"),
+    ]
+    _kw, _vw = 16, max(len(v) for _, v in _rows)
+    _top   = f"┌{'─' * (_kw + _vw + 5)}┐"
+    _title = f"│{'BEAM Validator Ready':^{_kw + _vw + 5}}│"
+    _sep   = f"├{'─' * (_kw + 2)}┬{'─' * (_vw + 2)}┤"
+    _body  = "\n".join(f"│ {k:<{_kw}} │ {v:<{_vw}} │" for k, v in _rows)
+    _bot   = f"└{'─' * (_kw + 2)}┴{'─' * (_vw + 2)}┘"
+    await validator.start()
 
-    logger.info("BEAM Validator node started")
-    if settings.external_url:
-        logger.info(f"External URL: {settings.external_url}")
+    print("\n".join([_top, _title, _sep, _body, _bot]), flush=True)
 
     yield
 

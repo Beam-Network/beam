@@ -105,9 +105,16 @@ class ProofOfBandwidth:
     signature: str = ""
 
 
-def build_merkle_leaf(data: str) -> str:
-    """Build a merkle leaf from data."""
-    return sha256(data.encode() if isinstance(data, str) else data)
+def build_merkle_leaf(data: str = "", **kwargs) -> str:
+    """Build a merkle leaf from data or named hop fields."""
+    if kwargs:
+        combined = ":".join(str(v) for v in [
+            kwargs.get("prev_hop_id", ""), kwargs.get("current_miner_id", ""),
+            kwargs.get("next_hop_id", ""), kwargs.get("bytes_relayed", 0),
+            kwargs.get("start_time", 0), kwargs.get("end_time", 0),
+        ])
+        return sha256(combined.encode()).hex()
+    return sha256(data.encode() if isinstance(data, str) else data).hex()
 
 
 def compute_merkle_root(leaves: List[str]) -> str:
