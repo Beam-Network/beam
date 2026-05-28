@@ -164,6 +164,15 @@ class TaskExecutionResult:
     error_msg: Optional[str] = None
 
 
+@dataclass
+class TaskSummaryAck:
+    """BeamCore task_result_summary_ack fields used for payment gating."""
+
+    received: bool = False
+    completed: bool = False
+    reason: Optional[str] = None
+
+
 def task_label(task_id: Optional[str]) -> str:
     """Short task label for logs."""
     return task_id[:16] if task_id else "unknown"
@@ -1169,9 +1178,10 @@ async def finalize_ws_task_result(
     etag: str = None,
     error: str = None,
     offer_id: str = None,
-) -> bool:
-    """Send a fast task result summary over WS and retry on the same WS if the ack is delayed."""
+) -> TaskSummaryAck:
+    """Send task_result_summary and wait for BeamCore ack (received / completed)."""
     result_key = offer_id or task_id
+    empty = TaskSummaryAck()
 
     for attempt in range(3):
         ack_future: asyncio.Future = asyncio.get_event_loop().create_future()
@@ -1197,12 +1207,19 @@ async def finalize_ws_task_result(
                 continue
 
             try:
-                received = await asyncio.wait_for(ack_future, timeout=WS_TASK_RESULT_ACK_TIMEOUT)
-                if received:
+                ack = await asyncio.wait_for(ack_future, timeout=WS_TASK_RESULT_ACK_TIMEOUT)
+                if ack.completed:
                     print(
-                        f"[Worker] [WS] Task result acked: {task_label(task_id)} offer={task_label(offer_id)}"
+                        f"[Worker] [WS] Task completed on BeamCore: {task_label(task_id)} offer={task_label(offer_id)}"
                     )
-                    return True
+                    return ack
+                if ack.received:
+                    reason = ack.reason or "not_completed"
+                    print(
+                        f"[Worker] [WS] Task result received but not completed: "
+                        f"task={task_label(task_id)} offer={task_label(offer_id)} reason={reason}"
+                    )
+                    return ack
                 print(
                     f"[Worker] [WS] Task result nack from gateway: {task_label(task_id)} offer={task_label(offer_id)}"
                 )
@@ -1217,7 +1234,7 @@ async def finalize_ws_task_result(
     print(
         f"[Worker] [WS] Task result failed after websocket retries: {task_label(task_id)} offer={task_label(offer_id)}"
     )
-    return False
+    return empty
 
 
 async def ws_send_json(websocket, state: WorkerState, payload: dict) -> None:
@@ -1322,7 +1339,7 @@ async def handle_ws_task(state: WorkerState, websocket, task: dict) -> bool:
             log_prefix="[Worker] [WS]",
         )
 
-        summary_acked = await finalize_ws_task_result(
+        summary_ack = await finalize_ws_task_result(
             websocket,
             state,
             task_id,
@@ -1338,7 +1355,7 @@ async def handle_ws_task(state: WorkerState, websocket, task: dict) -> bool:
             offer_id=offer_id,
         )
 
-        if result.success and summary_acked:
+        if result.success and summary_ack.completed:
             await submit_worker_payment_evidence(
                 state,
                 task_id,
@@ -1440,11 +1457,23 @@ async def websocket_loop(state: WorkerState):
                             elif msg_type == "task_result_summary_ack":
                                 ack_task_id = message.get("task_id")
                                 ack_offer_id = message.get("offer_id") or ack_task_id
-                                received = message.get("received", False)
+                                received = bool(message.get("received", False))
+                                completed_raw = message.get("completed")
+                                completed = (
+                                    bool(completed_raw)
+                                    if completed_raw is not None
+                                    else received
+                                )
+                                reason = message.get("reason")
+                                ack = TaskSummaryAck(
+                                    received=received,
+                                    completed=completed,
+                                    reason=str(reason) if reason else None,
+                                )
                                 if ack_offer_id and ack_offer_id in state.pending_task_results:
                                     future = state.pending_task_results.pop(ack_offer_id)
                                     if not future.done():
-                                        future.set_result(bool(received))
+                                        future.set_result(ack)
                                 if not received:
                                     print(
                                         f"[Worker] [WS] Gateway rejected task_result_summary: "
