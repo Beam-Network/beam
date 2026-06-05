@@ -101,7 +101,7 @@ Clients / Validators                Orchestrators
 
 **Pipeline:** `transfers → transfer_assignments → tasks → task_results → proofs_of_bandwidth → payments`.
 
-**PRISM:** orchestrators are tracked in **qualifying** vs **qualified** pools; production routing uses `prism_final_score` (see BeamCore docs / dashboard).
+**PRISM:** orchestrators are tracked in **qualifying** vs **qualified** pools; production routing uses `prism_final_score` (see [Beam dashboard](https://data.b1m.ai/)).
 
 ### How this repo fits in
 
