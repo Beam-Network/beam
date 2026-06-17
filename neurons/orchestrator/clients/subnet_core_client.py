@@ -612,11 +612,6 @@ class SubnetCoreClient:
             self._registered = False
             self._schedule_registration_retry_if_needed()
 
-        elif msg_type == "ping":
-            # Respond to server ping
-            if self._ws:
-                await self._ws.send(json.dumps({"type": "pong"}))
-
         elif msg_type == "error":
             if data.get("code") == "unauthorized":
                 logger.warning(
