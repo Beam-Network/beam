@@ -283,6 +283,9 @@ class Validator:
         self.last_weight_block: int = 0
         self.weights_history: List[Dict] = []
         self._chain_weights_rate_limit: int = 0  # cached from subtensor at startup
+        self._cr_enabled: bool = False            # commit-reveal enabled on this subnet
+        self._cr_interval: int = 0               # commit-reveal epoch length in blocks
+        self.last_weight_cr_epoch: int = -1      # CR epoch in which weights were last set
 
         # Penalty history
         self.penalty_history: List[dict] = []
@@ -466,6 +469,30 @@ class Validator:
                 logger.info("Chain weights_rate_limit for netuid %s: %s blocks", self.settings.netuid, self._chain_weights_rate_limit)
             except Exception as _exc:
                 logger.debug("Could not read weights_rate_limit: %s", _exc)
+
+        # Cache commit-reveal state so weight-setting logic can align to CR epochs
+        if self.subtensor is not None:
+            try:
+                cr_result = self.subtensor.query_module(
+                    "SubtensorModule", "CommitRevealWeightsEnabled", [self.settings.netuid]
+                )
+                self._cr_enabled = bool(cr_result.value) if cr_result else False
+            except Exception as _exc:
+                logger.debug("Could not read CommitRevealWeightsEnabled: %s", _exc)
+            if self._cr_enabled:
+                try:
+                    cr_interval_result = self.subtensor.query_module(
+                        "SubtensorModule", "CommitRevealWeightsInterval", [self.settings.netuid]
+                    )
+                    self._cr_interval = int(cr_interval_result.value) if cr_interval_result else 0
+                except Exception as _exc:
+                    logger.debug("Could not read CommitRevealWeightsInterval: %s", _exc)
+                logger.info(
+                    "CR4 enabled on netuid %s: epoch interval = %s blocks (~%dm)",
+                    self.settings.netuid,
+                    self._cr_interval,
+                    (self._cr_interval * 12) // 60,
+                )
 
         # Setup dendrite for querying connections
         self.dendrite = bt.Dendrite(wallet=self.wallet)
@@ -2029,6 +2056,20 @@ class Validator:
             logger.info("Next weight set window in %s (%d blocks)", _fmt_wait(blocks_remaining), blocks_remaining)
             return
 
+        # When CR4 is active, submit at most one commit per CR epoch to avoid
+        # overwriting commits mid-epoch, which causes vtrust to oscillate.
+        if self._cr_enabled and self._cr_interval > 0:
+            current_cr_epoch = current_block // self._cr_interval
+            if current_cr_epoch == self.last_weight_cr_epoch:
+                blocks_until_next = (current_cr_epoch + 1) * self._cr_interval - current_block
+                logger.info(
+                    "CR4: weights already set this epoch (%d). Next epoch in %s (%d blocks)",
+                    current_cr_epoch,
+                    _fmt_wait(blocks_until_next),
+                    blocks_until_next,
+                )
+                return
+
         await self._set_weights()
 
     async def _set_weights(self) -> None:
@@ -2046,18 +2087,7 @@ class Validator:
 
         # Set weights on chain
         try:
-            # Check if commit-reveal is enabled on this subnet
-            commit_reveal_enabled = False
-            if self.subtensor is not None:
-                try:
-                    cr_result = self.subtensor.query_module(
-                        "SubtensorModule", "CommitRevealWeightsEnabled", [self.settings.netuid]
-                    )
-                    commit_reveal_enabled = bool(cr_result.value) if cr_result else False
-                except Exception as e:
-                    logger.debug(f"Could not check commit-reveal status: {e}")
-
-            if commit_reveal_enabled and self.subtensor is not None:
+            if self._cr_enabled and self.subtensor is not None:
                 result = self.subtensor.set_weights(
                     wallet=self.wallet,
                     netuid=self.settings.netuid,
@@ -2096,6 +2126,8 @@ class Validator:
 
             if success:
                 self.last_weight_block = self.subtensor.block if self.subtensor else 0
+                if self._cr_enabled and self._cr_interval > 0:
+                    self.last_weight_cr_epoch = self.last_weight_block // self._cr_interval
                 _kw, _uw, _ww = 9, 4, 10
                 _info_items = [
                     ("Block",   str(self.last_weight_block)),
