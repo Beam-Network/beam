@@ -481,15 +481,18 @@ class Validator:
                 logger.debug("Could not read CommitRevealWeightsEnabled: %s", _exc)
             if self._cr_enabled:
                 try:
-                    cr_interval_result = self.subtensor.query_module(
-                        "SubtensorModule", "CommitRevealWeightsInterval", [self.settings.netuid]
+                    reveal_epochs_result = self.subtensor.query_module(
+                        "SubtensorModule", "RevealPeriodEpochs", [self.settings.netuid]
                     )
-                    self._cr_interval = int(cr_interval_result.value) if cr_interval_result else 0
+                    reveal_period_epochs = int(reveal_epochs_result.value) if reveal_epochs_result else 1
+                    tempo = self.subtensor.tempo(self.settings.netuid) or 360
+                    self._cr_interval = reveal_period_epochs * tempo
                 except Exception as _exc:
-                    logger.debug("Could not read CommitRevealWeightsInterval: %s", _exc)
+                    logger.debug("Could not read RevealPeriodEpochs: %s", _exc)
                 logger.info(
-                    "CR4 enabled on netuid %s: epoch interval = %s blocks (~%dm)",
+                    "CR4 enabled on netuid %s: reveal_period=%d epoch(s), interval=%d blocks (~%dm)",
                     self.settings.netuid,
+                    reveal_period_epochs if self._cr_interval else 0,
                     self._cr_interval,
                     (self._cr_interval * 12) // 60,
                 )
