@@ -12,6 +12,7 @@ import asyncio
 import inspect
 import json
 import logging
+import pathlib
 import time
 import uuid
 from typing import Any, Callable, Dict, Optional
@@ -103,6 +104,8 @@ class SubnetCoreClient:
         self._api_key: Optional[str] = None
         self._api_key_expires: Optional[float] = None
         self._skip_env_key: bool = False
+        self._key_cache_path = pathlib.Path(f"/tmp/beam_orch_api_key_{orchestrator_hotkey[:16]}.json")
+        self._load_cached_key()
 
         # Pending WebSocket requests keyed by request id
         self._pending_ws_requests: dict[str, asyncio.Future] = {}
@@ -116,6 +119,34 @@ class SubnetCoreClient:
     # =========================================================================
     # Handlers for polling notifications
     # =========================================================================
+
+    def _load_cached_key(self) -> None:
+        try:
+            if self._key_cache_path.exists():
+                data = json.loads(self._key_cache_path.read_text())
+                if data.get("expires") and time.time() < data["expires"] - 60:
+                    self._api_key = data["key"]
+                    self._api_key_expires = data["expires"]
+                    logger.info("Loaded cached API key from disk for %s", self.orchestrator_hotkey[:16])
+        except Exception:
+            pass
+
+    def _persist_key(self) -> None:
+        try:
+            self._key_cache_path.write_text(json.dumps({
+                "key": self._api_key,
+                "expires": self._api_key_expires,
+            }))
+        except Exception:
+            pass
+
+    def _clear_cached_key(self) -> None:
+        self._api_key = None
+        self._api_key_expires = None
+        try:
+            self._key_cache_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     def set_worker_update_handler(self, handler: Callable):
         """
@@ -245,6 +276,15 @@ class SubnetCoreClient:
                 },
             )
 
+            if challenge_resp.status_code == 429:
+                retry_after = challenge_resp.headers.get("Retry-After", "300")
+                logger.error(
+                    "Too many auth challenge requests for this hotkey. "
+                    "Update your code and try again after %s second cooldown period.",
+                    retry_after,
+                )
+                return None
+
             if challenge_resp.status_code != 200:
                 logger.error(f"Failed to get auth challenge: {challenge_resp.status_code}")
                 return None
@@ -297,6 +337,7 @@ class SubnetCoreClient:
             self._api_key = verify_data["api_key"]
             self._api_key_expires = time.time() + 86400
             self._skip_env_key = False
+            self._persist_key()
 
             logger.info(f"Obtained API key for orchestrator {self.orchestrator_hotkey[:16]}...")
             logger.info("Obtained API key is active for this process")
@@ -423,15 +464,13 @@ class SubnetCoreClient:
                 self.orchestrator_hotkey,
                 closed,
             )
-            self._api_key = None
-            self._api_key_expires = None
+            self._clear_cached_key()
             self._skip_env_key = True
             return
 
         logger.warning("WebSocket closed: %s", closed)
         if code == 1008:
-            self._api_key = None
-            self._api_key_expires = None
+            self._clear_cached_key()
             self._skip_env_key = True
 
     async def _connect_websocket(self):
