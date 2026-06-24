@@ -53,6 +53,12 @@ The WebSocket session receives:
 
 The worker sends `task_accept`, `task_reject`, and `task_result` messages. Connection liveness is maintained with WebSocket ping/pong and reconnects.
 
+## Task Offer Protocol
+
+Workers read `WORKER_VERSION` from package metadata. BeamCore includes `minimum_worker_version` in every `task_offer`; workers reject offers below that SemVer with `unsupported_worker_version` before fetching source bytes or uploading destination bytes.
+
+BeamCore also includes `signed_url_flow`. `signed_url_v1` is the default object-storage flow and requires `dest_headers.Content-MD5` on UploadPart offers. Workers reject checksum-less v1 object-storage offers before upload. `signed_url_v2` remains selectable by the transfer creator.
+
 ## Payment Evidence
 
 After a successful `task_result_ack`, the worker signs and posts:

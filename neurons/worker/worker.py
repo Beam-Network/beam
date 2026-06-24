@@ -85,7 +85,27 @@ def resolve_worker_version() -> str:
     try:
         return package_version("beam")
     except PackageNotFoundError:
-        return "0.1.0"
+        return "0.2.0"
+
+
+def parse_strict_semver(value: str) -> Optional[tuple[int, int, int]]:
+    parts = str(value or "").split(".")
+    if len(parts) != 3:
+        return None
+    parsed: list[int] = []
+    for part in parts:
+        if not part.isdigit():
+            return None
+        if len(part) > 1 and part.startswith("0"):
+            return None
+        parsed.append(int(part))
+    return parsed[0], parsed[1], parsed[2]
+
+
+def worker_version_satisfies(minimum_version: str) -> bool:
+    current = parse_strict_semver(WORKER_VERSION)
+    minimum = parse_strict_semver(minimum_version)
+    return bool(current and minimum and current >= minimum)
 
 
 WORKER_VERSION = resolve_worker_version()
@@ -330,6 +350,13 @@ def build_transfer_context(task: dict) -> tuple[Optional[dict], Optional[str]]:
 
     source_headers = offer_headers(task.get("source_headers"))
     dest_headers = offer_headers(task.get("dest_headers"))
+    minimum_worker_version = str(task.get("minimum_worker_version") or "").strip()
+    if minimum_worker_version and not worker_version_satisfies(minimum_worker_version):
+        return None, "unsupported_worker_version"
+    signed_url_flow = str(task.get("signed_url_flow") or "").strip()
+    if signed_url_flow == "signed_url_v1" and is_object_storage_presigned_url(dest_url):
+        if not (dest_headers.get("Content-MD5") or dest_headers.get("content-md5")):
+            return None, "missing_content_md5"
     try:
         parsed_range = parse_offer_range(source_headers)
     except ValueError as exc:
@@ -348,6 +375,8 @@ def build_transfer_context(task: dict) -> tuple[Optional[dict], Optional[str]]:
         "range_end": range_end,
         "source_headers": source_headers,
         "dest_headers": dest_headers,
+        "signed_url_flow": signed_url_flow,
+        "minimum_worker_version": minimum_worker_version,
         "transfer_id": str(task.get("transfer_id") or task.get("task_id") or ""),
         "etag_required": bool(task.get("etag_required")),
     }, None
@@ -1235,7 +1264,7 @@ async def handle_ws_task(state: WorkerState, websocket, task: dict) -> bool:
         print("[Worker] [WS] Skipping task: missing task_id")
         return False
     if validation_error or transfer_context is None:
-        reason = f"invalid_offer:{validation_error or 'unknown'}"
+        reason = validation_error if validation_error == "unsupported_worker_version" else f"invalid_offer:{validation_error or 'unknown'}"
         await ws_send_task_reject(websocket, state, task_id, reason, offer_id=offer_id)
         print(
             f"[Worker] [WS] Rejected task {task_label(task_id)} offer={task_label(offer_id)}: "

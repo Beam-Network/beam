@@ -171,7 +171,7 @@ worker -> worker gateway -> orchestrator -> orch-gateway -> BeamCore
 worker -> BeamCore HTTP payment-evidence
 ```
 
-Each task offer includes executable URLs and headers. The orchestrator chooses a connected worker; BeamCore owns stalled-task recovery and reassignment.
+Each task offer includes executable URLs, headers, `signed_url_flow`, and `minimum_worker_version`. For checksum-bound `signed_url_v1`, object-storage upload offers include signed `dest_headers.Content-MD5`; workers reject offers that omit it. The orchestrator chooses a connected worker; BeamCore owns stalled-task recovery and reassignment.
 
 ## Troubleshooting
 
