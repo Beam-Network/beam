@@ -1,7 +1,7 @@
 """
 Reward Manager - Local emission/reward-share accounting.
 
-Operators are responsible for worker payment management.
+Operators are responsible for any external worker compensation policy.
 
 This module maintains per-worker emission-share data for dashboards, exports,
 and operator tooling.

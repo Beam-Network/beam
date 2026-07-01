@@ -120,7 +120,6 @@ Useful local endpoints:
 | `GET /Validator/epoch-summary/latest-epoch` | Materialized UID/weight vector |
 | `POST /validators/weights/proof` | Weight-set proof after a successful chain call |
 | `POST /validators/heartbeat` | Validator liveness and health |
-| `GET /pob`, `GET /pob/latest-epoch`, `GET /pob/unverified`, `POST /pob/:proof_id/verify` | Proof-of-bandwidth inspection and verification helpers |
 
 Routes are rooted at `BEAM_VALIDATOR_CORE_SERVER_URL` with no `/api` prefix.
 

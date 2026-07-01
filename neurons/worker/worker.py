@@ -139,15 +139,6 @@ FETCH_STREAM_CHUNK_SIZE = 64 * 1024
 WS_TASK_RESULT_ACK_TIMEOUT = float(os.environ.get("WORKER_TASK_RESULT_ACK_TIMEOUT", "3.0"))
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None or not str(raw).strip():
-        return default
-    return str(raw).strip().lower() in ("1", "true", "yes")
-
-
-# Participant workers default to recording a payment obligation unless opted out.
-WORKER_REQUIRED_PAYMENT = _env_bool("WORKER_REQUIRED_PAYMENT", True)
 
 # Global semaphore for task concurrency
 task_semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
@@ -192,7 +183,7 @@ class TaskExecutionResult:
 
 @dataclass
 class TaskSummaryAck:
-    """BeamCore task_result_ack fields used for payment gating."""
+    """BeamCore task_result_ack fields used by the worker runtime."""
 
     received: bool = False
     completed: bool = False
@@ -477,90 +468,6 @@ def sign_message(wallet: Any, message: str) -> str:
     return "0x" + signature.hex()
 
 
-def payment_evidence_message(
-    worker_id: str,
-    task_id: str,
-    offer_id: str,
-    chunk_hash: str = "",
-) -> str:
-    """Canonical message BeamCore verifies for worker payment evidence."""
-    return ":".join(
-        [
-            "beam-worker-payment-evidence",
-            worker_id,
-            task_id,
-            offer_id,
-            chunk_hash or "",
-        ]
-    )
-
-
-async def submit_worker_payment_evidence(
-    state: WorkerState,
-    task_id: str,
-    offer_id: str,
-    chunk_hash: str = "",
-) -> bool:
-    """Submit durable worker-signed payment evidence directly to BeamCore HTTP."""
-    if not state.worker_id or not state.api_key:
-        print("[Worker] Payment evidence skipped: missing worker_id or api_key")
-        return False
-
-    effective_offer = (offer_id or "").strip()
-    if not effective_offer:
-        print(
-            "[Worker] Payment evidence skipped: missing offer_id "
-            f"(task={task_label(task_id)}) — never substitute task_id for attempt UUID"
-        )
-        return False
-
-    message = payment_evidence_message(
-        state.worker_id,
-        task_id,
-        effective_offer,
-        chunk_hash,
-    )
-    try:
-        worker_signature = sign_message(state.wallet, message)
-    except Exception as e:
-        print(f"[Worker] Payment evidence signing failed: {e}")
-        return False
-
-    payload = {
-        "offer_id": effective_offer,
-        "success": True,
-        "chunk_hash": chunk_hash or "",
-        "worker_signature": worker_signature,
-        "required_payment": WORKER_REQUIRED_PAYMENT,
-    }
-    url = f"{state.api_url.rstrip('/')}/workers/{state.worker_id}/tasks/{task_id}/payment-evidence"
-
-    for attempt in range(3):
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(url, json=payload, headers=api_key_headers(state))
-            if 200 <= response.status_code < 300:
-                print(
-                    f"[Worker] Payment evidence OK task={task_label(task_id)} "
-                    f"offer={task_label(effective_offer)}"
-                )
-                return True
-            print(
-                f"[Worker] Payment evidence rejected attempt={attempt + 1}/3 "
-                f"status={response.status_code} task={task_label(task_id)} "
-                f"offer={task_label(effective_offer)}"
-            )
-        except Exception as e:
-            print(f"[Worker] Payment evidence submit error attempt={attempt + 1}/3: {e}")
-        await asyncio.sleep(1 + attempt)
-
-    print(
-        f"[Worker] Payment evidence FAILED after retries task_id={task_id} "
-        f"offer_id={effective_offer} worker_id={state.worker_id}"
-    )
-    return False
-
-
 async def register_worker(client: httpx.AsyncClient, state: WorkerState) -> Dict[str, Any]:
     """Register as a worker with SubnetCore.
 
@@ -571,8 +478,6 @@ async def register_worker(client: httpx.AsyncClient, state: WorkerState) -> Dict
     ip = await get_public_ip()
     port = 9000
 
-    # Generate a payment pubkey
-    payment_pubkey = hashlib.sha256(f"payment:{hotkey}".encode()).hexdigest()
 
     # Sign the registration message: "{hotkey}:{ip}:{port}"
     message = f"{hotkey}:{ip}:{port}"
@@ -588,7 +493,6 @@ async def register_worker(client: httpx.AsyncClient, state: WorkerState) -> Dict
         "port": port,
         "claimed_bandwidth_mbps": 100,
         "coldkey": wallet.coldkeypub.ss58_address if wallet.coldkeypub else hotkey,
-        "payment_pubkey": payment_pubkey,
         "signature": signature,
     }
 
@@ -1338,14 +1242,6 @@ async def handle_ws_task(state: WorkerState, websocket, task: dict) -> bool:
             error=result.error_msg,
             offer_id=offer_id,
         )
-
-        if result.success and summary_ack.completed:
-            await submit_worker_payment_evidence(
-                state,
-                task_id,
-                offer_id,
-                chunk_hash=result.chunk_hash,
-            )
 
         status = "OK" if result.success else f"FAIL: {result.error_msg}"
         print(

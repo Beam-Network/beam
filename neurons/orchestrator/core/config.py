@@ -31,7 +31,7 @@ class OrchestratorSettings(BaseSettings):
     # Add mock worker for testing (use with real wallet but no real miners)
     add_mock_worker: bool = Field(default=False, env="ADD_MOCK_WORKER")
 
-    # Mock worker hotkey (use real worker hotkey for realistic PoB records)
+    # Mock worker hotkey for local task-result simulation
     mock_worker_hotkey: Optional[str] = Field(default=None, env="MOCK_WORKER_HOTKEY")
 
     region: str = Field(default="US", env="REGION")  # US, EU, APAC, RESERVE (BeamCore registration)
@@ -123,7 +123,7 @@ class OrchestratorSettings(BaseSettings):
     weight_success: float = Field(default=0.10, env="WEIGHT_SUCCESS")
 
     # ==========================================================================
-    # Reward Distribution Weights (for epoch-end payment calculation)
+    # Reward Distribution Weights
     # ==========================================================================
     # Primary factor: bytes relayed (work done)
     reward_weight_bytes: float = Field(default=0.50, env="REWARD_WEIGHT_BYTES")

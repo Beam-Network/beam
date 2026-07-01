@@ -14,7 +14,7 @@ The orchestrator process:
 6. Relays `task_accept`, `task_reject`, and `task_result` messages upstream.
 7. Stays `READY=true` when it should receive routed production work.
 
-Workers use BeamCore HTTP for registration and payment evidence, but runtime task delivery uses the worker gateway.
+Workers use BeamCore HTTP for registration; runtime task delivery and results use the worker gateway relay path.
 
 ## Mainnet Endpoints
 
@@ -168,7 +168,7 @@ The gateway relays:
 ```text
 BeamCore -> orch-gateway -> orchestrator -> worker gateway -> worker
 worker -> worker gateway -> orchestrator -> orch-gateway -> BeamCore
-worker -> BeamCore HTTP payment-evidence
+worker -> worker gateway -> orchestrator -> orch-gateway -> BeamCore task_result
 ```
 
 Each task offer includes executable URLs, headers, `signed_url_flow`, and `minimum_worker_version`. For checksum-bound `signed_url_v1`, object-storage upload offers include signed `dest_headers.Content-MD5`; workers reject offers that omit it. The orchestrator chooses a connected worker; BeamCore owns stalled-task recovery and reassignment.

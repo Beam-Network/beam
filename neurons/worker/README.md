@@ -1,6 +1,6 @@
 # Beam Worker
 
-Workers register with BeamCore, connect to an orchestrator-owned worker gateway, execute transfer chunks, report task results, and post payment evidence.
+Workers register with BeamCore, connect to an orchestrator-owned worker gateway, execute transfer chunks, and report task results.
 
 ## Requirements
 
@@ -12,7 +12,6 @@ Workers register with BeamCore, connect to an orchestrator-owned worker gateway,
 ## Install
 
 ```bash
-# From the repository root
 pip install -e "."
 ```
 
@@ -41,17 +40,7 @@ python worker.py --wallet.name your_coldkey --wallet.hotkey your_hotkey --subten
 
 The worker transport is WebSocket-based. `CONNECTION_MODE` may be `websocket` or `auto`; values such as `polling` are rejected by the runtime.
 
-The WebSocket session receives:
-
-| Message | Purpose |
-|---|---|
-| `connected` | Worker gateway accepted the session |
-| `task_offer` | Executable transfer chunk offer |
-| `task_accept_ack` | Acceptance acknowledged upstream |
-| `task_reject_ack` | Rejection acknowledged upstream |
-| `task_result_ack` | Result acknowledged and optionally completed |
-
-The worker sends `task_accept`, `task_reject`, and `task_result` messages. Connection liveness is maintained with WebSocket ping/pong and reconnects.
+The worker receives `task_offer`, `task_accept_ack`, `task_reject_ack`, `task_result_ack`, and `session_displaced`. The worker sends `task_accept`, `task_reject`, and `task_result` messages. Connection liveness is maintained with WebSocket ping/pong and reconnects.
 
 ## Task Offer Protocol
 
@@ -59,25 +48,24 @@ Workers read `WORKER_VERSION` from package metadata. BeamCore includes `minimum_
 
 BeamCore also includes `signed_url_flow`. `signed_url_v1` is the default object-storage flow and requires `dest_headers.Content-MD5` on UploadPart offers. Workers reject checksum-less v1 object-storage offers before upload. `signed_url_v2` remains selectable by the transfer creator.
 
-## Payment Evidence
+## Task Result
 
-After a successful `task_result_ack`, the worker signs and posts:
-
-```text
-POST /workers/<worker_id>/tasks/<task_id>/payment-evidence
-```
-
-Payload:
+After completing an accepted task, the worker sends:
 
 ```json
 {
+  "type": "task_result",
+  "task_id": "uuid",
   "offer_id": "uuid",
+  "worker_id": "worker-uuid",
   "success": true,
   "chunk_hash": "abc123...",
-  "worker_signature": "0x...",
-  "required_payment": true
+  "etag": "\"abc123\"",
+  "error": null
 }
 ```
+
+BeamCore acknowledges the result with `task_result_ack`.
 
 ## Troubleshooting
 

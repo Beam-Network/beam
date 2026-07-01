@@ -276,7 +276,7 @@ class Validator:
         self.spot_check_results: Dict[str, SpotCheckResult] = {}  # hotkey -> last result
         self.spot_check_history: List[SpotCheckResult] = []
 
-        # PoB verification stats (populated by _verify_subnet_core_proofs)
+        # Local proof verification stats
         self.pob_verification_results: Dict[str, PoBVerificationStats] = {}  # hotkey -> stats
 
         # Weight history
@@ -703,12 +703,8 @@ class Validator:
                 # DISABLED: Challenges temporarily disabled - endpoint deprecated
                 # await self._issue_challenges()
 
-                # Collect and verify PoB
+                # Collect and verify local proof submissions
                 await self._collect_pob_results()
-
-                # *** NEW: Verify proofs from SubnetCore API ***
-                await self._verify_subnet_core_proofs()
-
                 # Spot-check proofs
                 await self._spot_check_proofs()
 
@@ -738,197 +734,6 @@ class Validator:
 
             await asyncio.sleep(self.settings.sync_interval)
 
-    # =========================================================================
-    # SubnetCore Proof Verification (NEW)
-    # =========================================================================
-
-    async def _verify_subnet_core_proofs(self) -> None:
-        """
-        Fetch unverified proofs from SubnetCore API and verify them.
-
-        This is the main verification loop that ensures proofs are validated
-        and workers can be compensated.
-        """
-        if not SUBNET_CORE_AVAILABLE or not self.subnet_core_client:
-            logger.debug("SubnetCore client not available, skipping proof verification")
-            return
-
-        try:
-            # Fetch unverified proofs from SubnetCore
-            result = await self.subnet_core_client.get_unverified_proofs(
-                limit=50,  # Process up to 50 proofs per cycle
-            )
-
-            proofs = result.get("proofs", [])
-            if not proofs:
-                logger.debug("No unverified proofs to verify")
-                return
-
-            logger.info(f"Fetched {len(proofs)} unverified proofs from SubnetCore")
-
-            verified_count = 0
-            failed_count = 0
-
-            # Track verified proofs by orchestrator for work summary computation
-            verified_proofs_by_orch: Dict[str, List[dict]] = {}
-            # Track all proofs per orchestrator for PoB stats
-            all_proofs_by_orch: Dict[str, List[dict]] = {}
-            failed_by_orch: Dict[str, int] = {}
-
-            for proof_data in proofs:
-                orch_hotkey = proof_data.get("orchestrator_hotkey", "")
-                if orch_hotkey:
-                    all_proofs_by_orch.setdefault(orch_hotkey, []).append(proof_data)
-
-                try:
-                    verification_result = await self._verify_single_subnet_proof(proof_data)
-
-                    # Submit verification result back to SubnetCore
-                    await self.subnet_core_client.verify_proof(
-                        proof_id=proof_data.get("proof_id"),
-                        passed=verification_result.valid,
-                        signature_valid=verification_result.signature_valid,
-                        timing_valid=verification_result.timing_valid,
-                        bandwidth_valid=verification_result.bandwidth_valid,
-                        canary_valid=verification_result.canary_valid,
-                        geo_valid=verification_result.geo_valid,
-                        verification_notes=verification_result.error,
-                        measured_latency_ms=verification_result.latency_ms,
-                    )
-
-                    if verification_result.valid:
-                        verified_count += 1
-                        # Track verified proof for work summary
-                        if orch_hotkey:
-                            verified_proofs_by_orch.setdefault(orch_hotkey, []).append(proof_data)
-                        logger.debug(
-                            f"Proof {proof_data.get('task_id', 'unknown')[:16]}... verified successfully"
-                        )
-                    else:
-                        failed_count += 1
-                        if orch_hotkey:
-                            failed_by_orch[orch_hotkey] = failed_by_orch.get(orch_hotkey, 0) + 1
-                        logger.warning(
-                            f"Proof {proof_data.get('task_id', 'unknown')[:16]}... failed: "
-                            f"{verification_result.error}"
-                        )
-
-                except Exception as e:
-                    logger.error(f"Error verifying proof: {e}")
-                    failed_count += 1
-                    if orch_hotkey:
-                        failed_by_orch[orch_hotkey] = failed_by_orch.get(orch_hotkey, 0) + 1
-
-            if verified_count > 0 or failed_count > 0:
-                logger.info(
-                    f"SubnetCore verification: {verified_count} passed, {failed_count} failed"
-                )
-
-            # Accumulate per-orchestrator PoB verification stats
-            for hotkey, all_proofs in all_proofs_by_orch.items():
-                verified_list = verified_proofs_by_orch.get(hotkey, [])
-                rejected = failed_by_orch.get(hotkey, 0)
-                prev = self.pob_verification_results.get(hotkey, PoBVerificationStats())
-                self.pob_verification_results[hotkey] = PoBVerificationStats(
-                    total_proofs=prev.total_proofs + len(all_proofs),
-                    verified_count=prev.verified_count + len(verified_list),
-                    rejected_count=prev.rejected_count + rejected,
-                    total_bytes_verified=prev.total_bytes_verified
-                    + sum(p.get("bytes_relayed", 0) for p in verified_list),
-                )
-
-            # Build work summaries from verified proofs
-            await self._build_work_summaries_from_proofs(verified_proofs_by_orch)
-
-        except Exception as e:
-            logger.error(f"Error fetching/verifying SubnetCore proofs: {e}")
-
-    async def _build_work_summaries_from_proofs(
-        self,
-        verified_proofs_by_orch: Dict[str, List[dict]],
-    ) -> None:
-        """
-        Build work summaries from verified proofs fetched from SubnetCore.
-
-        This replaces the need to query orchestrators directly for summaries.
-        The validator computes summaries from the proofs it has already verified.
-        """
-        if not verified_proofs_by_orch:
-            return
-
-        for orch_hotkey, proofs in verified_proofs_by_orch.items():
-            if not proofs:
-                continue
-
-            # Aggregate metrics from proofs
-            total_bytes = sum(p.get("bytes_relayed", 0) for p in proofs)
-            bandwidths = [
-                p.get("bandwidth_mbps", 0.0) for p in proofs if p.get("bandwidth_mbps", 0) > 0
-            ]
-            avg_bandwidth = sum(bandwidths) / len(bandwidths) if bandwidths else 0.0
-
-            # Calculate latencies from timing
-            latencies = []
-            for p in proofs:
-                start = p.get("start_time_us", 0)
-                end = p.get("end_time_us", 0)
-                if end > start:
-                    latencies.append((end - start) / 1000.0)  # Convert to ms
-            avg_latency = sum(latencies) / len(latencies) if latencies else 0.0
-
-            # Count unique workers
-            workers = set(p.get("worker_id", "") for p in proofs if p.get("worker_id"))
-            worker_regions: Dict[str, int] = {}
-            for p in proofs:
-                region = p.get("source_region", "unknown")
-                worker_regions[region] = worker_regions.get(region, 0) + 1
-
-            # Get epoch from proofs (use most common)
-            epochs = [p.get("epoch", 0) for p in proofs]
-            epoch = max(set(epochs), key=epochs.count) if epochs else 0
-
-            # Build WorkSummary
-            summary = WorkSummary(
-                epoch=epoch,
-                orchestrator_hotkey=orch_hotkey,
-                total_tasks=len(proofs),
-                successful_tasks=len(proofs),  # All verified proofs are successful
-                total_bytes_relayed=total_bytes,
-                active_workers=len(workers),
-                avg_bandwidth_mbps=avg_bandwidth,
-                avg_latency_ms=avg_latency,
-                success_rate=1.0,  # All proofs verified
-                proof_count=len(proofs),
-                worker_regions=worker_regions,
-                orchestrator_signature="",  # Not needed for SubnetCore-derived summaries
-                uptime_percent=100.0,  # Assume online if publishing proofs
-                acceptance_rate=100.0,
-                latency_p95_ms=sorted(latencies)[int(len(latencies) * 0.95)] if latencies else 0.0,
-                measurement_start=datetime.utcnow() - timedelta(minutes=5),
-                measurement_end=datetime.utcnow(),
-            )
-
-            # Update work summaries
-            self.work_summaries[orch_hotkey] = summary
-
-            # Auto-register orchestrator if not known (for SubnetCore-driven scoring)
-            if orch_hotkey not in self.orchestrators:
-                # Get UID from proofs if available
-                orch_uid = proofs[0].get("orchestrator_uid", 0) if proofs else 0
-                self.orchestrators[orch_hotkey] = OrchestratorInfo(
-                    url="http://unknown",  # Not needed for SubnetCore flow
-                    hotkey=orch_hotkey,
-                    uid=orch_uid,
-                    is_healthy=True,
-                )
-                logger.info(
-                    f"Auto-registered orchestrator {orch_hotkey[:16]}... from SubnetCore proofs"
-                )
-
-            logger.info(
-                f"Built work summary for {orch_hotkey[:16]}...: "
-                f"{len(proofs)} proofs, {total_bytes:,} bytes, {avg_bandwidth:.1f} Mbps"
-            )
 
     async def _verify_single_subnet_proof(self, proof_data: dict) -> ProofVerificationResult:
         """
@@ -1838,50 +1643,15 @@ class Validator:
         orchestrator: OrchestratorInfo,
         sample_size: int,
     ) -> List[str]:
-        """Get random proof IDs for spot-checking."""
-        # Prefer SubnetCore for proof queries
-        if SUBNET_CORE_AVAILABLE and self.subnet_core_client:
-            try:
-                result = await self.subnet_core_client.get_proofs_from_subnetcore(
-                    epoch=self.current_epoch,
-                    orchestrator_hotkey=orchestrator.hotkey,
-                    limit=sample_size * 2,  # Get extra to sample from
-                )
-                proofs = result.get("proofs", [])
-                if proofs:
-                    all_proof_ids = [p.get("task_id", "") for p in proofs if p.get("task_id")]
-                    sample_size = min(sample_size, len(all_proof_ids))
-                    return random.sample(all_proof_ids, sample_size) if all_proof_ids else []
-                return []
-            except Exception as e:
-                logger.warning(
-                    f"BeamCore proof query failed for {orchestrator.hotkey[:16]}...: {e}"
-                )
+        """Return proof IDs for local spot-checking when available."""
         return []
-
     async def _request_proofs(
         self,
         orchestrator: OrchestratorInfo,
         proof_ids: List[str],
     ) -> List[dict]:
-        """Request full proof data for specific proof IDs."""
-        # Use SubnetCore for proof queries (proofs are stored in subnet_pob_registry)
-        if SUBNET_CORE_AVAILABLE and self.subnet_core_client:
-            try:
-                proofs = []
-                for task_id in proof_ids[:10]:  # Limit to avoid too many requests
-                    result = await self.subnet_core_client.get_proof(task_id)
-                    if result and "error" not in result:
-                        proofs.append(result)
-                return proofs
-            except Exception as e:
-                logger.error(f"SubnetCore proof fetch failed: {e}")
-                return []
-
-        # No SubnetCore client available
-        logger.warning("SubnetCore client not available for proof queries")
+        """Return full local proof data for specific proof IDs when available."""
         return []
-
     # =========================================================================
     # Scoring
     # =========================================================================
@@ -2311,7 +2081,7 @@ class Validator:
             "is_registered": self.is_registered,
             "connections_tracked": len(self.connections),
             "pending_tasks": len(self.pending_tasks),
-            "verified_pob": len([r for r in self.task_results.values() if r.valid]),
+            "verified_proofs": len([r for r in self.task_results.values() if r.valid]),
             "last_weight_block": self.last_weight_block,
             "current_block": self.subtensor.block if self.subtensor else 0,
             "orchestrators": {

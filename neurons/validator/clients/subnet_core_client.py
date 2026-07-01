@@ -1,18 +1,11 @@
 """
 BeamCore HTTP client for the validator neuron.
 
-Authentication
---------------
-`/pob/*` and related control-plane routes (`GET /pob`, `POST /pob/{id}/verify`, …) authenticate with
-`x-api-key` (`subnet_core_api_key`), alongside operators and automation clients.
-
-`POST /validators/heartbeat` and `GET /Validator/epoch-summary/latest-epoch` authenticate with validator
-hotkey signatures via the standard header fields.
-
-`set_weights` and recommended-weight logic read the signed **epoch-summary** response. PoB endpoints cover
-proof listing and verification.
+`POST /validators/heartbeat`, `POST /validators/weights/proof`, and
+`GET /Validator/epoch-summary/latest-epoch` authenticate with validator hotkey
+signatures via the standard header fields. UID and network configuration routes
+use the validator API key when one is configured.
 """
-
 import logging
 import secrets
 import time
@@ -54,7 +47,7 @@ class UIDRanges:
 
 
 class SubnetCoreClient:
-    """Uses `x-api-key` for PoB; signed validator headers for heartbeat and epoch-summary."""
+    """Uses signed validator headers for heartbeat, weights, and epoch summaries."""
 
     def __init__(
         self,
@@ -92,14 +85,6 @@ class SubnetCoreClient:
         path_only = path.split("?", 1)[0]
         lower = path_only.lower()
 
-        if lower.startswith("/pob"):
-            headers: Dict[str, str] = {}
-            if self._api_key:
-                headers["x-api-key"] = self._api_key
-            if "headers" in kwargs:
-                headers.update(kwargs.pop("headers"))
-            req_kwargs = dict(kwargs)
-            return await client.request(method, f"{self.base_url}{path}", headers=headers, **req_kwargs)
 
         if lower.startswith("/validators/heartbeat") or lower.startswith("/validator/epoch-summary"):
             headers = self._signed_headers(action)
@@ -124,98 +109,6 @@ class SubnetCoreClient:
             await self._client.aclose()
             self._client = None
 
-    async def get_unverified_proofs(
-        self,
-        epoch: Optional[int] = None,
-        limit: int = 100,
-    ) -> Dict[str, Any]:
-        params: Dict[str, Any] = {"limit": limit}
-        if epoch is not None:
-            params["epoch"] = epoch
-        response = await self._request(
-            "GET",
-            "/pob/unverified",
-            action="get_unverified_proofs",
-            params=params,
-        )
-        response.raise_for_status()
-        return response.json()
-
-    async def verify_proof(
-        self,
-        proof_id: str,
-        passed: bool,
-        signature_valid: bool = False,
-        timing_valid: bool = False,
-        bandwidth_valid: bool = False,
-        canary_valid: bool = False,
-        geo_valid: bool = False,
-        verification_notes: Optional[str] = None,
-        measured_latency_ms: Optional[float] = None,
-    ) -> Dict[str, Any]:
-        notes: list = [
-            f"signature_valid={signature_valid}",
-            f"timing_valid={timing_valid}",
-            f"bandwidth_valid={bandwidth_valid}",
-            f"canary_valid={canary_valid}",
-            f"geo_valid={geo_valid}",
-        ]
-        if measured_latency_ms is not None:
-            notes.append(f"measured_latency_ms={measured_latency_ms:.3f}")
-        if verification_notes:
-            notes.append(verification_notes)
-
-        response = await self._request(
-            "POST",
-            f"/pob/{proof_id}/verify",
-            action="verify_proof",
-            json={
-                "passed": passed,
-                "validator_hotkey": self.validator_hotkey,
-                "notes": "; ".join(notes),
-            },
-        )
-        response.raise_for_status()
-        return response.json()
-
-    async def get_latest_data_epoch(self) -> Optional[int]:
-        try:
-            response = await self._request(
-                "GET",
-                "/pob/latest-epoch",
-                action="get_latest_data_epoch",
-            )
-            response.raise_for_status()
-            return response.json().get("epoch")
-        except Exception as exc:
-            logger.warning("Failed to get latest data epoch: %s", exc)
-            return None
-
-    async def get_proofs_from_subnetcore(
-        self,
-        epoch: Optional[int] = None,
-        orchestrator_hotkey: Optional[str] = None,
-        worker_id: Optional[str] = None,
-        limit: int = 100,
-        status: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        params: Dict[str, Any] = {"limit": limit}
-        if epoch is not None:
-            params["epoch"] = epoch
-        if orchestrator_hotkey:
-            params["orchestrator_hotkey"] = orchestrator_hotkey
-        if worker_id:
-            params["worker_id"] = worker_id
-        if status:
-            params["status"] = status
-        response = await self._request(
-            "GET",
-            "/pob",
-            action="get_proofs",
-            params=params,
-        )
-        response.raise_for_status()
-        return response.json()
 
     async def get_latest_epoch_summary(self) -> Dict[str, Any]:
         """Latest epoch summary from BeamCore (signed validator request)."""

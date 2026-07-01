@@ -81,10 +81,6 @@ The production validator does not compute PRISM weights locally and does not cal
 | `/Validator/epoch-summary/latest-epoch` | GET | Materialized UID/weight vector |
 | `/validators/weights/proof` | POST | Record successful on-chain weight set |
 | `/validators/heartbeat` | POST | Report validator liveness |
-| `/pob` | GET | Proof-of-bandwidth listing helper |
-| `/pob/latest-epoch` | GET | Latest proof epoch helper |
-| `/pob/unverified` | GET | Unverified proof helper |
-| `/pob/{proof_id}/verify` | POST | Proof verification helper |
 
 ## Local Operator API
 

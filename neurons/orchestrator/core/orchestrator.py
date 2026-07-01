@@ -10,7 +10,7 @@ Architecture:
 │                  (Subnet-operated, NOT a miner)                      │
 │                                                                      │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                  │
-│  │   Worker    │  │    Task     │  │    Proof    │                  │
+│  │   Worker    │  │    Task     │  │   Result    │                  │
 │  │  Registry   │  │  Scheduler  │  │ Aggregator  │                  │
 │  └─────────────┘  └─────────────┘  └─────────────┘                  │
 │         │                │                │                          │
@@ -290,7 +290,7 @@ class EpochSummary:
     active_workers: int = 0
     worker_contributions: Dict[str, int] = field(default_factory=dict)  # worker_id -> bytes
 
-    # Proof aggregation
+    # Result aggregation
     proof_count: int = 0
     merkle_root: str = ""
 
@@ -350,7 +350,7 @@ class Orchestrator:
         self.epoch_start_time: datetime = datetime.utcnow()
         self.epoch_summaries: Dict[int, EpochSummary] = {}
 
-        # Note: Validator tracking removed - BeamCore handles PoB centrally
+        # Note: Validator tracking removed - BeamCore handles PRISM evidence centrally
 
         # Statistics
         self.total_bytes_relayed: int = 0
@@ -464,7 +464,7 @@ class Orchestrator:
             self._reward_mgr.last_emission_check = self._reward_mgr.epoch_start_emission
             logger.info(f"Initial emission: {self._reward_mgr.epoch_start_emission:.6f} ध")
 
-            # Note: Validator discovery removed - BeamCore handles PoB centrally
+            # Note: Validator discovery removed - BeamCore handles PRISM evidence centrally
         else:
             logger.info("LOCAL MODE: Skipping chain sync and emission tracking")
 
@@ -810,7 +810,7 @@ class Orchestrator:
 
         return emission_alpha
 
-    # Note: _discover_validators removed - BeamCore handles PoB centrally
+    # Note: _discover_validators removed - BeamCore handles PRISM evidence centrally
 
     # =========================================================================
     # Background Loops
@@ -828,7 +828,7 @@ class Orchestrator:
 
                 # Always re-check UID after sync — hotkey may have moved to a
                 # different UID slot after re-registration (stale UID causes
-                # PoB proofs to be filtered by BeamCore).
+                # task evidence to be attributed by BeamCore).
                 old_uid = self.our_uid
                 self._find_our_uid()
                 if self.our_uid != old_uid and self.subnet_core_client is not None:
@@ -838,7 +838,7 @@ class Orchestrator:
                     self.subnet_core_client.orchestrator_uid = self.our_uid
 
                 self.distribute_rewards_to_workers()
-                # Note: Validator discovery removed - BeamCore handles PoB centrally
+                # Note: Validator discovery removed - BeamCore handles PRISM evidence centrally
 
             except asyncio.CancelledError:
                 break
@@ -913,16 +913,6 @@ class Orchestrator:
         except Exception as e:
             logger.error(f"Error distributing epoch rewards: {e}")
 
-        try:
-            await self._epoch_mgr.generate_payment_proofs(
-                self.current_epoch,
-                self.workers.values(),
-                self.hotkey or "",
-                self.our_uid,
-                self.wallet,
-            )
-        except Exception as e:
-            logger.error(f"Error generating payment proofs: {e}")
 
         for worker in self.workers.values():
             worker.bytes_relayed_epoch = 0
