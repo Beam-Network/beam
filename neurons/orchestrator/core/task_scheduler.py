@@ -40,14 +40,7 @@ class TaskScheduler:
         dest_region: str = "",
         execution_context: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """No-op under BeamCore.
-
-        BeamCore creates tasks server-side from the orchestrator's WS
-        BeamCore task offer batch message and
-        queueTransferTaskAssignments). Orchestrators no longer write task
-        records via HTTP. Kept as a no-op so existing call sites remain
-        intact.
-        """
+        """Task records are owned by BeamCore task-offer batches."""
         return None
 
     async def assign_task(

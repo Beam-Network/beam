@@ -27,7 +27,7 @@ NETUID=105
 CONNECTION_MODE=websocket
 ```
 
-`WORKER_GATEWAY_URL` must point to the orchestrator-owned worker gateway origin. The worker converts it to `ws(s)://.../ws/<worker_id>?api_key=<worker-api-key>`. Do not point it at BeamCore or `ORCH_GATEWAY_URL`.
+Set `WORKER_GATEWAY_URL` to the orchestrator-owned worker gateway origin. The worker converts it to `ws(s)://.../ws/<worker_id>?api_key=<worker-api-key>`.
 
 ## Run
 
@@ -38,15 +38,15 @@ python worker.py --wallet.name your_coldkey --wallet.hotkey your_hotkey --subten
 
 ## Transport
 
-The worker transport is WebSocket-based. `CONNECTION_MODE` may be `websocket` or `auto`; values such as `polling` are rejected by the runtime.
+The worker transport is WebSocket-based. Use `CONNECTION_MODE=websocket` or `CONNECTION_MODE=auto`.
 
 The worker receives `task_offer`, `task_accept_ack`, `task_reject_ack`, `task_result_ack`, and `session_displaced`. The worker sends `task_accept`, `task_reject`, and `task_result` messages. Connection liveness is maintained with WebSocket ping/pong and reconnects.
 
 ## Task Offer Protocol
 
-Workers read `WORKER_VERSION` from package metadata. BeamCore includes `minimum_worker_version` in every `task_offer`; workers reject offers below that SemVer with `unsupported_worker_version` before fetching source bytes or uploading destination bytes.
+Workers read `WORKER_VERSION` from package metadata. Current public worker builds report `0.2.1`. BeamCore includes `minimum_worker_version` in every `task_offer`; workers compare their SemVer version before fetching source bytes or uploading destination bytes.
 
-BeamCore also includes `signed_url_flow`. `signed_url_v1` is the default object-storage flow and requires `dest_headers.Content-MD5` on UploadPart offers. Workers reject checksum-less v1 object-storage offers before upload. `signed_url_v2` remains selectable by the transfer creator.
+BeamCore also includes `signed_url_flow`. `signed_url_v1` is the default object-storage flow and sends direct multipart UploadPart offers. `signed_url_v2` remains selectable by the transfer creator.
 
 ## Task Result
 
@@ -59,7 +59,8 @@ After completing an accepted task, the worker sends:
   "offer_id": "uuid",
   "worker_id": "worker-uuid",
   "success": true,
-  "chunk_hash": "abc123...",
+  "bytes_transferred": 8388608,
+  "duration_ms": 1234,
   "etag": "\"abc123\"",
   "error": null
 }

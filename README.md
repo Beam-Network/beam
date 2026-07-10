@@ -2,31 +2,31 @@
 
 BEAM participant software runs orchestrator, worker, and validator processes for the Beam subnet. Participants contribute bandwidth, execute transfer chunks, and set Bittensor weights from BeamCore's verified performance data.
 
-BeamCore operates the public HTTP API, orchestrator gateway, transfer lifecycle, PRISM evidence, and PRISM scoring services.
+BeamCore operates the public HTTP API, NATS orchestrator control endpoint, transfer coordination, PRISM evidence, and PRISM scoring services.
 
 ## Components
 
 | Component | Runs at | Responsibility |
 | --- | --- | --- |
-| Orchestrator | Operator | Maintains the orch-gateway WebSocket, advertises a worker gateway, routes task offers to workers, and reports worker decisions/results |
+| Orchestrator | Operator | Connects to BeamCore over NATS, advertises a worker gateway, routes task offers to workers, and reports worker decisions/results |
 | Worker gateway | Operator | WebSocket edge for worker sessions at `/ws/<worker_id>?api_key=...` |
 | Worker | Operator | Registers with BeamCore, connects to the worker gateway, executes chunk transfers, and sends `task_result` receipts |
 | Validator | Bittensor validator | Reads BeamCore epoch summaries, sets subnet weights, and posts weight proofs |
 
-Object bytes do not pass through BeamCore. Workers receive only task-scoped, short-lived source and destination URLs for the chunk they are assigned.
+Workers move object bytes directly between storage endpoints using task-scoped, short-lived source and destination URLs.
 
 ## Mainnet Endpoints
 
 | Setting | Value |
 | --- | --- |
 | `CORE_SERVER_URL` | `https://beamcore.b1m.ai` |
-| `ORCH_GATEWAY_URL` | `https://orch-gateway.b1m.ai` |
+| `ORCH_GATEWAY_URL` | `tls://orch-gateway.b1m.ai:4222` |
 | `WORKER_GATEWAY_URL` | Your orchestrator-owned worker gateway origin |
 | `ORCHESTRATOR_WORKER_GATEWAY_URL` | The worker gateway origin your orchestrator advertises |
 | `SUBTENSOR_NETWORK` | `finney` |
 | `NETUID` | `105` |
 
-`WORKER_GATEWAY_URL` is not BeamCore and not the orchestrator gateway. It must point at the worker WebSocket gateway that serves `/ws/<worker_id>`.
+Set `ORCH_GATEWAY_URL` to a NATS endpoint using `nats://` or `tls://`. Set `WORKER_GATEWAY_URL` to the worker WebSocket gateway that serves `/ws/<worker_id>`.
 
 ## Run A Node
 
@@ -53,9 +53,9 @@ pip install -e ".[validator]"
 ## Runtime Flow
 
 ```text
-Client -> BeamCore HTTP -> orch-gateway -> orchestrator -> worker gateway -> worker
+Client -> BeamCore -> NATS -> orchestrator -> worker gateway -> worker
 Worker -> storage source/destination directly
-Worker -> worker gateway -> orchestrator -> orch-gateway -> BeamCore task_result
+Worker -> worker gateway -> orchestrator -> NATS -> BeamCore task_result
 Validator -> BeamCore epoch summary -> Bittensor set_weights -> BeamCore weight proof
 ```
 

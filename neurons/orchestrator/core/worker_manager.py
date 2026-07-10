@@ -31,7 +31,7 @@ class WorkerManager:
 
     def __init__(self, settings: OrchestratorSettings, subnet_core_client_ref=None):
         self.settings = settings
-        # Callable that returns subnet_core_client (to avoid circular refs)
+        # Callable that returns subnet_core_client for deferred wiring
         self._get_subnet_core_client = subnet_core_client_ref or (lambda: None)
 
         # Worker registry (local cache, SubnetCore is source of truth)
@@ -81,12 +81,8 @@ class WorkerManager:
             logger.warning("Max workers limit reached")
             return None
 
-        # BeamCore: workers self-register via POST /workers/register and
-        # own their worker_id end-to-end. The orchestrator no longer
-        # forwards a registration request; it just resolves the worker_id by
-        # looking it up locally (worker_id == hotkey for affiliation).
-        # The canonical worker record lives in BeamCore and can be fetched
-        # via GET /orchestrators/workers when needed.
+        # BeamCore worker registration owns worker identity.
+        # The orchestrator keeps local worker session state for dispatch.
         worker_id = hotkey
         if subnet_core_client is None:
             logger.debug(
@@ -375,13 +371,7 @@ class WorkerManager:
         return workers
 
     async def handle_worker_update(self, worker_id: str, event: str) -> None:
-        """
-        Handle a worker_update push event from SubnetCore WebSocket.
-
-        Called when SubnetCore pushes a worker connect/disconnect event.
-        Updates local cache immediately so task dispatch reflects real-time state
-        without polling GET /orchestrators/workers.
-        """
+        """Handle a worker connection update and refresh local dispatch state."""
         from .orchestrator import Worker, WorkerStatus
 
         if event == "connected":

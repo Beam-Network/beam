@@ -1,17 +1,17 @@
 # BEAM Orchestrator Onboarding Guide
 
-This guide covers the public mainnet orchestrator path for Beam subnet 105. An orchestrator keeps a WebSocket session to the orchestrator gateway, advertises a worker gateway, selects connected workers for task offers, and forwards worker decisions/results back to BeamCore.
+This guide covers the public mainnet orchestrator path for Beam subnet 105. An orchestrator connects to BeamCore over NATS, advertises a worker gateway, selects connected workers for task offers, and forwards worker decisions/results back to BeamCore.
 
 ## Runtime Responsibilities
 
 The orchestrator process:
 
-1. Registers on the Beam orchestrator gateway using wallet-signed WebSocket messages.
+1. Registers with BeamCore using wallet-signed NATS control messages.
 2. Advertises its HTTP URL and worker gateway URL.
 3. Maintains an in-process worker gateway at `/ws/<worker_id>?api_key=...` unless `ORCHESTRATOR_WORKER_GATEWAY_URL` points at an externally reachable gateway origin.
-4. Receives `worker_task_offer_batch` messages from BeamCore through `ORCH_GATEWAY_URL`.
+4. Receives `worker_task_offer_batch` messages from BeamCore through NATS.
 5. Selects connected local workers and sends `task_offer` messages.
-6. Relays `task_accept`, `task_reject`, and `task_result` messages upstream.
+6. Relays `task_accept`, `task_reject`, and `task_result` messages upstream over NATS.
 7. Stays `READY=true` when it should receive routed production work.
 
 Workers use BeamCore HTTP for registration; runtime task delivery and results use the worker gateway relay path.
@@ -21,12 +21,12 @@ Workers use BeamCore HTTP for registration; runtime task delivery and results us
 | Setting | Value |
 |---|---|
 | `CORE_SERVER_URL` | `https://beamcore.b1m.ai` |
-| `ORCH_GATEWAY_URL` | `https://orch-gateway.b1m.ai` |
+| `ORCH_GATEWAY_URL` | `tls://orch-gateway.b1m.ai:4222` |
 | `ORCHESTRATOR_WORKER_GATEWAY_URL` | Your externally reachable worker gateway origin |
 | `SUBTENSOR_NETWORK` | `finney` |
 | `NETUID` | `105` |
 
-`ORCHESTRATOR_WORKER_GATEWAY_URL` and worker `WORKER_GATEWAY_URL` should refer to the same worker gateway origin when workers connect through a public domain or reverse proxy.
+Set `ORCH_GATEWAY_URL` to a NATS endpoint using `nats://` or `tls://`. `ORCHESTRATOR_WORKER_GATEWAY_URL` and worker `WORKER_GATEWAY_URL` should refer to the same worker gateway origin when workers connect through a public domain or reverse proxy.
 
 ## Requirements
 
@@ -34,7 +34,7 @@ Workers use BeamCore HTTP for registration; runtime task delivery and results us
 |---|---|
 | Python | 3.10-3.12 |
 | Wallet | Registered miner hotkey on subnet 105 |
-| Network | Stable outbound access to BeamCore, orch-gateway, Bittensor, and storage backends |
+| Network | Stable outbound access to BeamCore HTTP, BeamCore NATS, Bittensor, and storage backends |
 | Port | Default orchestrator HTTP/worker-gateway port `8000` unless `API_PORT` is changed |
 
 ## Install
@@ -68,7 +68,7 @@ Create `neurons/orchestrator/.env` or set these variables in your process manage
 WALLET_NAME=orchestrator
 WALLET_HOTKEY=default
 CORE_SERVER_URL=https://beamcore.b1m.ai
-ORCH_GATEWAY_URL=https://orch-gateway.b1m.ai
+ORCH_GATEWAY_URL=tls://orch-gateway.b1m.ai:4222
 ORCHESTRATOR_WORKER_GATEWAY_URL=https://orchestrator.example.com
 SUBTENSOR_NETWORK=finney
 NETUID=105
@@ -87,12 +87,12 @@ Important settings:
 | Variable | Purpose |
 |---|---|
 | `CORE_SERVER_URL` | BeamCore HTTP base used for registration/auth bootstrap |
-| `ORCH_GATEWAY_URL` | Orchestrator gateway origin used for the persistent control-plane WebSocket |
+| `ORCH_GATEWAY_URL` | BeamCore NATS control endpoint |
 | `ORCHESTRATOR_WORKER_GATEWAY_URL` | Public worker gateway origin advertised to BeamCore |
 | `READY` | `true` opts the orchestrator into routed work; default is `false` |
 | `API_PORT` | FastAPI port and in-process worker-gateway port |
 
-The participant orchestrator does not require the legacy Redis or local auth toggles for the documented production hot path.
+The documented production path uses BeamCore HTTP registration, BeamCore NATS control, and the orchestrator-owned worker gateway.
 
 ## Run
 
@@ -166,36 +166,36 @@ The gateway relays:
 ## Task Offer Flow
 
 ```text
-BeamCore -> orch-gateway -> orchestrator -> worker gateway -> worker
-worker -> worker gateway -> orchestrator -> orch-gateway -> BeamCore
-worker -> worker gateway -> orchestrator -> orch-gateway -> BeamCore task_result
+BeamCore -> NATS -> orchestrator -> worker gateway -> worker
+worker -> worker gateway -> orchestrator -> NATS -> BeamCore
+worker -> worker gateway -> orchestrator -> NATS -> BeamCore task_result
 ```
 
-Each task offer includes executable URLs, headers, `signed_url_flow`, and `minimum_worker_version`. For checksum-bound `signed_url_v1`, object-storage upload offers include signed `dest_headers.Content-MD5`; workers reject offers that omit it. The orchestrator chooses a connected worker; BeamCore owns stalled-task recovery and reassignment.
+Each task offer includes executable URLs, headers, `signed_url_flow`, and `minimum_worker_version`. `signed_url_v1` object-storage upload offers use direct multipart URLs. Current public workers report `0.2.1`. The orchestrator chooses a connected worker; BeamCore owns stalled-task recovery and reassignment.
 
 ## Troubleshooting
 
 ### No tasks are assigned
 
 - Confirm `READY=true`.
-- Confirm the orchestrator WebSocket is connected to `ORCH_GATEWAY_URL`.
+- Confirm the NATS endpoint in `ORCH_GATEWAY_URL` is reachable.
 - Confirm the hotkey is registered on subnet 105.
 - Confirm at least one worker is connected to the worker gateway.
 - Check `/ready` for failed readiness checks.
 
 ### Worker cannot connect
 
-- Confirm `WORKER_GATEWAY_URL` points to the worker gateway origin, not BeamCore and not `ORCH_GATEWAY_URL`.
+- Confirm `WORKER_GATEWAY_URL` points to the worker gateway origin.
 - Confirm the gateway is reachable from the worker host.
 - Confirm the worker registered with BeamCore and has a worker API key.
 
-### BeamCore or orch-gateway connection fails
+### BeamCore NATS connection fails
 
 ```bash
 curl https://beamcore.b1m.ai/health
 ```
 
-Check network egress, DNS, wallet signing errors, and `ORCH_GATEWAY_URL=https://orch-gateway.b1m.ai`.
+Check network egress, DNS, wallet signing errors, API-key validity, and `ORCH_GATEWAY_URL`.
 
 ## Production Service Example
 

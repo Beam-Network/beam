@@ -1,6 +1,6 @@
 # Beam Orchestrator
 
-Orchestrators coordinate data transfers and manage worker pools on the Beam subnet. They keep a persistent WebSocket session to `ORCH_GATEWAY_URL`, advertise a worker gateway, route task offers to connected workers, and relay worker decisions/results back to BeamCore.
+Orchestrators coordinate data transfers and manage worker pools on the Beam subnet. They connect to BeamCore over NATS through `ORCH_GATEWAY_URL`, advertise a worker gateway, route task offers to connected workers, and relay worker decisions/results back to BeamCore.
 
 ## Install
 
@@ -21,7 +21,7 @@ WALLET_HOTKEY=your_hotkey \
 SUBTENSOR_NETWORK=finney \
 NETUID=105 \
 CORE_SERVER_URL=https://beamcore.b1m.ai \
-ORCH_GATEWAY_URL=https://orch-gateway.b1m.ai \
+ORCH_GATEWAY_URL=tls://orch-gateway.b1m.ai:4222 \
 ORCHESTRATOR_WORKER_GATEWAY_URL=https://orchestrator.example.com \
 READY=true \
 python main.py
@@ -36,12 +36,12 @@ python main.py
 | `SUBTENSOR_NETWORK`               | Bittensor network                                   | `finney`                      |
 | `NETUID`                          | Beam subnet UID                                     | `105`                         |
 | `CORE_SERVER_URL`                 | BeamCore HTTP base                                  | `https://beamcore.b1m.ai`     |
-| `ORCH_GATEWAY_URL`                | Orchestrator gateway origin                         | `https://orch-gateway.b1m.ai` |
+| `ORCH_GATEWAY_URL`                | BeamCore NATS control endpoint                      | `tls://orch-gateway.b1m.ai:4222` |
 | `ORCHESTRATOR_WORKER_GATEWAY_URL` | Public worker gateway origin advertised to BeamCore | operator-provided             |
 | `READY`                           | Opt in to routed work                               | `true`                        |
 | `API_PORT`                        | Local HTTP and in-process worker-gateway port       | `8000`                        |
 
-`READY` defaults to `false` in code. Set it to `true` when the orchestrator should receive production task offers.
+Set `ORCH_GATEWAY_URL` to a NATS endpoint using `nats://` or `tls://`. `READY` defaults to `false` in code. Set it to `true` when the orchestrator should receive production task offers.
 
 ## Worker Gateway
 

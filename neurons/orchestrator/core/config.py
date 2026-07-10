@@ -72,8 +72,8 @@ class OrchestratorSettings(BaseSettings):
     # Readiness
     # ==========================================================================
     # When True, orchestrator signals BeamCore that it is ready to receive transfers.
-    # Set via READY=true env var or the websocket set_ready flow at runtime.
-    # Default is False — new orchestrators are excluded from routing until explicit opt-in.
+    # Set via READY=true env var or the NATS control set_ready flow.
+    # Default is False; new orchestrators are excluded from routing until explicit opt-in.
     ready: bool = Field(default=False, env="READY")
 
     # ==========================================================================
@@ -104,12 +104,6 @@ class OrchestratorSettings(BaseSettings):
     core_server_url: str = Field(default="https://beamcore.b1m.ai", env="CORE_SERVER_URL")
 
     orch_gateway_url: Optional[str] = Field(default=None, env="ORCH_GATEWAY_URL")
-
-    # Orch-gateway WebSocket transport (high-latency / cross-region: increase these)
-    orch_ws_open_timeout: float = Field(default=60.0, env="ORCH_WS_OPEN_TIMEOUT")
-    orch_ws_close_timeout: float = Field(default=20.0, env="ORCH_WS_CLOSE_TIMEOUT")
-    orch_ws_ping_interval: float = Field(default=30.0, env="ORCH_WS_PING_INTERVAL")
-    orch_ws_ping_timeout: float = Field(default=45.0, env="ORCH_WS_PING_TIMEOUT")
 
     worker_gateway_url: Optional[str] = Field(default=None, env="ORCHESTRATOR_WORKER_GATEWAY_URL")
 
@@ -187,10 +181,11 @@ class OrchestratorSettings(BaseSettings):
         object.__setattr__(self, "log_level", self.log_level.upper())
 
         if not self.orch_gateway_url:
-            self.orch_gateway_url = os.environ.get("ORCHESTRATOR_WS_BASE_URL")
-
-        if not self.orch_gateway_url:
             raise ValueError("ORCH_GATEWAY_URL is required")
+        if self.orch_gateway_url.startswith(("http://", "https://", "ws://", "wss://")):
+            raise ValueError("Set ORCH_GATEWAY_URL to a NATS endpoint using nats:// or tls://")
+        if not self.orch_gateway_url.startswith(("nats://", "tls://")):
+            raise ValueError("Set ORCH_GATEWAY_URL to a NATS endpoint using nats:// or tls://")
 
     # ==========================================================================
     # Client Tiers

@@ -1,42 +1,75 @@
 """
-BeamCore API Client for Orchestrators
+BeamCore API and NATS control client for orchestrators.
 
-Client for orchestrators to register, receive task offer batches, and report
-orchestrator state to the BeamCore service.
-
-Uses orch-gateway WebSocket for real-time orchestrator control-plane traffic.
-BeamCore HTTP covers additional control-plane APIs alongside the WebSocket.
+ORCH_GATEWAY_URL points to the BeamCore NATS orchestrator control endpoint.
 """
 
 import asyncio
 import inspect
 import json
 import logging
+import os
 import pathlib
 import time
 import uuid
 from typing import Any, Callable, Dict, Optional
 
 import httpx
-import websockets
-from websockets.exceptions import ConnectionClosed
+import msgpack
+import nats
 
-from middleware.metrics import BEAMCORE_UPSTREAM_DEGRADED, BEAMCORE_UPSTREAM_DOWN_EVENTS
+from core.task_offer_dispatcher import TaskOfferDispatcher
+
+from middleware.metrics import BEAMCORE_UPSTREAM_DEGRADED
 
 logger = logging.getLogger(__name__)
 
+SCHEMA_VERSION = "orchestrator-control/v1"
+SUBJECT_PREFIX = os.environ.get("ORCHESTRATOR_CONTROL_SUBJECT_PREFIX", "beam.orch.control").strip(".")
+BEAM_ENV = os.environ.get("BEAM_ENV", "prod")
+REQUEST_TIMEOUT = float(os.environ.get("ORCHESTRATOR_CONTROL_REQUEST_TIMEOUT_SECONDS", "0.75"))
+TASK_RESULT_TIMEOUT = float(os.environ.get("ORCHESTRATOR_CONTROL_TASK_RESULT_TIMEOUT_SECONDS", "15.0"))
+TASK_ACCEPT_TIMEOUT = float(os.environ.get("ORCHESTRATOR_CONTROL_TASK_ACCEPT_TIMEOUT_SECONDS", "5.0"))
+TASK_ACCEPT_RETRY_ATTEMPTS = max(
+    1,
+    int(os.environ.get("ORCHESTRATOR_CONTROL_TASK_ACCEPT_RETRY_ATTEMPTS", "3")),
+)
+REQUEST_RETRY_ATTEMPTS = max(1, int(os.environ.get("ORCHESTRATOR_CONTROL_REQUEST_RETRY_ATTEMPTS", "3")))
+REQUEST_RETRY_BACKOFF_SECONDS = max(0.0, float(os.environ.get("ORCHESTRATOR_CONTROL_REQUEST_RETRY_BACKOFF_SECONDS", "0.05")))
+HEARTBEAT_INTERVAL = float(os.environ.get("ORCHESTRATOR_CONTROL_HEARTBEAT_INTERVAL_SECONDS", "5"))
+STARTUP_CONNECT_ATTEMPTS = max(1, int(os.environ.get("ORCHESTRATOR_CONTROL_STARTUP_CONNECT_ATTEMPTS", "12")))
+STARTUP_CONNECT_BACKOFF_SECONDS = max(0.1, float(os.environ.get("ORCHESTRATOR_CONTROL_STARTUP_CONNECT_BACKOFF_SECONDS", "1.0")))
+
+
+def _validate_nats_url(value: str) -> str:
+    clean = value.strip().rstrip("/")
+    if clean.startswith(("http://", "https://", "ws://", "wss://")):
+        raise ValueError("Set ORCH_GATEWAY_URL to a NATS endpoint using nats:// or tls://")
+    if not clean.startswith(("nats://", "tls://")):
+        raise ValueError("Set ORCH_GATEWAY_URL to a NATS endpoint using nats:// or tls://")
+    return clean
+
+
+def _subject_hotkey(hotkey: str) -> str:
+    return hotkey.lower()
+
+
+def _subject(direction: str, hotkey: str, message_type: str) -> str:
+    return f"{SUBJECT_PREFIX}.{BEAM_ENV}.{direction}.{_subject_hotkey(hotkey)}.{message_type}"
+
+
+def _pack(envelope: dict[str, Any]) -> bytes:
+    return msgpack.packb(envelope, use_bin_type=True)
+
+
+def _unpack(data: bytes) -> dict[str, Any]:
+    value = msgpack.unpackb(data, raw=False)
+    if not isinstance(value, dict):
+        raise ValueError("NATS control envelope must be a map")
+    return value
+
 
 class SubnetCoreClient:
-    """
-    Client for communicating with BeamCore HTTP and orch-gateway WebSocket.
-
-    Orchestrators use this client to:
-    - Receive real-time notifications via orch-gateway WebSocket
-    - Send orchestrator registration and readiness via orch-gateway WebSocket
-    - Use BeamCore HTTP for auth bootstrap and read APIs
-    - Report task/proof state needed by BeamCore control-plane flows
-    """
-
     def __init__(
         self,
         base_url: str,
@@ -44,81 +77,36 @@ class SubnetCoreClient:
         orchestrator_hotkey: str,
         orchestrator_uid: int,
         timeout: float = 30.0,
-        signer=None,
-        *,
-        ws_open_timeout: float = 60.0,
-        ws_close_timeout: float = 20.0,
-        ws_ping_interval: float = 30.0,
-        ws_ping_timeout: float = 45.0,
+        signer=None
     ):
-        """
-        Initialize the client.
-
-        Args:
-            base_url: Base URL of BeamCore (e.g., https://beamcore.b1m.ai)
-            ws_base_url: Required base URL of the orchestrator gateway WebSocket edge
-            orchestrator_hotkey: This orchestrator's hotkey for authentication
-            orchestrator_uid: This orchestrator's UID
-            timeout: Request timeout in seconds
-            signer: Optional bittensor wallet hotkey with .sign() method
-            ws_open_timeout: Seconds to wait for the WebSocket opening handshake (orch-gateway).
-            ws_close_timeout: Seconds to wait when closing the WebSocket cleanly.
-            ws_ping_interval / ws_ping_timeout: Transport keepalive; higher values help flaky paths.
-        """
         self.base_url = base_url.rstrip("/")
-        self.ws_base_url = ws_base_url.rstrip("/")
+        self.ws_base_url = _validate_nats_url(ws_base_url)
         self.orchestrator_hotkey = orchestrator_hotkey
         self.orchestrator_uid = orchestrator_uid
         self.timeout = timeout
         self.signer = signer
-        self._ws_open_timeout = ws_open_timeout
-        self._ws_close_timeout = ws_close_timeout
-        self._ws_ping_interval = ws_ping_interval
-        self._ws_ping_timeout = ws_ping_timeout
         self._client: Optional[httpx.AsyncClient] = None
-
-        # WebSocket push handlers (task offer batches and worker updates via WS)
-        self._worker_update_handler: Optional[Callable] = (
-            None  # Handler for worker connect/disconnect push events
-        )
+        self._worker_update_handler: Optional[Callable] = None
+        self._worker_gateway = None
+        self._task_offer_dispatcher: Optional[TaskOfferDispatcher] = None
         self._running = False
-
-        # WebSocket state
-        self._ws: Optional[websockets.WebSocketClientProtocol] = None
-        self._ws_connected = False
-        self._ws_task: Optional[asyncio.Task] = None
-        self._reconnect_delay = 5.0  # Seconds between reconnection attempts
-        self._max_reconnect_delay = 60.0  # Max backoff delay
-
-        # WebSocket registration state
         self._registered = False
         self._registration_config: Optional[Dict[str, Any]] = None
-        self._registration_retry_task: Optional[asyncio.Task] = None
-        self._registration_retry_interval = 5.0
+        self._operator_ready = False
         self._desired_ready = False
         self._last_confirmed_ready: Optional[bool] = None
         self._ready_sync_task: Optional[asyncio.Task] = None
-        self._ready_sync_retry_interval = 5.0
-
-        # API key authentication (for buffer service)
+        self._heartbeat_task: Optional[asyncio.Task] = None
+        self._nc = None
+        self._subscription = None
+        self._connect_lock = asyncio.Lock()
+        self._auth_recovery_task: Optional[asyncio.Task] = None
         self._api_key: Optional[str] = None
         self._api_key_expires: Optional[float] = None
-        self._skip_env_key: bool = False
+        self._api_key_source: Optional[str] = None
         self._key_cache_path = pathlib.Path(f"/tmp/beam_orch_api_key_{orchestrator_hotkey[:16]}.json")
         self._load_cached_key()
-
-        # Pending WebSocket requests keyed by request id
-        self._pending_ws_requests: dict[str, asyncio.Future] = {}
-
-        # In-process worker gateway (set after init)
-        self._worker_gateway = None
-
-        # orch-gateway → BeamCore upstream relay (independent of orch ↔ orch-gateway edge socket)
-        self._beamcore_upstream_degraded: bool = False
-
-    # =========================================================================
-    # Handlers for polling notifications
-    # =========================================================================
+        self._beamcore_upstream_degraded = False
 
     def _load_cached_key(self) -> None:
         try:
@@ -127,319 +115,357 @@ class SubnetCoreClient:
                 if data.get("expires") and time.time() < data["expires"] - 60:
                     self._api_key = data["key"]
                     self._api_key_expires = data["expires"]
+                    self._api_key_source = "cache"
                     logger.info("Loaded cached API key from disk for %s", self.orchestrator_hotkey[:16])
         except Exception:
             pass
 
     def _persist_key(self) -> None:
         try:
-            self._key_cache_path.write_text(json.dumps({
-                "key": self._api_key,
-                "expires": self._api_key_expires,
-            }))
+            self._key_cache_path.write_text(json.dumps({"key": self._api_key, "expires": self._api_key_expires}))
         except Exception:
             pass
 
     def _clear_cached_key(self) -> None:
         self._api_key = None
         self._api_key_expires = None
+        self._api_key_source = None
         try:
             self._key_cache_path.unlink(missing_ok=True)
         except Exception:
             pass
 
     def set_worker_update_handler(self, handler: Callable):
-        """
-        Set handler for worker connect/disconnect push events.
-
-        Handler signature: async def handler(worker_id: str, event: str) -> None
-        Where event is "connected" or "disconnected".
-        """
         self._worker_update_handler = handler
 
+    def set_worker_gateway(self, gateway) -> None:
+        self._worker_gateway = gateway
+        gateway.set_upstream(self)
+        self._task_offer_dispatcher = TaskOfferDispatcher(self._deliver_task_offer_batch_to_workers)
+        self._desired_ready = self._registration_ready()
+
+    def _registration_ready(self) -> bool:
+        if not self._operator_ready:
+            return False
+        if self._worker_gateway is None:
+            return False
+        return int(getattr(self._worker_gateway, "connected_count", 0) or 0) > 0
+
     def prime_ready_state(self, ready: bool) -> None:
-        """Set the desired ready state before the websocket auto-registers."""
-        self._desired_ready = ready
+        self._operator_ready = ready
+        self._desired_ready = self._registration_ready()
 
     def is_beamcore_upstream_degraded(self) -> bool:
-        """
-        True when orch-gateway reported BeamCore upstream relay down (or request failed for relay loss).
-        Edge WebSocket to orch-gateway can still be open; this flags control-plane path only.
-        """
         return self._beamcore_upstream_degraded
-
-    def _note_beamcore_upstream_down(self, reason: str) -> None:
-        BEAMCORE_UPSTREAM_DOWN_EVENTS.inc()
-        if self._beamcore_upstream_degraded:
-            logger.debug("BeamCore upstream still degraded: %s", reason)
-            return
-        self._beamcore_upstream_degraded = True
-        BEAMCORE_UPSTREAM_DEGRADED.set(1)
-        logger.info(
-            "================================================================================\n"
-            "BEAMCORE UPSTREAM DEGRADED (orch-gateway → BeamCore relay is down or recovering)\n"
-            "You are still connected to orch-gateway, but work cannot be relayed to BeamCore until the\n"
-            "gateway reconnects upstream. Reason: %s\n"
-            "================================================================================",
-            reason,
-        )
 
     def _note_beamcore_upstream_recovered(self, reason: str) -> None:
         if not self._beamcore_upstream_degraded:
             return
         self._beamcore_upstream_degraded = False
         BEAMCORE_UPSTREAM_DEGRADED.set(0)
-        logger.info(
-            "BeamCore upstream relay recovered (%s) — orchestrator path to BeamCore is live again",
-            reason,
-        )
+        logger.info("BeamCore NATS control recovered (%s)", reason)
 
-    def _maybe_upstream_error_payload(self, data: dict) -> None:
-        """Classify orch-gateway error payloads that imply upstream/backpressure loss."""
-        if data.get("type") != "error":
+    def _nats_is_closed(self) -> bool:
+        nc = self._nc
+        if nc is None:
+            return True
+        value = getattr(nc, "is_closed", False)
+        return bool(value() if callable(value) else value)
+
+    @staticmethod
+    def _is_authorization_error(exc: Exception) -> bool:
+        return "authorization" in str(exc).lower()
+
+    def _schedule_auth_recovery(self) -> None:
+        if not self._running:
             return
-        msg = str(data.get("message") or data.get("error") or "")
-        if msg in ("upstream_timeout", "upstream_backlog_full") or "upstream" in msg.lower():
-            self._note_beamcore_upstream_down(f"gateway error: {msg}")
+        if self._api_key_source == "env":
+            logger.error("BeamCore NATS auth returned unauthorized for BEAMCORE_ORCHESTRATOR_API_KEY")
+            return
+        if not self.signer:
+            logger.error("BeamCore NATS auth returned unauthorized and signer support is unavailable")
+            return
+        if self._auth_recovery_task and not self._auth_recovery_task.done():
+            return
+        self._auth_recovery_task = asyncio.create_task(self._recover_from_nats_authorization_error())
 
-    # =========================================================================
-    # WebSocket Connection (Primary) + HTTP Polling (Fallback)
-    # =========================================================================
+    async def _recover_from_nats_authorization_error(self) -> None:
+        try:
+            logger.warning("BeamCore NATS auth requested a fresh orchestrator API key")
+            self._clear_cached_key()
+            await self._recover_nats_connection("NATS authorization rejection", force=True)
+        except Exception as exc:
+            logger.warning("BeamCore NATS control auth recovery failed: %s", exc)
+        finally:
+            self._auth_recovery_task = None
 
-    def _get_ws_url(self) -> str:
-        """Get WebSocket URL from the orchestrator gateway base URL."""
-        ws_url = self.ws_base_url.replace("https://", "wss://").replace("http://", "ws://")
-        return f"{ws_url}/ws/orchestrators/{self.orchestrator_hotkey}"
+    async def _ensure_nats_connection(self, reason: str) -> None:
+        if self._nc is not None and not self._nats_is_closed():
+            return
+        await self._recover_nats_connection(reason, force=True)
 
-    def _sign_ws_auth(self) -> tuple[str, str]:
-        """Generate WebSocket authentication signature."""
-        timestamp = str(int(time.time()))
-        message = f"{self.orchestrator_hotkey}:{timestamp}"
-        signature = ""
-        if self.signer:
-            try:
-                sig_bytes = self.signer.sign(message.encode("utf-8"))
-                signature = "0x" + (
-                    sig_bytes.hex() if isinstance(sig_bytes, bytes) else str(sig_bytes)
-                )
-            except Exception as e:
-                logger.warning(f"Failed to sign WebSocket auth: {e}")
-                signature = "unsigned"
-        else:
-            signature = "unsigned"
-        return signature, timestamp
+    async def _request_retry_delay(self, attempt: int) -> None:
+        delay = min(0.25, REQUEST_RETRY_BACKOFF_SECONDS * (2 ** max(0, attempt - 1)))
+        if delay > 0:
+            await asyncio.sleep(delay)
 
     async def _ensure_api_key(self) -> Optional[str]:
-        """
-        Ensure we have a valid API key for WebSocket authentication.
+        if self._api_key and self._api_key_expires and time.time() < self._api_key_expires - 60:
+            if not self._api_key_source:
+                self._api_key_source = "cache"
+            return self._api_key
 
-        First checks BEAMCORE_API_KEY env var, then uses challenge/verify flow.
-        The key is cached and reused until it expires.
-
-        Returns:
-            API key string (b1m_xxx format) or None if auth fails
-        """
-        import os
-
-        # Check if we have a valid cached key
-        if self._api_key and self._api_key_expires:
-            if time.time() < self._api_key_expires - 60:  # 1 min buffer
-                return self._api_key
-
-        # Check for API key in environment variable
-        env_api_key = os.environ.get("BEAMCORE_API_KEY")
-        if (
-            env_api_key
-            and not self._skip_env_key
-            and (env_api_key.startswith("b1m_") or env_api_key.startswith("bck_"))
-        ):
+        env_api_key = os.environ.get("BEAMCORE_ORCHESTRATOR_API_KEY")
+        if env_api_key and (env_api_key.startswith("b1m_") or env_api_key.startswith("bck_")):
             self._api_key = env_api_key
-            self._api_key_expires = time.time() + 86400 * 365  # Never expires
-            logger.info(
-                f"Using BEAMCORE_API_KEY from environment for {self.orchestrator_hotkey[:16]}..."
-            )
+            self._api_key_expires = time.time() + 86400 * 365
+            self._api_key_source = "env"
+            logger.info("Using BEAMCORE_ORCHESTRATOR_API_KEY from environment for %s...", self.orchestrator_hotkey[:16])
             return self._api_key
 
         if not self.signer:
-            logger.error("Cannot get API key: no signer configured and BEAMCORE_API_KEY not set")
+            logger.error("Cannot get API key: no signer configured and BEAMCORE_ORCHESTRATOR_API_KEY not set")
             return None
 
         client = await self._get_client()
-
         try:
-            # Step 1: Request challenge
-            challenge_resp = await client.post(
-                f"{self.base_url}/auth/challenge",
-                json={
-                    "hotkey": self.orchestrator_hotkey,
-                    "role": "orchestrator",
-                },
-            )
-
+            challenge_resp = await client.post(f"{self.base_url}/auth/challenge", json={"hotkey": self.orchestrator_hotkey, "role": "orchestrator"})
             if challenge_resp.status_code == 429:
                 retry_after = challenge_resp.headers.get("Retry-After", "300")
-                logger.error(
-                    "Too many auth challenge requests for this hotkey. "
-                    "Update your code and try again after %s second cooldown period.",
-                    retry_after,
-                )
+                logger.error("Too many auth challenge requests; retry after %s seconds", retry_after)
                 return None
-
             if challenge_resp.status_code != 200:
-                logger.error(f"Failed to get auth challenge: {challenge_resp.status_code}")
+                logger.error("Failed to get auth challenge: %s", challenge_resp.status_code)
                 return None
-
             challenge_data = challenge_resp.json()
-            challenge_id = challenge_data["challenge_id"]
             message = challenge_data["message"]
-
-            # Step 2: Sign the challenge message
             try:
                 sig_bytes = self.signer.sign(message.encode("utf-8"))
-                signature = "0x" + (
-                    sig_bytes.hex() if isinstance(sig_bytes, bytes) else str(sig_bytes)
-                )
+                signature = "0x" + (sig_bytes.hex() if isinstance(sig_bytes, bytes) else str(sig_bytes))
             except Exception as e:
-                logger.error(f"Failed to sign challenge: {e}")
+                logger.error("Failed to sign challenge: %s", e)
                 return None
-
-            # Step 3: Verify signature and get API key
             verify_resp = await client.post(
                 f"{self.base_url}/auth/verify",
                 json={
-                    "challenge_id": challenge_id,
+                    "challenge_id": challenge_data["challenge_id"],
                     "hotkey": self.orchestrator_hotkey,
                     "signature": signature,
                     "role": "orchestrator",
-                    "key_name": "Orchestrator WebSocket Key",
+                    "key_name": "Orchestrator NATS Control Key",
                 },
             )
-
-            if verify_resp.status_code == 409:
-                logger.error(
-                    "API key already exists for this orchestrator. "
-                    "Set BEAMCORE_API_KEY env var with your existing key, or revoke the old key first."
-                )
-                return None
-
             if verify_resp.status_code != 200:
-                logger.error(
-                    f"Failed to verify signature: {verify_resp.status_code} - {verify_resp.text}"
-                )
+                logger.error("Failed to verify signature: %s - %s", verify_resp.status_code, verify_resp.text)
                 return None
-
             verify_data = verify_resp.json()
-
             if not verify_data.get("success") or not verify_data.get("api_key"):
-                logger.error(f"Auth verify failed: {verify_data.get('message', 'Unknown error')}")
+                logger.error("Auth verify failed: %s", verify_data.get("message", "Unknown error"))
                 return None
-
             self._api_key = verify_data["api_key"]
             self._api_key_expires = time.time() + 86400
-            self._skip_env_key = False
+            self._api_key_source = "signed"
             self._persist_key()
-
-            logger.info(f"Obtained API key for orchestrator {self.orchestrator_hotkey[:16]}...")
-            logger.info("Obtained API key is active for this process")
+            logger.info("Obtained API key for orchestrator %s...", self.orchestrator_hotkey[:16])
             return self._api_key
-
         except Exception as e:
-            logger.error(f"Failed to get API key: {e}")
+            logger.error("Failed to get API key: %s", e)
             return None
 
     async def start_polling(self):
-        """
-        Start WebSocket connection for real-time notifications.
-
-        BeamCore pushes task offer batches over the orchestrator WebSocket; there is no HTTP
-        polling fallback.
-        """
         if self._running:
             logger.warning("Already running")
             return
-
         self._running = True
-
-        self._ws_task = asyncio.create_task(self._ws_connection_loop())
-
-        logger.info(
-            f"Started WebSocket connection to {self._get_ws_url()} with transport keepalive"
-        )
-
-    async def stop_polling(self):
-        """Stop WebSocket connection."""
-        self._running = False
-        self._ws_connected = False
-
-        # Close WebSocket
-        if self._ws:
+        last_error: Optional[Exception] = None
+        for attempt in range(1, STARTUP_CONNECT_ATTEMPTS + 1):
             try:
-                await self._ws.close()
+                await self._connect_nats_session()
+                registered = await self._register_via_nats()
+                if not registered:
+                    raise RuntimeError("NATS control registration failed")
+                self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+                logger.info("Started NATS control connection to %s", self.ws_base_url)
+                return
+            except Exception as exc:
+                last_error = exc
+                await self._close_nats_session()
+                if attempt >= STARTUP_CONNECT_ATTEMPTS:
+                    self._running = False
+                    break
+                self._beamcore_upstream_degraded = True
+                BEAMCORE_UPSTREAM_DEGRADED.set(1)
+                delay = min(5.0, STARTUP_CONNECT_BACKOFF_SECONDS * attempt)
+                logger.warning(
+                    "BeamCore NATS control startup handshake attempt %s/%s failed: %s; retrying in %.1fs",
+                    attempt,
+                    STARTUP_CONNECT_ATTEMPTS,
+                    exc,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+        raise RuntimeError("Cannot start NATS control after startup retries") from last_error
+
+    async def _close_nats_session(self, *, drain: bool = False) -> None:
+        subscription = self._subscription
+        nc = self._nc
+        self._subscription = None
+        self._nc = None
+        self._registered = False
+        if subscription:
+            try:
+                await subscription.unsubscribe()
             except Exception:
                 pass
-            self._ws = None
-
-        # Cancel tasks
-        for task in [self._ws_task, self._registration_retry_task]:
-            if task:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-
-        self._ws_task = None
-        self._registration_retry_task = None
-        logger.info("WebSocket connection stopped")
-
-    async def _ws_connection_loop(self):
-        """Maintain WebSocket connection with automatic reconnection."""
-        reconnect_delay = self._reconnect_delay
-
-        while self._running:
+        if nc:
             try:
-                await self._connect_websocket()
-                reconnect_delay = self._reconnect_delay  # Reset on successful connection
-                await self._ws_message_loop()
-            except ConnectionClosed as e:
-                self._log_websocket_closed(e)
-            except Exception as e:
-                logger.error(f"WebSocket error: {e}")
+                close_result = nc.drain() if drain else nc.close()
+                if inspect.isawaitable(close_result):
+                    await close_result
+            except Exception:
+                pass
 
-            self._ws_connected = False
-            self._ws = None
-            if self._registration_retry_task and not self._registration_retry_task.done():
-                self._registration_retry_task.cancel()
-            self._registration_retry_task = None
+    async def _connect_nats_session(self) -> None:
+        last_error: Optional[Exception] = None
 
-            if self._running:
-                logger.info(f"Reconnecting WebSocket in {reconnect_delay}s...")
-                await asyncio.sleep(reconnect_delay)
-                reconnect_delay = min(reconnect_delay * 1.5, self._max_reconnect_delay)
+        async def connect_once(key: str):
+            return await nats.connect(
+                servers=[self.ws_base_url],
+                user=self.orchestrator_hotkey,
+                password=key,
+                name=f"beam-orchestrator-{self.orchestrator_hotkey[:12]}",
+                max_reconnect_attempts=-1,
+                reconnect_time_wait=1,
+                disconnected_cb=self._on_nats_disconnected,
+                reconnected_cb=self._on_nats_reconnected,
+                error_cb=self._on_nats_error,
+                closed_cb=self._on_nats_closed,
+            )
 
-    def set_registration_config(
-        self,
-        url: str,
-        region: str,
-        max_workers: int = 10000,
-        uid: int = None,
-        fee_percentage: float = 0.0,
-        gateway_url: Optional[str] = None,
-    ):
-        """
-        Set registration config for auto-registration after WebSocket connects.
+        for attempt in range(1, STARTUP_CONNECT_ATTEMPTS + 1):
+            try:
+                api_key = await self._ensure_api_key()
+                if not api_key:
+                    raise RuntimeError("NATS control requires an orchestrator API key before connect")
 
-        This should be called before start_polling() so the orchestrator
-        registers via WebSocket immediately after connection.
+                try:
+                    self._nc = await connect_once(api_key)
+                except Exception as exc:
+                    if self._api_key_source == "env" and self._is_authorization_error(exc):
+                        raise
+                    if self._api_key_source != "env" and self.signer and self._is_authorization_error(exc):
+                        logger.warning("BeamCore NATS auth requested a fresh orchestrator API key")
+                        self._clear_cached_key()
+                        api_key = await self._ensure_api_key()
+                        if not api_key:
+                            raise RuntimeError("Cannot refresh NATS control orchestrator API key") from exc
+                        self._nc = await connect_once(api_key)
+                    else:
+                        raise
 
-        Args:
-            url: Orchestrator's API URL (e.g., http://ip:port)
-            region: Geographic region
-            max_workers: Maximum workers this orchestrator can handle
-            uid: Bittensor UID (optional)
-            fee_percentage: Fee percentage charged to workers
-            gateway_url: Worker gateway URL advertised to BeamCore
-        """
+                self._subscription = await self._nc.subscribe(
+                    _subject("runtime", self.orchestrator_hotkey, "*"),
+                    cb=self._handle_runtime_message,
+                )
+                return
+            except Exception as exc:
+                last_error = exc
+                if attempt >= STARTUP_CONNECT_ATTEMPTS:
+                    break
+                self._beamcore_upstream_degraded = True
+                BEAMCORE_UPSTREAM_DEGRADED.set(1)
+                delay = min(5.0, STARTUP_CONNECT_BACKOFF_SECONDS * attempt)
+                logger.warning(
+                    "BeamCore NATS control startup attempt %s/%s failed: %s; retrying in %.1fs",
+                    attempt,
+                    STARTUP_CONNECT_ATTEMPTS,
+                    exc,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+        raise RuntimeError("Cannot connect to NATS control after startup retries") from last_error
+
+    async def _on_nats_disconnected(self) -> None:
+        self._beamcore_upstream_degraded = True
+        BEAMCORE_UPSTREAM_DEGRADED.set(1)
+        logger.warning("BeamCore NATS control disconnected")
+
+    async def _on_nats_reconnected(self) -> None:
+        logger.info("BeamCore NATS control reconnected")
+        if not self._running:
+            return
+        try:
+            await self._register_via_nats()
+            self._schedule_ready_sync_if_needed()
+            self._note_beamcore_upstream_recovered("NATS reconnect")
+        except Exception as exc:
+            logger.warning("BeamCore NATS control re-registration failed after reconnect: %s", exc)
+
+    async def _on_nats_error(self, exc: Exception) -> None:
+        logger.warning("BeamCore NATS control error: %s", exc)
+        if self._is_authorization_error(exc):
+            self._schedule_auth_recovery()
+
+    async def _on_nats_closed(self) -> None:
+        logger.warning("BeamCore NATS control closed")
+
+    async def _recover_nats_connection(self, reason: str, *, force: bool = False) -> None:
+        if not self._running:
+            return
+        async with self._connect_lock:
+            if self._nc is not None and not force and not self._nats_is_closed():
+                return
+            old_nc = self._nc
+            self._nc = None
+            self._subscription = None
+            self._registered = False
+            if old_nc:
+                try:
+                    close_result = old_nc.close()
+                    if inspect.isawaitable(close_result):
+                        await close_result
+                except Exception:
+                    pass
+            await self._connect_nats_session()
+        await self._register_via_nats()
+        self._schedule_ready_sync_if_needed()
+        logger.info("Recovered BeamCore NATS control connection after %s", reason)
+    async def stop_polling(self):
+        self._running = False
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            self._heartbeat_task = None
+        if self._ready_sync_task:
+            self._ready_sync_task.cancel()
+            try:
+                await self._ready_sync_task
+            except asyncio.CancelledError:
+                pass
+            self._ready_sync_task = None
+        if self._auth_recovery_task:
+            self._auth_recovery_task.cancel()
+            try:
+                await self._auth_recovery_task
+            except asyncio.CancelledError:
+                pass
+            self._auth_recovery_task = None
+        if self._task_offer_dispatcher:
+            await self._task_offer_dispatcher.stop()
+        if self._subscription:
+            await self._subscription.unsubscribe()
+            self._subscription = None
+        if self._nc:
+            await self._nc.drain()
+            self._nc = None
+        self._registered = False
+        logger.info("NATS control connection stopped")
+
+    def set_registration_config(self, url: str, region: str, max_workers: int = 10000, uid: int = None, fee_percentage: float = 0.0, gateway_url: Optional[str] = None):
         self._registration_config = {
             "url": url,
             "region": region,
@@ -448,259 +474,158 @@ class SubnetCoreClient:
             "fee_percentage": fee_percentage,
             "gateway_url": gateway_url,
         }
-        logger.info(f"Registration config set: region={region}, max_workers={max_workers}")
+        logger.info("Registration config set: region=%s, max_workers=%s", region, max_workers)
 
-    def _log_websocket_closed(self, closed: ConnectionClosed) -> None:
-        """Log orch-gateway close codes with operator-facing context."""
-        code = closed.rcvd.code if closed.rcvd else None
-        if code == 4001:
-            logger.warning(
-                "Orch-gateway closed the WebSocket with code 4001 (unauthorized) for hotkey %s. "
-                "Use an active orchestrator-role API key that belongs to this hotkey. "
-                "Typical causes: BEAMCORE_API_KEY is a worker or client key, the hotkey was first "
-                "registered as a worker in Beam, or the key does not match the wallet in the URL. "
-                "Obtain a key via POST /auth/challenge and POST /auth/verify with role orchestrator, "
-                "then set BEAMCORE_API_KEY. Detail: %s",
-                self.orchestrator_hotkey,
-                closed,
-            )
-            self._clear_cached_key()
-            self._skip_env_key = True
-            return
-
-        logger.warning("WebSocket closed: %s", closed)
-        if code == 1008:
-            self._clear_cached_key()
-            self._skip_env_key = True
-
-    async def _connect_websocket(self):
-        """Connect to WebSocket endpoint."""
-        # Get API key for authentication (required by buffer service)
-        api_key = await self._ensure_api_key()
-        if not api_key:
-            logger.error("Failed to obtain API key for WebSocket connection")
-            raise ConnectionError("Cannot connect without API key")
-
-        signature, timestamp = self._sign_ws_auth()
-        url = self._get_ws_url()
-
-        headers = {
-            "x-api-key": api_key,
-            "x-signature": signature,
-            "x-timestamp": timestamp,
-        }
-
-        logger.info(
-            "Connecting to WebSocket: %s (open_timeout=%ss ping_interval=%ss ping_timeout=%ss)",
-            url,
-            self._ws_open_timeout,
-            self._ws_ping_interval,
-            self._ws_ping_timeout,
-        )
-        self._ws = await websockets.connect(
-            url,
-            additional_headers=headers,
-            open_timeout=self._ws_open_timeout,
-            close_timeout=self._ws_close_timeout,
-            ping_interval=self._ws_ping_interval,
-            ping_timeout=self._ws_ping_timeout,
-        )
-        self._ws_connected = True
-        self._registered = False  # Reset on new connection
-        self._last_confirmed_ready = None
-        logger.info(
-            "WebSocket transport open to %s — orch-gateway authorizes X-Api-Key after the handshake",
-            url,
-        )
-
-        # Auto-register if config is set
-        if self._registration_config:
-            await self.register_via_websocket(
-                url=self._registration_config["url"],
-                region=self._registration_config["region"],
-                max_workers=self._registration_config["max_workers"],
-                uid=self._registration_config["uid"],
-                fee_percentage=self._registration_config["fee_percentage"],
-                gateway_url=self._registration_config.get("gateway_url"),
-            )
-            self._schedule_registration_retry_if_needed()
-            # Ready sync runs from register_ack (after core persists the row). Scheduling here raced set_ready ahead
-            # of register_ack and widened BeamCore←DB inconsistencies.
-
-    def _schedule_registration_retry_if_needed(self) -> None:
-        if (
-            not self._running
-            or not self._ws_connected
-            or self._registered
-            or not self._registration_config
-        ):
-            return
-        if self._registration_retry_task and not self._registration_retry_task.done():
-            return
-
-        self._registration_retry_task = asyncio.create_task(self._registration_retry_loop())
-
-    async def _registration_retry_loop(self) -> None:
-        try:
-            await asyncio.sleep(self._registration_retry_interval)
-            while (
-                self._running
-                and self._ws_connected
-                and not self._registered
-                and self._registration_config
-            ):
-                logger.warning(
-                    "Registration ack not received yet; resending websocket registration for %s",
-                    self.orchestrator_hotkey,
-                )
-                await self.register_via_websocket(
-                    url=self._registration_config["url"],
-                    region=self._registration_config["region"],
-                    max_workers=self._registration_config["max_workers"],
-                    uid=self._registration_config["uid"],
-                    fee_percentage=self._registration_config["fee_percentage"],
-                    gateway_url=self._registration_config.get("gateway_url"),
-                )
-                await asyncio.sleep(self._registration_retry_interval)
-        except asyncio.CancelledError:
-            raise
-        finally:
-            self._registration_retry_task = None
-
-    async def _ws_message_loop(self):
-        """Process incoming WebSocket messages."""
-        while self._running and self._ws:
+    async def _register_via_nats(self) -> bool:
+        if not self._registration_config:
+            logger.warning("Cannot register via NATS: registration config not set")
+            return False
+        cfg = dict(self._registration_config)
+        reg_message = f"{self.orchestrator_hotkey}:{cfg.get('url') or ''}:{cfg.get('region') or ''}"
+        signature = ""
+        if self.signer:
             try:
-                message = await self._ws.recv()
-                data = json.loads(message)
-                await self._handle_ws_message(data)
-            except json.JSONDecodeError as e:
-                logger.warning(f"Invalid JSON from WebSocket: {e}")
-
-    async def _handle_ws_message(self, data: dict):
-        """Handle incoming WebSocket message."""
-        msg_type = data.get("type")
-        request_id = data.get("request_id")
-
-        if request_id:
-            fut = self._pending_ws_requests.pop(request_id, None)
-            if fut and not fut.done():
-                fut.set_result(data)
-                return
-
-        if msg_type == "connected":
-            logger.info(
-                "WebSocket connected: hotkey=%s",
-                data.get("hotkey") or data.get("buffer_id") or "unknown",
-            )
-
-        elif msg_type == "upstream_down":
-            detail = data.get("message") or "orch-gateway lost BeamCore upstream WebSocket"
-            self._note_beamcore_upstream_down(detail)
-
-        elif msg_type == "upstream_ok":
-            detail = data.get("message") or "BeamCore upstream relay connected"
-            self._note_beamcore_upstream_recovered(detail)
-
-        elif msg_type == "worker_task_offer_batch":
-            self._note_beamcore_upstream_recovered("worker_task_offer_batch from BeamCore")
-            asyncio.create_task(self._handle_task_offer_batch(data))
-
-        elif msg_type == "worker_update":
-            # Worker connect/disconnect push event — must not block the recv loop;
-            # replies for list_workers / control-plane requests are dispatched here too.
-            worker_id = data.get("worker_id")
-            event = data.get("event")
-            logger.debug(f"Worker update: {worker_id} - {event}")
-            if self._worker_update_handler and worker_id and event:
-
-                async def _run_worker_update(wid: str, ev: str, handler: Any) -> None:
-                    try:
-                        res = handler(wid, ev)
-                        if inspect.isawaitable(res):
-                            await res
-                    except Exception as exc:
-                        logger.error("Error handling worker_update: %s", exc)
-
-                asyncio.create_task(
-                    _run_worker_update(worker_id, event, self._worker_update_handler)
-                )
-
-        elif msg_type == "register_ack":
-            logger.info(f"Registration acknowledged: {data.get('status')}")
+                sig_bytes = self.signer.sign(reg_message.encode())
+                signature = "0x" + (sig_bytes.hex() if isinstance(sig_bytes, bytes) else str(sig_bytes))
+            except Exception as e:
+                logger.warning("Failed to sign registration: %s", e)
+        self._desired_ready = self._registration_ready()
+        cfg["ready"] = self._desired_ready
+        cfg["signature"] = signature
+        response = await self._send_nats_request("register", cfg, timeout=max(REQUEST_TIMEOUT, 3.0))
+        if response.get("type") == "register_ack":
             self._registered = True
-            if self._registration_retry_task and not self._registration_retry_task.done():
-                self._registration_retry_task.cancel()
+            logger.info("Registered via NATS control: status=%s", response.get("status"))
             self._schedule_ready_sync_if_needed()
+            return True
+        self._registered = False
+        logger.error("Registration failed: %s", response.get("message") or response.get("reason") or response)
+        return False
 
-        elif msg_type == "register_result":
-            status = data.get("status")
-            slot = data.get("slot_number")
-            logger.info(f"Registration result: status={status}, slot={slot}")
-            self._registered = status in ("assigned", "updated")
-            if (
-                self._registered
-                and self._registration_retry_task
-                and not self._registration_retry_task.done()
-            ):
-                self._registration_retry_task.cancel()
-            self._schedule_ready_sync_if_needed()
+    async def _heartbeat_loop(self) -> None:
+        while self._running:
+            try:
+                await self._send_nats_publish("heartbeat", {})
+            except Exception as exc:
+                logger.debug("heartbeat publish failed: %s", exc)
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
 
-        elif msg_type == "register_error":
-            logger.error(f"Registration failed: {data.get('error') or data.get('message')}")
-            self._registered = False
-            self._schedule_registration_retry_if_needed()
+    def _envelope(self, message_type: str, payload: dict[str, Any], request_id: Optional[str] = None) -> dict[str, Any]:
+        envelope = {
+            "message_id": f"orchestrator-control/v1:{BEAM_ENV}:{self.orchestrator_hotkey}:{message_type}:{request_id or uuid.uuid4().hex}",
+            "schema_version": SCHEMA_VERSION,
+            "environment": BEAM_ENV,
+            "hotkey": self.orchestrator_hotkey,
+            "message_type": message_type,
+            "occurred_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "producer": "orchestrator",
+            "payload": payload,
+        }
+        if request_id is not None:
+            envelope["request_id"] = request_id
+        return envelope
 
-        elif msg_type == "error":
-            if data.get("code") == "unauthorized":
-                logger.warning(
-                    "Orch-gateway authorization rejected hotkey %s: reason=%s message=%s",
-                    data.get("hotkey") or self.orchestrator_hotkey,
-                    data.get("reason"),
-                    data.get("message"),
-                )
-            else:
-                self._maybe_upstream_error_payload(data)
-
-        else:
-            logger.debug(f"Unknown WebSocket message type: {msg_type}")
-
-    async def _send_ws_request(
-        self, message: dict[str, Any], timeout: float = 10.0
-    ) -> dict[str, Any]:
-        """Send a request over the orchestrator gateway WS and await the correlated reply."""
-        if not self._ws or not self._ws_connected:
-            raise RuntimeError("orchestrator websocket is not connected")
-
-        request_id = message.get("request_id") or uuid.uuid4().hex
-        future: asyncio.Future = asyncio.get_event_loop().create_future()
-        self._pending_ws_requests[request_id] = future
-
+    async def _send_nats_publish(self, message_type: str, payload: dict[str, Any]) -> None:
+        await self._ensure_nats_connection(f"{message_type}_publish_disconnected")
+        if not self._nc:
+            raise RuntimeError("NATS control is not connected")
+        payload_bytes = _pack(self._envelope(message_type, payload))
+        subject = _subject("orch", self.orchestrator_hotkey, message_type)
         try:
-            await self._ws.send(json.dumps({**message, "request_id": request_id}))
-            response = await asyncio.wait_for(future, timeout=timeout)
+            await self._nc.publish(subject, payload_bytes)
         except Exception:
-            self._pending_ws_requests.pop(request_id, None)
+            if self._nats_is_closed():
+                await self._recover_nats_connection(f"{message_type}_publish_closed", force=True)
+                if not self._nc:
+                    raise RuntimeError("NATS control is not connected")
+                await self._nc.publish(subject, payload_bytes)
+                return
             raise
 
-        if response.get("type") == "error":
-            self._maybe_upstream_error_payload(response)
-            raise RuntimeError(
-                response.get("message") or response.get("error") or "gateway request failed"
-            )
+    async def _send_nats_request(
+        self,
+        message_type: str,
+        payload: dict[str, Any],
+        timeout: float = REQUEST_TIMEOUT,
+        attempts: int = REQUEST_RETRY_ATTEMPTS,
+    ) -> dict[str, Any]:
+        request_id = payload.get("request_id") or uuid.uuid4().hex
+        request_payload = _pack(self._envelope(message_type, {**payload, "request_id": request_id}, request_id))
+        subject = _subject("orch", self.orchestrator_hotkey, message_type)
+        last_error: Exception | None = None
+        request_attempts = max(1, attempts)
+        for attempt in range(request_attempts):
+            await self._ensure_nats_connection(f"{message_type}_request_disconnected")
+            if not self._nc:
+                raise RuntimeError("NATS control is not connected")
+            try:
+                msg = await self._nc.request(subject, request_payload, timeout=timeout)
+                envelope = _unpack(msg.data)
+                response = envelope.get("payload") or {}
+                if not isinstance(response, dict):
+                    raise RuntimeError("invalid BeamCore response payload")
+                if response.get("type") == "error":
+                    reason = response.get("reason") or response.get("message") or "NATS control request failed"
+                    if reason == "orchestrator_not_registered" and message_type != "register":
+                        self._registered = False
+                        await self._register_via_nats()
+                        continue
+                    raise RuntimeError(reason)
+                return response
+            except Exception as exc:
+                last_error = exc
+                if self._nats_is_closed():
+                    await self._recover_nats_connection(f"{message_type}_request_closed", force=True)
+                if attempt < request_attempts - 1:
+                    await self._request_retry_delay(attempt)
+        raise RuntimeError(f"NATS control request failed: {last_error}") from last_error
+    async def _handle_runtime_message(self, msg) -> None:
+        try:
+            envelope = _unpack(msg.data)
+            payload = envelope.get("payload") or {}
+            if not isinstance(payload, dict):
+                raise ValueError("payload must be an object")
+            msg_type = envelope.get("message_type") or payload.get("type")
+            if msg_type == "worker_task_offer_batch":
+                self._note_beamcore_upstream_recovered("worker_task_offer_batch from BeamCore")
+                accepted = await self._handle_task_offer_batch(payload)
+                if msg.reply:
+                    response = self._envelope("worker_task_offer_batch", {"type": "worker_task_offer_batch_ack", "accepted": accepted, "batch_id": payload.get("batch_id")}, envelope.get("request_id"))
+                    await msg.respond(_pack(response))
+            elif msg_type == "error":
+                logger.warning("BeamCore NATS control error: %s", payload)
+            else:
+                logger.debug("Unknown NATS control message type: %s", msg_type)
+                if msg.reply:
+                    await msg.respond(_pack(self._envelope("error", {"type": "error", "reason": "unknown_message_type"}, envelope.get("request_id"))))
+        except Exception as exc:
+            logger.error("Error handling NATS control message: %s", exc)
+            if msg.reply:
+                await msg.respond(_pack(self._envelope("error", {"type": "error", "reason": "handler_error"})))
 
-        return response
-
-    async def _handle_task_offer_batch(self, data: dict) -> None:
+    async def _handle_task_offer_batch(self, data: dict) -> bool:
         batch_id = data.get("batch_id")
         offers = data.get("offers") or []
         if not isinstance(offers, list) or not offers:
             logger.warning("worker_task_offer_batch missing offers: batch=%s", batch_id)
-            return
+            return False
         if not self._worker_gateway:
             logger.warning("No local worker gateway available for batch %s", batch_id)
-            return
+            return False
+        if self._task_offer_dispatcher:
+            await self._task_offer_dispatcher.start()
+            accepted = self._task_offer_dispatcher.enqueue_offer(data)
+            if accepted:
+                logger.info("worker_task_offer_batch queued for local workers: batch=%s offers=%s", batch_id, len(offers))
+            return accepted
+        await self._deliver_task_offer_batch_to_workers(data)
+        return True
 
+    async def _deliver_task_offer_batch_to_workers(self, data: dict) -> None:
+        batch_id = data.get("batch_id")
+        offers = data.get("offers") or []
+        if not isinstance(offers, list) or not offers or not self._worker_gateway:
+            return
         delivered = 0
         for offer in offers:
             if not isinstance(offer, dict):
@@ -713,48 +638,29 @@ class SubnetCoreClient:
             if await self._worker_gateway.deliver_task_offer(worker_id, offer):
                 delivered += 1
             else:
-                logger.warning(
-                    "Failed to forward task offer to local worker: batch=%s worker=%s task=%s",
-                    batch_id,
-                    worker_id,
-                    offer.get("task_id"),
-                )
+                logger.warning("Failed to forward task offer: batch=%s worker=%s task=%s", batch_id, worker_id, offer.get("task_id"))
+        logger.info("worker_task_offer_batch delivered locally: batch=%s offers=%s delivered=%s", batch_id, len(offers), delivered)
 
-        logger.info(
-            "worker_task_offer_batch delivered locally: batch=%s offers=%s delivered=%s",
-            batch_id,
-            len(offers),
-            delivered,
-        )
 
     def _schedule_ready_sync_if_needed(self) -> None:
-        if not self._running or not self._ws_connected:
+        if not self._running or not self._registered:
             return
         if self._last_confirmed_ready == self._desired_ready:
             return
         if self._ready_sync_task and not self._ready_sync_task.done():
             return
-
         self._ready_sync_task = asyncio.create_task(self._sync_ready_state_in_background())
 
     async def _sync_ready_state_in_background(self) -> None:
         try:
-            while (
-                self._running
-                and self._ws_connected
-                and self._last_confirmed_ready != self._desired_ready
-            ):
+            while self._running and self._registered and self._last_confirmed_ready != self._desired_ready:
                 try:
                     applied = await self._apply_desired_ready_state()
                     if applied:
                         return
                 except Exception as exc:
-                    logger.warning(
-                        "Failed to sync queued ready=%s through orch-gateway: %s",
-                        self._desired_ready,
-                        exc,
-                    )
-                await asyncio.sleep(self._ready_sync_retry_interval)
+                    logger.warning("Failed to sync queued ready=%s through NATS control: %s", self._desired_ready, exc)
+                await asyncio.sleep(5.0)
         except asyncio.CancelledError:
             raise
         finally:
@@ -762,271 +668,106 @@ class SubnetCoreClient:
 
     async def _apply_desired_ready_state(self) -> bool:
         requested_ready = self._desired_ready
-        response = await self._send_ws_request({"type": "set_ready", "ready": requested_ready})
+        response = await self._send_nats_request("set_ready", {"ready": requested_ready})
         confirmed = bool(response.get("ready", requested_ready))
         self._desired_ready = confirmed
         self._last_confirmed_ready = confirmed
-        applied = confirmed == requested_ready
-        logger.info(
-            f"Orchestrator ready={confirmed} set on BeamCore " f"(uid={response.get('uid')})"
-        )
-        return applied
-
-    async def register_via_websocket(
-        self,
-        url: str,
-        region: str,
-        max_workers: int = 10000,
-        uid: int = None,
-        fee_percentage: float = 0.0,
-        gateway_url: Optional[str] = None,
-    ) -> bool:
-        """
-        Register orchestrator via WebSocket.
-
-        Sends a register message over the WebSocket connection instead of HTTP POST.
-        The signature proves ownership of the hotkey.
-
-        Args:
-            url: Orchestrator's API URL (e.g., http://ip:port)
-            region: Geographic region
-            max_workers: Maximum workers this orchestrator can handle
-            uid: Bittensor UID (optional)
-            fee_percentage: Fee percentage charged to workers
-            gateway_url: Worker gateway URL advertised to BeamCore
-
-        Returns:
-            True if registration message was sent successfully
-        """
-        if not self._ws or not self._ws_connected:
-            logger.warning("Cannot register via WebSocket: not connected")
-            return False
-
-        # Sign registration data: "{hotkey}:{url}:{region}"
-        reg_message = f"{self.orchestrator_hotkey}:{url}:{region}"
-        signature = ""
-        if self.signer:
-            try:
-                sig_bytes = self.signer.sign(reg_message.encode())
-                signature = "0x" + (
-                    sig_bytes.hex() if isinstance(sig_bytes, bytes) else str(sig_bytes)
-                )
-            except Exception as e:
-                logger.warning(f"Failed to sign registration: {e}")
-
-        message = {
-            "type": "register",
-            "url": url,
-            "region": region,
-            "max_workers": max_workers,
-            "uid": uid,
-            "fee_percentage": fee_percentage,
-            "ready": self._desired_ready,
-            "signature": signature,
-        }
-        if gateway_url:
-            message["gateway_url"] = gateway_url
-
+        logger.info("Orchestrator ready=%s set on BeamCore (uid=%s)", confirmed, response.get("uid"))
+        return confirmed == requested_ready
+    async def send_task_accept(self, task_id: str, worker_id: str, offer_id: Optional[str], worker_version: Optional[str]) -> Dict[str, Any]:
         try:
-            await self._ws.send(json.dumps(message))
-            logger.info(
-                "Sent registration via WebSocket for %s (orch-gateway relays it only after "
-                "orchestrator API key authorization): region=%s, fee=%s%%, desired_ready=%s",
-                self.orchestrator_hotkey,
-                region,
-                fee_percentage,
-                self._desired_ready,
+            return await self._send_nats_request(
+                "task_accept",
+                {
+                    "task_id": task_id,
+                    "worker_id": worker_id,
+                    "offer_id": offer_id or task_id,
+                    "worker_version": worker_version,
+                },
+                timeout=max(REQUEST_TIMEOUT, TASK_ACCEPT_TIMEOUT),
+                attempts=TASK_ACCEPT_RETRY_ATTEMPTS,
             )
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send registration via WebSocket: {e}")
-            return False
-
-    def set_worker_gateway(self, gateway) -> None:
-        """Wire in the in-process WorkerGateway so task offer batches are dispatched."""
-        self._worker_gateway = gateway
-        gateway.set_upstream(self)
-
-    async def send_task_accept(
-        self,
-        task_id: str,
-        worker_id: str,
-        offer_id: Optional[str],
-        worker_version: Optional[str],
-    ) -> Dict[str, Any]:
-        if not self._ws or not self._ws_connected:
-            logger.warning("send_task_accept: no WS, dropping task=%s", task_id)
-            return {
-                "type": "task_accept_ack",
-                "task_id": task_id,
-                "offer_id": offer_id or task_id,
-                "accepted": False,
-                "reason": "orchestrator_ws_disconnected",
-            }
-        msg = {
-            "type": "task_accept",
-            "task_id": task_id,
-            "worker_id": worker_id,
-            "offer_id": offer_id or task_id,
-            "worker_version": worker_version,
-        }
-        try:
-            return await self._send_ws_request(msg)
         except Exception as exc:
             logger.warning("send_task_accept send error: %s", exc)
-            return {
-                "type": "task_accept_ack",
-                "task_id": task_id,
-                "offer_id": offer_id or task_id,
-                "accepted": False,
-                "reason": "beamcore_accept_forward_failed",
-            }
+            return {"type": "task_accept_ack", "task_id": task_id, "offer_id": offer_id or task_id, "accepted": False, "reason": "beamcore_accept_forward_failed"}
 
-    async def send_task_reject(
-        self,
-        task_id: str,
-        worker_id: str,
-        offer_id: Optional[str],
-        reason: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        if not self._ws or not self._ws_connected:
-            logger.warning("send_task_reject: no WS, dropping task=%s", task_id)
-            return {
-                "type": "task_reject_ack",
-                "task_id": task_id,
-                "offer_id": offer_id or task_id,
-                "accepted": False,
-                "reason": "orchestrator_ws_disconnected",
-            }
-        msg = {
-            "type": "task_reject",
-            "task_id": task_id,
-            "worker_id": worker_id,
-            "offer_id": offer_id or task_id,
-        }
-        if reason:
-            msg["reason"] = reason
+    async def send_task_reject(self, task_id: str, worker_id: str, offer_id: Optional[str], reason: Optional[str] = None) -> Dict[str, Any]:
         try:
-            return await self._send_ws_request(msg)
+            payload = {"task_id": task_id, "worker_id": worker_id, "offer_id": offer_id or task_id}
+            if reason:
+                payload["reason"] = reason
+            return await self._send_nats_request("task_reject", payload)
         except Exception as exc:
             logger.warning("send_task_reject send error: %s", exc)
-            return {
-                "type": "task_reject_ack",
-                "task_id": task_id,
-                "offer_id": offer_id or task_id,
-                "accepted": False,
-                "reason": "beamcore_reject_forward_failed",
-            }
+            return {"type": "task_reject_ack", "task_id": task_id, "offer_id": offer_id or task_id, "accepted": False, "reason": "beamcore_reject_forward_failed"}
+
+    async def send_task_result_strict(self, payload: dict) -> Dict[str, Any]:
+        task_id = payload.get("task_id")
+        offer_id = payload.get("offer_id") or task_id
+        if not task_id or not offer_id:
+            return {"type": "task_result_ack", "task_id": task_id, "offer_id": offer_id, "received": False, "completed": False, "reason": "missing_task_or_offer_id"}
+        message = {"task_id": task_id, "offer_id": offer_id, "worker_id": payload.get("worker_id"), "success": bool(payload.get("success"))}
+        for key in ("etag", "chunk_hash", "error"):
+            if payload.get(key) is not None:
+                message[key] = payload[key]
+        return await self._send_nats_request("task_result", message, timeout=max(REQUEST_TIMEOUT, TASK_RESULT_TIMEOUT))
 
     async def send_task_result(self, payload: dict) -> Dict[str, Any]:
         task_id = payload.get("task_id")
         offer_id = payload.get("offer_id") or task_id
-        if not self._ws or not self._ws_connected:
-            logger.warning("send_task_result: no WS, dropping")
-            return {
-                "type": "task_result_ack",
-                "task_id": task_id,
-                "offer_id": offer_id,
-                "received": False,
-                "completed": False,
-                "reason": "orchestrator_ws_disconnected",
-            }
         try:
-            if not task_id or not offer_id:
-                logger.warning("send_task_result: missing task_id/offer_id, dropping")
-                return {
-                    "type": "task_result_ack",
-                    "task_id": task_id,
-                    "offer_id": offer_id,
-                    "received": False,
-                    "completed": False,
-                    "reason": "missing_task_or_offer_id",
-                }
-            message = {
-                "type": "task_result",
-                "task_id": task_id,
-                "offer_id": offer_id,
-                "worker_id": payload.get("worker_id"),
-                "success": bool(payload.get("success")),
-            }
-            for key in ("etag", "chunk_hash", "error"):
-                if payload.get(key) is not None:
-                    message[key] = payload[key]
-            return await self._send_ws_request(message)
+            return await self.send_task_result_strict(payload)
         except Exception as exc:
             logger.warning("send_task_result send error: %s", exc)
-            return {
-                "type": "task_result_ack",
-                "task_id": task_id,
-                "offer_id": offer_id,
-                "received": False,
-                "completed": False,
-                "reason": "beamcore_result_forward_failed",
-            }
+            return {"type": "task_result_ack", "task_id": task_id, "offer_id": offer_id, "received": False, "completed": False, "reason": "beamcore_result_forward_failed"}
+    async def update_worker_gateway(self, gateway_url: str, max_workers: int = 10000, health: str = "healthy") -> Dict[str, Any]:
+        return await self._send_nats_request("gateway_update", {"gateway_url": gateway_url, "max_workers": max_workers, "health": health})
 
-    async def update_worker_gateway(
-        self, gateway_url: str, max_workers: int = 10000, health: str = "healthy"
-    ) -> Dict[str, Any]:
-        """Publish an externally managed orchestrator-owned worker gateway URL."""
-        return await self._send_ws_request(
-            {
-                "type": "gateway_update",
-                "gateway_url": gateway_url,
-                "max_workers": max_workers,
-                "health": health,
-            }
-        )
+    async def sync_ready_if_eligible(self) -> bool:
+        self._desired_ready = self._registration_ready()
+        if not self._registered:
+            logger.info("Ready intent recorded; NATS control registration is not complete")
+            return False
+        if not self._desired_ready:
+            if self._last_confirmed_ready is not False:
+                try:
+                    await self._apply_desired_ready_state()
+                except Exception as exc:
+                    self._schedule_ready_sync_if_needed()
+                    logger.info("Queued ready=False after transient NATS control sync failure: %s", exc)
+            return False
+        return await self._apply_desired_ready_state()
 
     async def set_ready(self, ready: bool) -> bool:
-        """
-        Toggle this orchestrator's readiness to receive transfers through the relay.
-        """
-        self._desired_ready = ready
-        if not self._ws_connected:
-            logger.info(
-                "Queued ready=%s until orch-gateway websocket is connected",
-                ready,
-            )
+        self._operator_ready = ready
+        self._desired_ready = self._registration_ready()
+        if not self._registered:
+            logger.info("Queued ready=%s until NATS control registration completes", self._desired_ready)
             return False
         try:
             return await self._apply_desired_ready_state()
         except Exception as exc:
             self._schedule_ready_sync_if_needed()
-            logger.info(
-                "Queued ready=%s after transient orch-gateway sync failure: %s",
-                ready,
-                exc,
-            )
+            logger.info("Queued ready=%s after transient NATS control sync failure: %s", self._desired_ready, exc)
             return False
 
-    # =========================================================================
-    # HTTP Auth & Client
-    # =========================================================================
-
     def _auth_headers(self) -> dict:
-        """Build fresh auth headers with current timestamp, nonce, and signature."""
         timestamp = str(int(time.time()))
         nonce = uuid.uuid4().hex[:8]
         action = "request"
-
-        # Build canonical message matching Core API's expected format:
-        # "{type}_auth:{hotkey}:{timestamp}:{action}:{nonce}"
         message = f"orchestrator_auth:{self.orchestrator_hotkey}:{timestamp}:{action}:{nonce}"
-
-        # Sign with wallet if available, otherwise use placeholder
         signature = ""
         if self.signer:
             try:
                 sig_bytes = self.signer.sign(message.encode("utf-8"))
                 signature = sig_bytes.hex() if isinstance(sig_bytes, bytes) else str(sig_bytes)
             except Exception as e:
-                logger.warning(f"Failed to sign auth message: {e}")
+                logger.warning("Failed to sign auth message: %s", e)
                 signature = "unsigned"
         else:
             signature = "unsigned"
-
         headers = {
-            "X-Hotkey": self.orchestrator_hotkey,  # Required for rate limiting
+            "X-Hotkey": self.orchestrator_hotkey,
             "X-Orchestrator-Hotkey": self.orchestrator_hotkey,
             "X-Orchestrator-Uid": str(self.orchestrator_uid),
             "X-Orchestrator-Timestamp": timestamp,
@@ -1034,83 +775,33 @@ class SubnetCoreClient:
             "X-Orchestrator-Signature": signature,
             "X-Orchestrator-Action": action,
         }
-
-        # Include API key if available (preferred auth method)
         if self._api_key:
             headers["X-Api-Key"] = self._api_key
-
         return headers
 
     async def _get_client(self) -> httpx.AsyncClient:
-        """Get or create HTTP client with auth headers injected per-request."""
         if self._client is None:
-            self._client = httpx.AsyncClient(
-                timeout=self.timeout,
-                event_hooks={
-                    "request": [self._inject_auth_headers],
-                },
-            )
+            self._client = httpx.AsyncClient(timeout=self.timeout, event_hooks={"request": [self._inject_auth_headers]})
         return self._client
 
     async def _inject_auth_headers(self, request: httpx.Request):
-        """Inject fresh auth headers into every outgoing request."""
-        # Skip API key fetch for auth endpoints (they're public)
         if "/auth/challenge" not in str(request.url) and "/auth/verify" not in str(request.url):
-            # Ensure we have an API key for protected endpoints
             if not self._api_key:
                 await self._ensure_api_key()
-
-        headers = self._auth_headers()
-        for key, value in headers.items():
+        for key, value in self._auth_headers().items():
             request.headers[key] = value
 
     async def close(self):
-        """Close the HTTP client."""
+        await self.stop_polling()
         if self._client:
             await self._client.aclose()
             self._client = None
 
-    # =========================================================================
-    # Worker Management
-    # =========================================================================
-
-    async def get_worker(self, worker_id: str) -> Dict[str, Any]:
-        """Get a specific worker.
-
-        BeamCore exposes the worker globally at GET /workers/{worker_id}.
-        The
-        legacy /orchestrators/workers/{id} affiliation-scoped route was
-        removed.
-        """
-        return await self._send_ws_request({"type": "get_worker", "worker_id": worker_id})
-
-    async def get_worker_hotkey(self, worker_id: str) -> Optional[str]:
-        """
-        Resolve a worker_id to its hotkey regardless of affiliation.
-
-        Uses the unscoped /workers/{id}/hotkey endpoint — unlike get_worker()
-        this works for workers completing tasks on behalf of other orchestrators
-        (e.g. speculative/recovery tasks assigned cross-orchestrator).
-        """
-        try:
-            data = await self._send_ws_request(
-                {"type": "get_worker_hotkey", "worker_id": worker_id}
-            )
-            return data.get("hotkey")
-        except Exception as e:
-            logger.debug(f"Hotkey lookup failed for {worker_id[:16]}...: {e}")
-            return None
-
-
-# =============================================================================
-# Global Client Instance
-# =============================================================================
 
 _client: Optional[SubnetCoreClient] = None
 
 
 def get_subnet_core_client() -> Optional[SubnetCoreClient]:
-    """Get the global SubnetCoreClient instance."""
     return _client
 
 
@@ -1120,27 +811,8 @@ def init_subnet_core_client(
     orchestrator_hotkey: str,
     orchestrator_uid: int,
     timeout: float = 30.0,
-    signer=None,
-    *,
-    ws_open_timeout: float = 60.0,
-    ws_close_timeout: float = 20.0,
-    ws_ping_interval: float = 30.0,
-    ws_ping_timeout: float = 45.0,
+    signer=None
 ) -> SubnetCoreClient:
-    """
-    Initialize the global SubnetCoreClient instance.
-
-    Args:
-        base_url: Base URL of BeamCore
-        ws_base_url: Required base URL of the orchestrator gateway WebSocket edge
-        orchestrator_hotkey: This orchestrator's hotkey
-        orchestrator_uid: This orchestrator's UID
-        timeout: Request timeout
-        signer: Optional bittensor wallet hotkey with .sign() method
-
-    Returns:
-        The initialized client
-    """
     global _client
     _client = SubnetCoreClient(
         base_url,
@@ -1149,22 +821,12 @@ def init_subnet_core_client(
         orchestrator_uid,
         timeout,
         signer=signer,
-        ws_open_timeout=ws_open_timeout,
-        ws_close_timeout=ws_close_timeout,
-        ws_ping_interval=ws_ping_interval,
-        ws_ping_timeout=ws_ping_timeout,
     )
-    logger.info(
-        "SubnetCoreClient initialized: http=%s ws=%s (signer=%s)",
-        base_url,
-        ws_base_url,
-        "yes" if signer else "none",
-    )
+    logger.info("SubnetCoreClient initialized: http=%s nats=%s (signer=%s)", base_url, ws_base_url, "yes" if signer else "none")
     return _client
 
 
 async def close_subnet_core_client():
-    """Close the global client."""
     global _client
     if _client:
         await _client.close()

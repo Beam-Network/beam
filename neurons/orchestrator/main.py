@@ -5,23 +5,14 @@ Run with: python -m neurons.orchestrator.main
 
 The Orchestrator coordinates bandwidth tasks with BeamCore:
 - Registers with BeamCore HTTP on startup
-- Keeps a live WebSocket session to the orchestrator gateway (upstream BeamCore relay) for assignments and control updates
-- Relies on that push channel for the hot path (HTTP polling helpers exist only for legacy compatibility)
+- Keeps a live NATS control session to BeamCore for assignments and control updates
+- Relies on Core NATS for the assignment and task-result hot path
 - Manages the orchestrator's advertised worker pool and forwards worker outcomes upstream to BeamCore
 
 Architecture:
-┌────────────────────────────────────────────────────────────────────┐
-│                         ORCHESTRATOR                               │
-│                                                                    │
-│  BeamCore ◀──── Register / orch-gateway WS ──────▶ Assignments    │
-│      │                                              │              │
-│      ▼                                              ▼              │
-│  Payment Reports ◀── Task Summaries ◀──── Worker Pool metadata     │
-│                                                                    │
-└────────────────────────────────────────────────────────────────────┘
-
+BeamCore <-> Core NATS <-> Orchestrator <-> Worker Gateway <-> Workers
 Transfer execution happens on workers that dial the orchestrator-owned worker gateways advertised to BeamCore.
-Orchestrators still coordinate exclusively through BeamCore APIs rather than talking to arbitrary workers directly.
+Orchestrators coordinate through BeamCore and their advertised worker gateway.
 """
 
 import logging
@@ -40,7 +31,7 @@ from middleware.metrics import MetricsMiddleware, get_metrics_collector, get_met
 from middleware.rate_limiting import RateLimitMiddleware, get_rate_limiter
 from routes import health, orchestrators, workers
 
-# WebSocket registration, keepalive, and transfer flow are owned by
+# NATS control registration, keepalive, and transfer flow are owned by
 # SubnetCoreClient. main.py only wires lifespan + FastAPI routes.
 
 
@@ -95,8 +86,7 @@ async def lifespan(app: FastAPI):
     rate_limiter = get_rate_limiter()
     await rate_limiter.start_cleanup()
 
-    # Rate limit configs for legacy endpoints removed
-    # All worker/transfer coordination now handled by BeamCore
+    # Worker and transfer coordination are handled by BeamCore
 
     # Initialize metrics collector
     metrics_collector = get_metrics_collector()
@@ -105,7 +95,7 @@ async def lifespan(app: FastAPI):
     orchestrator = get_orchestrator()
     await orchestrator.initialize()
 
-    # Client authentication removed - auth handled by BeamCore
+    # Client authentication is handled by BeamCore
 
     # Link metrics collector to orchestrator
     metrics_collector.set_orchestrator(orchestrator)
@@ -123,8 +113,8 @@ async def lifespan(app: FastAPI):
     logger.info(f"API: http://{settings.api_host}:{settings.api_port}")
     logger.info("=" * 60)
 
-    # WebSocket connection (registration + keepalive + transfer flow) is owned by
-    # SubnetCoreClient. It auto-registers via WS using the config set in
+    # NATS control connection (registration + keepalive + transfer flow) is owned by
+    # SubnetCoreClient. It auto-registers via NATS using the config set in
     # _init_subnet_core_client and obtains an API key via /auth/challenge + /auth/verify.
     if orchestrator.subnet_core_client:
         api_key = orchestrator.subnet_core_client._api_key
@@ -132,30 +122,31 @@ async def lifespan(app: FastAPI):
             logger.info("SubnetCoreClient API key cached in memory (%s...)", api_key[:20])
         else:
             logger.info(
-                "SubnetCoreClient API key: not fetched yet — first orch-gateway websocket connect "
-                "will run HTTP auth/challenge+verify in the background; set BEAMCORE_API_KEY to skip this step "
+                "SubnetCoreClient API key will be fetched during the first NATS control connection; "
+                "set BEAMCORE_API_KEY to use a pre-issued key "
             )
     else:
-        logger.warning("No subnet_core_client available")
-    logger.info("WebSocket connection handled by SubnetCoreClient")
+        logger.warning("SubnetCoreClient unavailable")
+    logger.info("NATS control connection handled by SubnetCoreClient")
 
-    # Signal readiness to receive transfers through the orchestrator WS relay.
+    # Record operator readiness; BeamCore routing is enabled only while local workers are connected.
     if settings.ready and orchestrator.subnet_core_client:
+        orchestrator.subnet_core_client.prime_ready_state(True)
         try:
-            applied = await orchestrator.subnet_core_client.set_ready(True)
+            applied = await orchestrator.subnet_core_client.sync_ready_if_eligible()
             if applied:
                 logger.info(
-                    "Signalled ready=True through orch-gateway — orchestrator will receive transfers"
+                    "Signalled ready=True through NATS control; orchestrator will receive transfers"
                 )
             else:
                 logger.info(
-                    "Queued ready=True — it will be applied after orch-gateway registration completes"
+                    "Ready intent recorded; BeamCore routing will enable when local workers connect"
                 )
         except Exception as e:
-            logger.warning(f"Failed to set ready=True through orch-gateway: {e}")
+            logger.warning(f"Failed to set ready=True through NATS control: {e}")
     else:
         logger.info(
-            "ready=False (default) — orchestrator will NOT receive transfers until READY=true is set"
+            "ready=False; set READY=true when local workers are ready for transfers"
         )
 
     yield
@@ -169,12 +160,12 @@ async def lifespan(app: FastAPI):
             applied = await orchestrator.subnet_core_client.set_ready(False)
             if applied:
                 logger.info(
-                    "Signalled ready=False through orch-gateway — orchestrator removed from routing"
+                    "Signalled ready=False through NATS control; routing disabled"
                 )
             else:
-                logger.info("Queued ready=False while websocket is offline during shutdown")
+                logger.info("Queued ready=False for NATS control shutdown sync")
         except Exception as e:
-            logger.warning(f"Failed to set ready=False through orch-gateway during shutdown: {e}")
+            logger.warning(f"Failed to set ready=False through NATS control during shutdown: {e}")
 
     await orchestrator.stop()
     await metrics_collector.stop()
@@ -190,14 +181,14 @@ app = FastAPI(
 BEAM Orchestrator - Decentralized bandwidth mining coordinator.
 
 The Orchestrator connects to BeamCore and:
-- Maintains a live orch-gateway WebSocket control-plane session
+- Maintains a live NATS control session
 - Advertises an orchestrator-owned worker gateway
 - Receives task offer batches from BeamCore
 - Routes task offers to connected local workers
 - Relays worker decisions and task results upstream
 
 Workers register with BeamCore for identity and API keys, then connect to
-the advertised worker gateway for runtime task delivery.
+the advertised worker gateway for task delivery.
 
 ## Endpoints
 
@@ -300,29 +291,17 @@ def main():
 
     # Print banner
     print("""
-╔═══════════════════════════════════════════════════╗
-║                                                   ║
-║        ██████╗ ███████╗ █████╗ ███╗   ███╗        ║
-║        ██╔══██╗██╔════╝██╔══██╗████╗ ████║        ║
-║        ██████╔╝█████╗  ███████║██╔████╔██║        ║
-║        ██╔══██╗██╔══╝  ██╔══██║██║╚██╔╝██║        ║
-║        ██████╔╝███████╗██║  ██║██║ ╚═╝ ██║        ║
-║        ╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝        ║
-║                                                   ║
-║                   ORCHESTRATOR                    ║
-║    Decentralized Bandwidth Mining Coordinator     ║
-║                                                   ║
-╚═══════════════════════════════════════════════════╝
+====================================================
+BEAM ORCHESTRATOR
+Decentralized Bandwidth Mining Coordinator
+====================================================
     """)
-
     # Auto-open log viewer in browser (disabled by default, set OPEN_LOG_VIEWER=true to enable)
     if os.environ.get("OPEN_LOG_VIEWER", "").lower() in ("true", "1", "yes"):
         import threading
         import webbrowser
 
-        log_viewer_url = os.environ.get("LOG_VIEWER_URL")
-        if not log_viewer_url:
-            raise RuntimeError("LOG_VIEWER_URL is required when OPEN_LOG_VIEWER is enabled")
+        log_viewer_url = os.environ.get("LOG_VIEWER_URL", "http://localhost:8080/logs/")
 
         def open_logs():
             time.sleep(1.5)  # Wait for server to start
@@ -336,6 +315,8 @@ def main():
         host=settings.api_host,
         port=settings.api_port,
         log_level=settings.log_level.lower(),
+        ws_ping_interval=25.0,
+        ws_ping_timeout=float(os.environ.get("WORKER_WS_PING_TIMEOUT", "120")),
     )
 
 

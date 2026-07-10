@@ -370,6 +370,7 @@ class Orchestrator:
         # Async control
         self._running: bool = False
         self._background_tasks: List[asyncio.Task] = []
+        self._chain_rpc_lock = asyncio.Lock()
 
         # Orchestrator manager for incentive mechanism
         self.orch_manager: Optional[Any] = None
@@ -455,9 +456,10 @@ class Orchestrator:
         await self._init_subnet_core_client()
 
         # Skip chain-dependent initialization in local mode
-        if not self.settings.local_mode:
+        if not self.settings.local_mode and self.subtensor is not None and self.metagraph is not None:
             # Sync epoch from chain block number so it matches the validator's numbering
-            self._sync_epoch_from_chain()
+            await self._sync_epoch_from_chain_async()
+            await self._refresh_subnet_price_cache_async()
 
             # Initialize epoch emission tracking
             self._reward_mgr.epoch_start_emission = self.get_our_emission()
@@ -466,7 +468,7 @@ class Orchestrator:
 
             # Note: Validator discovery removed - BeamCore handles PRISM evidence centrally
         else:
-            logger.info("LOCAL MODE: Skipping chain sync and emission tracking")
+            logger.info("Skipping chain sync and emission tracking")
 
         # Initialize orchestrator manager for incentive mechanism
         await self._init_orch_manager()
@@ -547,6 +549,9 @@ class Orchestrator:
                 await task
             except asyncio.CancelledError:
                 pass
+
+        if hasattr(self.worker_gateway, "stop"):
+            await self.worker_gateway.stop()
 
         if SUBNET_CORE_CLIENT_AVAILABLE and self.subnet_core_client:
             # Stop HTTP polling
@@ -766,8 +771,8 @@ class Orchestrator:
     def get_our_emission(self) -> float:
         """Get our emission converted from alpha to TAO.
 
-        Caches the subnet price for 60s to avoid hammering the subtensor
-        websocket (which is not safe for concurrent recv calls).
+        Uses a cached subnet price only. Price refreshes run in a background
+        thread so slow chain RPCs cannot block NATS control handling.
         """
         if self.metagraph is None or self.our_uid is None:
             return 0.0
@@ -779,34 +784,22 @@ class Orchestrator:
         if emission_alpha <= 0 or not self.subtensor:
             return emission_alpha
 
-        # metagraph.E returns emission in alpha (ध), not TAO.
-        # Convert using cached subnet price (refreshed every 5 min).
-        import time as _time
-
-        now = _time.time()
-        cache_ttl = 300  # 5 minutes
-        if (
-            not hasattr(self, "_cached_alpha_per_tao")
-            or (now - getattr(self, "_cached_price_at", 0)) > cache_ttl
-        ):
-            try:
-                price = self.subtensor.get_subnet_price(self.settings.netuid)
-                self._cached_alpha_per_tao = float(price)
-                self._cached_price_at = now
-            except Exception as e:
-                logger.warning(f"Could not convert emission alpha→TAO: {e}")
-                # Use stale cache if available
-                if not hasattr(self, "_cached_alpha_per_tao"):
-                    return emission_alpha
-
+        now = time.time()
+        cache_ttl = 900
         alpha_per_tao = getattr(self, "_cached_alpha_per_tao", 0)
-        if alpha_per_tao > 0:
+        cache_age = now - getattr(self, "_cached_price_at", 0)
+        if alpha_per_tao > 0 and cache_age <= cache_ttl:
             emission_tao = emission_alpha / alpha_per_tao
             logger.debug(
-                f"Emission: {emission_alpha:.4f} ध → {emission_tao:.9f} TAO "
-                f"(rate: {alpha_per_tao:.2f} ध/τ)"
+                "Emission: %.4f alpha -> %.9f TAO (rate: %.2f alpha/TAO)",
+                emission_alpha,
+                emission_tao,
+                alpha_per_tao,
             )
             return emission_tao
+        if alpha_per_tao > 0:
+            logger.debug("Using stale subnet price cache for emission conversion")
+            return emission_alpha / alpha_per_tao
 
         return emission_alpha
 
@@ -816,6 +809,39 @@ class Orchestrator:
     # Background Loops
     # =========================================================================
 
+    async def _run_chain_rpc(self, label: str, func):
+        """Run blocking Bittensor RPCs outside the asyncio event loop."""
+        async with self._chain_rpc_lock:
+            started = time.monotonic()
+            result = await asyncio.to_thread(func)
+            elapsed = time.monotonic() - started
+            if elapsed >= 5:
+                logger.warning("%s took %.1fs", label, elapsed)
+            return result
+
+    def _sync_metagraph_from_chain(self) -> None:
+        if self.metagraph and self.subtensor:
+            self.metagraph.sync(subtensor=self.subtensor)
+
+    async def _sync_metagraph_from_chain_async(self) -> None:
+        await self._run_chain_rpc("metagraph sync", self._sync_metagraph_from_chain)
+
+    def _refresh_subnet_price_cache(self) -> None:
+        if self.subtensor is None:
+            return
+        price = self.subtensor.get_subnet_price(self.settings.netuid)
+        self._cached_alpha_per_tao = float(price)
+        self._cached_price_at = time.time()
+
+    async def _refresh_subnet_price_cache_async(self) -> None:
+        try:
+            await self._run_chain_rpc("subnet price refresh", self._refresh_subnet_price_cache)
+        except Exception as exc:
+            logger.warning("Could not refresh subnet price cache: %s", exc)
+
+    async def _sync_epoch_from_chain_async(self) -> None:
+        await self._run_chain_rpc("chain epoch sync", self._sync_epoch_from_chain)
+
     async def _metagraph_sync_loop(self) -> None:
         """Background loop for syncing metagraph."""
         sync_interval = 300  # Sync every 5 minutes (validators/stake change infrequently)
@@ -823,8 +849,7 @@ class Orchestrator:
         while self._running:
             try:
                 await asyncio.sleep(sync_interval)
-                if self.metagraph and self.subtensor:
-                    self.metagraph.sync(subtensor=self.subtensor)
+                await self._sync_metagraph_from_chain_async()
 
                 # Always re-check UID after sync — hotkey may have moved to a
                 # different UID slot after re-registration (stale UID causes
@@ -837,6 +862,7 @@ class Orchestrator:
                     )
                     self.subnet_core_client.orchestrator_uid = self.our_uid
 
+                await self._refresh_subnet_price_cache_async()
                 self.distribute_rewards_to_workers()
                 # Note: Validator discovery removed - BeamCore handles PRISM evidence centrally
 
@@ -885,7 +911,7 @@ class Orchestrator:
                 # Re-sync epoch from chain periodically (every 10 min) to correct drift
                 now = time.time()
                 if now - last_chain_sync >= chain_sync_interval:
-                    self._sync_epoch_from_chain()
+                    await self._sync_epoch_from_chain_async()
                     last_chain_sync = now
 
                 # Check if epoch should change (time-based fallback)
@@ -901,6 +927,8 @@ class Orchestrator:
         """Advance to next epoch.  Must always increment the counter."""
         prev_epoch = self.current_epoch
         summary = None
+
+        await self._refresh_subnet_price_cache_async()
 
         try:
             summary = self._build_epoch_summary()
@@ -1061,24 +1089,20 @@ class Orchestrator:
                 orchestrator_hotkey=self.hotkey or "unknown",
                 orchestrator_uid=self.our_uid or 0,
                 signer=signer,
-                ws_open_timeout=self.settings.orch_ws_open_timeout,
-                ws_close_timeout=self.settings.orch_ws_close_timeout,
-                ws_ping_interval=self.settings.orch_ws_ping_interval,
-                ws_ping_timeout=self.settings.orch_ws_ping_timeout,
             )
             logger.info(
-                "SubnetCoreClient initialized: http=%s ws=%s",
+                "SubnetCoreClient initialized: http=%s nats=%s",
                 self.settings.core_server_url,
                 self.settings.orch_gateway_url,
             )
 
-            # WS push handlers. BeamCore task offer batches drive worker routing.
+            # NATS control task offer batches drive worker routing.
             self.subnet_core_client.set_worker_update_handler(self._worker_mgr.handle_worker_update)
 
             # Wire the in-process worker gateway.
             self.subnet_core_client.set_worker_gateway(self.worker_gateway)
 
-            # Configure registration message sent on every WS connect
+            # Configure registration message sent on NATS control connect
             import socket as _socket
 
             try:
@@ -1111,10 +1135,10 @@ class Orchestrator:
                 gateway_url,
             )
 
-            # Start WebSocket connection for real-time notifications and
+            # Start NATS control connection for real-time notifications and
             # orchestrator control-plane requests.
             await self.subnet_core_client.start_polling()
-            logger.info("SubnetCore WebSocket connection started")
+            logger.info("SubnetCore NATS control connection started")
 
         except Exception as e:
             logger.warning(f"Failed to initialize SubnetCoreClient: {e}")

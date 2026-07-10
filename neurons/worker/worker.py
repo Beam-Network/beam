@@ -85,7 +85,7 @@ def resolve_worker_version() -> str:
     try:
         return package_version("beam")
     except PackageNotFoundError:
-        return "0.2.0"
+        return "0.2.1"
 
 
 def parse_strict_semver(value: str) -> Optional[tuple[int, int, int]]:
@@ -107,7 +107,6 @@ def worker_version_satisfies(minimum_version: str) -> bool:
     minimum = parse_strict_semver(minimum_version)
     return bool(current and minimum and current >= minimum)
 
-
 WORKER_VERSION = resolve_worker_version()
 
 # WebSocket settings
@@ -120,6 +119,10 @@ WS_MAX_RECONNECT_ATTEMPTS = (
 )
 
 WS_PING_INTERVAL = 25  # seconds
+WS_PING_TIMEOUT = float(
+    os.environ.get("WORKER_WS_PING_TIMEOUT", os.environ.get("WS_PING_TIMEOUT", "120"))
+)
+WS_TASK_ACCEPT_ACK_TIMEOUT = float(os.environ.get("WORKER_TASK_ACCEPT_ACK_TIMEOUT", "16.0"))
 
 # Transfer settings
 DEFAULT_CHUNK_SIZE_BYTES = 4 * 1024 * 1024
@@ -137,9 +140,8 @@ MAX_RETRIES = 3
 RETRY_BACKOFF = 1.0  # Base backoff in seconds
 FETCH_STREAM_CHUNK_SIZE = 64 * 1024
 WS_TASK_RESULT_ACK_TIMEOUT = float(os.environ.get("WORKER_TASK_RESULT_ACK_TIMEOUT", "3.0"))
-
-
-
+WS_TASK_RESULT_SEND_ATTEMPTS = max(3, int(os.environ.get("WORKER_TASK_RESULT_SEND_ATTEMPTS", "8")))
+WS_TASK_RESULT_RECONNECT_WAIT_SECONDS = max(0.0, float(os.environ.get("WORKER_TASK_RESULT_RECONNECT_WAIT_SECONDS", "2.0")))
 # Global semaphore for task concurrency
 task_semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 
@@ -164,6 +166,7 @@ class WorkerState:
     pending_task_results: Dict[str, asyncio.Future] = field(default_factory=dict)
     active_ws_task_ids: set[str] = field(default_factory=set)
     ws_task_handles: set[asyncio.Task] = field(default_factory=set)
+    active_websocket: Optional[Any] = None
     reserved_ws_slots: int = 0
     reserved_bytes: int = 0
     ws_send_lock: Optional[asyncio.Lock] = None
@@ -345,9 +348,6 @@ def build_transfer_context(task: dict) -> tuple[Optional[dict], Optional[str]]:
     if minimum_worker_version and not worker_version_satisfies(minimum_worker_version):
         return None, "unsupported_worker_version"
     signed_url_flow = str(task.get("signed_url_flow") or "").strip()
-    if signed_url_flow == "signed_url_v1" and is_object_storage_presigned_url(dest_url):
-        if not (dest_headers.get("Content-MD5") or dest_headers.get("content-md5")):
-            return None, "missing_content_md5"
     try:
         parsed_range = parse_offer_range(source_headers)
     except ValueError as exc:
@@ -1029,12 +1029,30 @@ async def ws_send_task_accept(
         return False
 
 
+async def wait_for_result_websocket(state: WorkerState, fallback):
+    """Return the current worker-gateway socket, waiting briefly across reconnects."""
+    if state.active_websocket is not None:
+        return state.active_websocket
+    if state.ws_connected and fallback is not None:
+        return fallback
+    if WS_TASK_RESULT_RECONNECT_WAIT_SECONDS <= 0:
+        return fallback
+
+    deadline = time.monotonic() + WS_TASK_RESULT_RECONNECT_WAIT_SECONDS
+    while state.running and time.monotonic() < deadline:
+        if state.active_websocket is not None:
+            return state.active_websocket
+        await asyncio.sleep(0.1)
+    return state.active_websocket or fallback
+
+
 async def ws_send_task_result(
     websocket,
     state: WorkerState,
     task_id: str,
     success: bool,
     bytes_transferred: int,
+    duration_ms: Optional[float] = None,
     chunk_hash: str = "",
     etag: str = None,
     error: str = None,
@@ -1048,7 +1066,10 @@ async def ws_send_task_result(
             "offer_id": offer_id or task_id,
             "worker_id": state.worker_id,
             "success": success,
+            "bytes_transferred": bytes_transferred,
         }
+        if duration_ms is not None:
+            msg["duration_ms"] = duration_ms
         if chunk_hash:
             msg["chunk_hash"] = chunk_hash
         if etag:
@@ -1068,6 +1089,7 @@ async def finalize_ws_task_result(
     task_id: str,
     success: bool,
     bytes_transferred: int,
+    duration_ms: Optional[float] = None,
     chunk_hash: str = "",
     etag: str = None,
     error: str = None,
@@ -1077,23 +1099,27 @@ async def finalize_ws_task_result(
     result_key = offer_id or task_id
     empty = TaskSummaryAck()
 
-    for attempt in range(3):
+    for attempt in range(WS_TASK_RESULT_SEND_ATTEMPTS):
         ack_future: asyncio.Future = asyncio.get_event_loop().create_future()
         state.pending_task_results[result_key] = ack_future
 
         try:
+            send_websocket = await wait_for_result_websocket(state, websocket)
             sent = await ws_send_task_result(
-                websocket,
+                send_websocket,
                 state,
                 task_id,
                 success,
                 bytes_transferred,
+                duration_ms=duration_ms,
                 chunk_hash=chunk_hash,
                 etag=etag,
                 error=error,
                 offer_id=offer_id,
             )
             if not sent:
+                if attempt < WS_TASK_RESULT_SEND_ATTEMPTS - 1:
+                    await asyncio.sleep(min(WS_TASK_RESULT_RECONNECT_WAIT_SECONDS, 0.25 * (attempt + 1)))
                 continue
 
             try:
@@ -1116,7 +1142,7 @@ async def finalize_ws_task_result(
             except asyncio.TimeoutError:
                 print(
                     f"[Worker] [WS] Task result ack timeout "
-                    f"attempt={attempt + 1}/3 task={task_label(task_id)} offer={task_label(offer_id)}"
+                    f"attempt={attempt + 1}/{WS_TASK_RESULT_SEND_ATTEMPTS} task={task_label(task_id)} offer={task_label(offer_id)}"
                 )
         finally:
             state.pending_task_results.pop(result_key, None)
@@ -1209,7 +1235,10 @@ async def handle_ws_task(state: WorkerState, websocket, task: dict) -> bool:
 
         # Execute only after BeamCore confirms this exact attempt lease.
         try:
-            server_accepted = await asyncio.wait_for(accept_future, timeout=5.0)
+            server_accepted = await asyncio.wait_for(
+                accept_future,
+                timeout=WS_TASK_ACCEPT_ACK_TIMEOUT,
+            )
             if not server_accepted:
                 print(
                     f"[Worker] [WS] Task accept rejected by server: task={task_label(task_id)} offer={task_label(offer_id)}"
@@ -1237,6 +1266,7 @@ async def handle_ws_task(state: WorkerState, websocket, task: dict) -> bool:
             task_id,
             result.success,
             result.bytes_transferred,
+            duration_ms=result.duration_ms,
             chunk_hash=result.chunk_hash,
             etag=result.etag,
             error=result.error_msg,
@@ -1272,10 +1302,11 @@ async def websocket_loop(state: WorkerState):
             async with websockets.connect(
                 ws_url,
                 ping_interval=WS_PING_INTERVAL,
-                ping_timeout=10,
+                ping_timeout=WS_PING_TIMEOUT,
                 close_timeout=5,
             ) as websocket:
                 state.ws_connected = True
+                state.active_websocket = websocket
                 state.ws_reconnect_attempts = 0
                 reconnect_delay = WS_RECONNECT_MIN_DELAY
                 print("[Worker] [WS] Connected!")
@@ -1362,6 +1393,7 @@ async def websocket_loop(state: WorkerState):
             print(f"[Worker] [WS] Connection error: {type(e).__name__}: {e}")
 
         state.ws_connected = False
+        state.active_websocket = None
         state.ws_reconnect_attempts += 1
 
         if (
@@ -1513,11 +1545,12 @@ async def main():
 
     # Determine API URL based on network
     network = config.subtensor.get("network", "finney")
-    if network not in ("finney", "mainnet"):
+    if network in ("test", "testnet"):
         api_url = os.environ.get("CORE_SERVER_URL")
         if not api_url:
-            raise RuntimeError("CORE_SERVER_URL is required when running the public worker on a non-mainnet network")
-        print(f"Network: {network}")
+            print("CORE_SERVER_URL is required when running against testnet")
+            sys.exit(1)
+        print("Network: testnet")
     else:
         api_url = os.environ.get("CORE_SERVER_URL", MAINNET_URL)
         print("Network: mainnet")

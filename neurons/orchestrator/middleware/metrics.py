@@ -221,15 +221,15 @@ UPTIME = Gauge(
     "Service uptime in seconds",
 )
 
-# BeamCore control-plane path via orch-gateway → BeamCore upstream relay
+# BeamCore control path via NATS control
 BEAMCORE_UPSTREAM_DEGRADED = Gauge(
     "beam_beamcore_upstream_degraded",
-    "1 while orch-gateway reports BeamCore upstream disconnected (relay unavailable)",
+    "1 while the BeamCore NATS control connection is degraded",
 )
 
 BEAMCORE_UPSTREAM_DOWN_EVENTS = Counter(
     "beam_beamcore_upstream_down_events_total",
-    "Times orch-gateway signaled BeamCore upstream loss (upstream_down)",
+    "Times the BeamCore NATS control connection reported upstream_down",
 )
 
 
@@ -431,7 +431,7 @@ class MetricsMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         """Process request and collect metrics."""
-        # Skip WebSocket requests — BaseHTTPMiddleware cannot handle them
+        # Skip WebSocket requests handled outside BaseHTTPMiddleware
         if request.scope.get("type") == "websocket":
             return await call_next(request)
 
