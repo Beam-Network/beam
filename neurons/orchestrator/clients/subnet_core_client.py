@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import pathlib
+import ssl
 import time
 import uuid
 from typing import Any, Callable, Dict, Optional
@@ -39,6 +40,11 @@ REQUEST_RETRY_BACKOFF_SECONDS = max(0.0, float(os.environ.get("ORCHESTRATOR_CONT
 HEARTBEAT_INTERVAL = float(os.environ.get("ORCHESTRATOR_CONTROL_HEARTBEAT_INTERVAL_SECONDS", "5"))
 STARTUP_CONNECT_ATTEMPTS = max(1, int(os.environ.get("ORCHESTRATOR_CONTROL_STARTUP_CONNECT_ATTEMPTS", "12")))
 STARTUP_CONNECT_BACKOFF_SECONDS = max(0.1, float(os.environ.get("ORCHESTRATOR_CONTROL_STARTUP_CONNECT_BACKOFF_SECONDS", "1.0")))
+REGISTRATION_RECOVERY_BACKOFF_SECONDS = max(0.25, float(os.environ.get("ORCHESTRATOR_CONTROL_REGISTRATION_RECOVERY_BACKOFF_SECONDS", "1.0")))
+ORCH_GATEWAY_TLS_SERVER_NAME = (
+    os.environ.get("ORCH_GATEWAY_TLS_SERVER_NAME", "").strip()
+    or os.environ.get("NATS_TLS_SERVER_NAME", "").strip()
+)
 
 
 def _validate_nats_url(value: str) -> str:
@@ -48,6 +54,16 @@ def _validate_nats_url(value: str) -> str:
     if not clean.startswith(("nats://", "tls://")):
         raise ValueError("Set ORCH_GATEWAY_URL to a NATS endpoint using nats:// or tls://")
     return clean
+
+
+def _tls_context_for_url(url: str) -> tuple[Optional[ssl.SSLContext], Optional[str]]:
+    if not url.startswith("tls://"):
+        return None, None
+    return ssl.create_default_context(), ORCH_GATEWAY_TLS_SERVER_NAME or None
+
+
+def _tls_handshake_first_for_url(url: str) -> bool:
+    return url.startswith("tls://")
 
 
 def _subject_hotkey(hotkey: str) -> str:
@@ -97,6 +113,7 @@ class SubnetCoreClient:
         self._last_confirmed_ready: Optional[bool] = None
         self._ready_sync_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
+        self._registration_recovery_task: Optional[asyncio.Task] = None
         self._nc = None
         self._subscription = None
         self._connect_lock = asyncio.Lock()
@@ -329,11 +346,15 @@ class SubnetCoreClient:
         last_error: Optional[Exception] = None
 
         async def connect_once(key: str):
+            tls_context, tls_hostname = _tls_context_for_url(self.ws_base_url)
             return await nats.connect(
                 servers=[self.ws_base_url],
                 user=self.orchestrator_hotkey,
                 password=key,
                 name=f"beam-orchestrator-{self.orchestrator_hotkey[:12]}",
+                tls=tls_context,
+                tls_hostname=tls_hostname,
+                tls_handshake_first=_tls_handshake_first_for_url(self.ws_base_url),
                 max_reconnect_attempts=-1,
                 reconnect_time_wait=1,
                 disconnected_cb=self._on_nats_disconnected,
@@ -387,6 +408,7 @@ class SubnetCoreClient:
         raise RuntimeError("Cannot connect to NATS control after startup retries") from last_error
 
     async def _on_nats_disconnected(self) -> None:
+        self._registered = False
         self._beamcore_upstream_degraded = True
         BEAMCORE_UPSTREAM_DEGRADED.set(1)
         logger.warning("BeamCore NATS control disconnected")
@@ -396,11 +418,15 @@ class SubnetCoreClient:
         if not self._running:
             return
         try:
-            await self._register_via_nats()
+            registered = await self._register_via_nats()
+            if not registered:
+                raise RuntimeError("NATS control registration was rejected")
             self._schedule_ready_sync_if_needed()
             self._note_beamcore_upstream_recovered("NATS reconnect")
         except Exception as exc:
             logger.warning("BeamCore NATS control re-registration failed after reconnect: %s", exc)
+            self._registered = False
+            self._schedule_registration_recovery("NATS reconnect")
 
     async def _on_nats_error(self, exc: Exception) -> None:
         logger.warning("BeamCore NATS control error: %s", exc)
@@ -428,9 +454,49 @@ class SubnetCoreClient:
                 except Exception:
                     pass
             await self._connect_nats_session()
-        await self._register_via_nats()
+        registered = await self._register_via_nats()
+        if not registered:
+            raise RuntimeError("NATS control registration was rejected")
         self._schedule_ready_sync_if_needed()
         logger.info("Recovered BeamCore NATS control connection after %s", reason)
+
+    def _schedule_registration_recovery(self, reason: str) -> None:
+        if not self._running:
+            return
+        if self._registration_recovery_task and not self._registration_recovery_task.done():
+            return
+        self._registration_recovery_task = asyncio.create_task(self._recover_registration_loop(reason))
+
+    async def _recover_registration_loop(self, reason: str) -> None:
+        attempt = 0
+        try:
+            while self._running and not self._registered:
+                attempt += 1
+                try:
+                    if self._nc is None or self._nats_is_closed():
+                        await self._recover_nats_connection(f"{reason}_registration_retry", force=True)
+                    else:
+                        registered = await self._register_via_nats()
+                        if not registered:
+                            raise RuntimeError("NATS control registration was rejected")
+                    self._schedule_ready_sync_if_needed()
+                    self._note_beamcore_upstream_recovered(f"{reason} registration retry")
+                    return
+                except Exception as exc:
+                    delay = min(30.0, REGISTRATION_RECOVERY_BACKOFF_SECONDS * (2 ** min(attempt - 1, 5)))
+                    logger.warning(
+                        "BeamCore NATS control registration retry %s after %s failed: %s; retrying in %.1fs",
+                        attempt,
+                        reason,
+                        exc,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self._registration_recovery_task = None
+
     async def stop_polling(self):
         self._running = False
         if self._heartbeat_task:
@@ -454,6 +520,13 @@ class SubnetCoreClient:
             except asyncio.CancelledError:
                 pass
             self._auth_recovery_task = None
+        if self._registration_recovery_task:
+            self._registration_recovery_task.cancel()
+            try:
+                await self._registration_recovery_task
+            except asyncio.CancelledError:
+                pass
+            self._registration_recovery_task = None
         if self._task_offer_dispatcher:
             await self._task_offer_dispatcher.stop()
         if self._subscription:
@@ -568,7 +641,12 @@ class SubnetCoreClient:
                     reason = response.get("reason") or response.get("message") or "NATS control request failed"
                     if reason == "orchestrator_not_registered" and message_type != "register":
                         self._registered = False
-                        await self._register_via_nats()
+                        try:
+                            registered = await self._register_via_nats()
+                            if not registered:
+                                self._schedule_registration_recovery(reason)
+                        except Exception:
+                            self._schedule_registration_recovery(reason)
                         continue
                     raise RuntimeError(reason)
                 return response
