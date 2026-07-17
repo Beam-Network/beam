@@ -1,6 +1,6 @@
 # BEAM Orchestrator Onboarding Guide
 
-This guide covers the public mainnet orchestrator path for Beam subnet 105. An orchestrator connects to BeamCore over NATS, advertises a worker gateway, selects connected workers for task offers, and forwards worker decisions/results back to BeamCore.
+This guide covers the public mainnet orchestrator path for Beam subnet 105. An orchestrator connects to BeamCore over NATS, advertises a worker gateway, selects connected workers for task offers, and forwards worker results back to BeamCore.
 
 ## Runtime Responsibilities
 
@@ -11,7 +11,7 @@ The orchestrator process:
 3. Maintains an in-process worker gateway at `/ws/<worker_id>?api_key=...` unless `ORCHESTRATOR_WORKER_GATEWAY_URL` points at an externally reachable gateway origin.
 4. Receives `worker_task_offer_batch` messages from BeamCore through NATS.
 5. Selects connected local workers and sends `task_offer` messages.
-6. Relays `task_accept`, `task_reject`, and `task_result` messages upstream over NATS.
+6. Relays each worker `task_result` upstream immediately.
 7. Stays `READY=true` when it should receive routed production work.
 
 Workers use BeamCore HTTP for registration; runtime task delivery and results use the worker gateway relay path.
@@ -160,8 +160,8 @@ The gateway relays:
 
 | Direction | Message types |
 |---|---|
-| BeamCore/orchestrator to worker | `task_offer`, `task_accept_ack`, `task_reject_ack`, `task_result_ack` |
-| Worker to BeamCore/orchestrator | `task_accept`, `task_reject`, `task_result` |
+| BeamCore/orchestrator to worker | `task_offer`, `task_result_ack` |
+| Worker to BeamCore/orchestrator | `task_result` |
 
 ## Task Offer Flow
 
@@ -171,7 +171,7 @@ worker -> worker gateway -> orchestrator -> NATS -> BeamCore
 worker -> worker gateway -> orchestrator -> NATS -> BeamCore task_result
 ```
 
-Each task offer includes executable URLs, headers, `signed_url_flow`, and `minimum_worker_version`. `signed_url_v1` object-storage upload offers use direct multipart URLs. Current public workers report `0.2.1`. The orchestrator chooses a connected worker; BeamCore owns stalled-task recovery and reassignment.
+Each task offer includes executable URLs, headers, `signed_url_flow`, and `minimum_worker_version`. `signed_url_v1` object-storage upload offers use direct multipart URLs. Current public workers report `0.2.1`. The orchestrator assigns every delivered offer to a connected worker. Workers start valid offers immediately and report success or failure through `task_result`;
 
 ## Troubleshooting
 

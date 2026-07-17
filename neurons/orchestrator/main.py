@@ -185,7 +185,7 @@ The Orchestrator connects to BeamCore and:
 - Advertises an orchestrator-owned worker gateway
 - Receives task offer batches from BeamCore
 - Routes task offers to connected local workers
-- Relays worker decisions and task results upstream
+- Relays worker task results upstream
 
 Workers register with BeamCore for identity and API keys, then connect to
 the advertised worker gateway for task delivery.

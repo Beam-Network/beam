@@ -8,7 +8,7 @@ BeamCore operates the public HTTP API, NATS orchestrator control endpoint, trans
 
 | Component | Runs at | Responsibility |
 | --- | --- | --- |
-| Orchestrator | Operator | Connects to BeamCore over NATS, advertises a worker gateway, routes task offers to workers, and reports worker decisions/results |
+| Orchestrator | Operator | Connects to BeamCore over NATS, advertises a worker gateway, routes task offers to workers, and relays worker results |
 | Worker gateway | Operator | WebSocket edge for worker sessions at `/ws/<worker_id>?api_key=...` |
 | Worker | Operator | Registers with BeamCore, connects to the worker gateway, executes chunk transfers, and sends `task_result` receipts |
 | Validator | Bittensor validator | Reads BeamCore epoch summaries, sets subnet weights, and posts weight proofs |

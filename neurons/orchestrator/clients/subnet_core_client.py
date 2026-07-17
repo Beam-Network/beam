@@ -30,11 +30,6 @@ SUBJECT_PREFIX = os.environ.get("ORCHESTRATOR_CONTROL_SUBJECT_PREFIX", "beam.orc
 BEAM_ENV = os.environ.get("BEAM_ENV", "prod")
 REQUEST_TIMEOUT = float(os.environ.get("ORCHESTRATOR_CONTROL_REQUEST_TIMEOUT_SECONDS", "0.75"))
 TASK_RESULT_TIMEOUT = float(os.environ.get("ORCHESTRATOR_CONTROL_TASK_RESULT_TIMEOUT_SECONDS", "15.0"))
-TASK_ACCEPT_TIMEOUT = float(os.environ.get("ORCHESTRATOR_CONTROL_TASK_ACCEPT_TIMEOUT_SECONDS", "5.0"))
-TASK_ACCEPT_RETRY_ATTEMPTS = max(
-    1,
-    int(os.environ.get("ORCHESTRATOR_CONTROL_TASK_ACCEPT_RETRY_ATTEMPTS", "3")),
-)
 REQUEST_RETRY_ATTEMPTS = max(1, int(os.environ.get("ORCHESTRATOR_CONTROL_REQUEST_RETRY_ATTEMPTS", "3")))
 REQUEST_RETRY_BACKOFF_SECONDS = max(0.0, float(os.environ.get("ORCHESTRATOR_CONTROL_REQUEST_RETRY_BACKOFF_SECONDS", "0.05")))
 HEARTBEAT_INTERVAL = float(os.environ.get("ORCHESTRATOR_CONTROL_HEARTBEAT_INTERVAL_SECONDS", "5"))
@@ -752,38 +747,11 @@ class SubnetCoreClient:
         self._last_confirmed_ready = confirmed
         logger.info("Orchestrator ready=%s set on BeamCore (uid=%s)", confirmed, response.get("uid"))
         return confirmed == requested_ready
-    async def send_task_accept(self, task_id: str, worker_id: str, offer_id: Optional[str], worker_version: Optional[str]) -> Dict[str, Any]:
-        try:
-            return await self._send_nats_request(
-                "task_accept",
-                {
-                    "task_id": task_id,
-                    "worker_id": worker_id,
-                    "offer_id": offer_id or task_id,
-                    "worker_version": worker_version,
-                },
-                timeout=max(REQUEST_TIMEOUT, TASK_ACCEPT_TIMEOUT),
-                attempts=TASK_ACCEPT_RETRY_ATTEMPTS,
-            )
-        except Exception as exc:
-            logger.warning("send_task_accept send error: %s", exc)
-            return {"type": "task_accept_ack", "task_id": task_id, "offer_id": offer_id or task_id, "accepted": False, "reason": "beamcore_accept_forward_failed"}
-
-    async def send_task_reject(self, task_id: str, worker_id: str, offer_id: Optional[str], reason: Optional[str] = None) -> Dict[str, Any]:
-        try:
-            payload = {"task_id": task_id, "worker_id": worker_id, "offer_id": offer_id or task_id}
-            if reason:
-                payload["reason"] = reason
-            return await self._send_nats_request("task_reject", payload)
-        except Exception as exc:
-            logger.warning("send_task_reject send error: %s", exc)
-            return {"type": "task_reject_ack", "task_id": task_id, "offer_id": offer_id or task_id, "accepted": False, "reason": "beamcore_reject_forward_failed"}
-
     async def send_task_result_strict(self, payload: dict) -> Dict[str, Any]:
         task_id = payload.get("task_id")
         offer_id = payload.get("offer_id") or task_id
         if not task_id or not offer_id:
-            return {"type": "task_result_ack", "task_id": task_id, "offer_id": offer_id, "received": False, "completed": False, "reason": "missing_task_or_offer_id"}
+            return {"type": "task_result_ack", "task_id": task_id, "offer_id": offer_id, "received": False, "status": "rejected", "reason": "missing_task_or_offer_id"}
         message = {"task_id": task_id, "offer_id": offer_id, "worker_id": payload.get("worker_id"), "success": bool(payload.get("success"))}
         for key in ("etag", "chunk_hash", "error"):
             if payload.get(key) is not None:
@@ -797,7 +765,7 @@ class SubnetCoreClient:
             return await self.send_task_result_strict(payload)
         except Exception as exc:
             logger.warning("send_task_result send error: %s", exc)
-            return {"type": "task_result_ack", "task_id": task_id, "offer_id": offer_id, "received": False, "completed": False, "reason": "beamcore_result_forward_failed"}
+            return {"type": "task_result_ack", "task_id": task_id, "offer_id": offer_id, "received": False, "status": "retry", "reason": "beamcore_result_forward_failed"}
     async def update_worker_gateway(self, gateway_url: str, max_workers: int = 10000, health: str = "healthy") -> Dict[str, Any]:
         return await self._send_nats_request("gateway_update", {"gateway_url": gateway_url, "max_workers": max_workers, "health": health})
 

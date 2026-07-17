@@ -40,7 +40,7 @@ python worker.py --wallet.name your_coldkey --wallet.hotkey your_hotkey --subten
 
 The worker transport is WebSocket-based. Use `CONNECTION_MODE=websocket` or `CONNECTION_MODE=auto`.
 
-The worker receives `task_offer`, `task_accept_ack`, `task_reject_ack`, `task_result_ack`, and `session_displaced`. The worker sends `task_accept`, `task_reject`, and `task_result` messages. Connection liveness is maintained with WebSocket ping/pong and reconnects.
+The worker receives `task_offer`, `task_result_ack`, and `session_displaced`.
 
 ## Task Offer Protocol
 
@@ -50,7 +50,7 @@ BeamCore also includes `signed_url_flow`. `signed_url_v1` is the default object-
 
 ## Task Result
 
-After completing an accepted task, the worker sends:
+After completing or failing a task, the worker sends:
 
 ```json
 {

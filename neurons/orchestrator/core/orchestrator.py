@@ -50,7 +50,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 
 import bittensor as bt
 
@@ -210,67 +210,6 @@ class BandwidthTask:
 
 
 @dataclass
-class PendingOffer:
-    """
-    Tracks a task offer broadcast to all workers.
-
-    The broadcast offer model:
-    1. Orchestrator broadcasts offer to ALL connected workers
-    2. First worker to accept wins (atomic)
-    3. Non-winners receive TASK_ASSIGNED notification
-    4. If no one accepts within timeout, offer expires
-    """
-
-    offer_id: str
-    task_id: str
-
-    # Task preview info (sent to workers - no actual chunk data)
-    chunk_size: int
-    chunk_hash: str
-    source_region: str
-    dest_region: str
-    estimated_reward: float = 0.0  # Estimated dTAO reward
-
-    # The actual chunk data (only sent to winner)
-    chunk_data: bytes = field(default_factory=bytes, repr=False)
-    chunk_index: int = 0
-    transfer_id: str = ""
-    destination_url: Optional[str] = None
-    sender_hotkey: Optional[str] = None
-    filename: Optional[str] = None
-    total_chunks: Optional[int] = None
-    receiver_filename: Optional[str] = None
-
-    # Timing
-    created_at: float = field(default_factory=time.time)
-    timeout_seconds: float = 5.0  # How long workers have to accept
-    deadline_us: int = 0
-
-    # Anti-cheat (for winner's task)
-    canary: bytes = field(default_factory=bytes, repr=False)
-    canary_offset: int = 0
-
-    # State
-    status: str = "pending"  # pending, accepted, expired, cancelled
-    accepted_by: Optional[str] = None  # worker_id of winner
-    accepted_at: Optional[float] = None
-
-    # Track which workers received the offer
-    workers_offered: Set[str] = field(default_factory=set)
-    workers_rejected: Set[str] = field(default_factory=set)
-
-    @property
-    def is_expired(self) -> bool:
-        """Check if offer has timed out."""
-        return time.time() > (self.created_at + self.timeout_seconds)
-
-    @property
-    def is_available(self) -> bool:
-        """Check if offer can still be accepted."""
-        return self.status == "pending" and not self.is_expired
-
-
-@dataclass
 class EpochSummary:
     """Aggregated work summary for a validation epoch."""
 
@@ -342,8 +281,6 @@ class Orchestrator:
         # Task state (from TaskScheduler)
         self.active_tasks = self._task_sched.active_tasks
         self.completed_tasks = self._task_sched.completed_tasks
-        self.pending_offers = self._task_sched.pending_offers
-        self._offer_lock = self._task_sched._offer_lock
 
         # Epoch tracking
         self.current_epoch: int = 0
@@ -674,55 +611,6 @@ class Orchestrator:
             destination_url,
             receiver_filename,
         )
-
-    async def broadcast_task_offer(
-        self,
-        task_id,
-        chunk_data,
-        chunk_index,
-        chunk_hash,
-        transfer_id,
-        source_region="",
-        dest_region="",
-        estimated_reward=0.0,
-        timeout_seconds=5.0,
-        deadline_us=0,
-        canary=b"",
-        canary_offset=0,
-        destination_url=None,
-        sender_hotkey=None,
-        filename=None,
-        total_chunks=None,
-        receiver_filename=None,
-    ):
-        return await self._task_sched.broadcast_task_offer(
-            task_id,
-            chunk_data,
-            chunk_index,
-            chunk_hash,
-            transfer_id,
-            source_region,
-            dest_region,
-            estimated_reward,
-            timeout_seconds,
-            deadline_us,
-            canary,
-            canary_offset,
-            destination_url,
-            sender_hotkey,
-            filename,
-            total_chunks,
-            receiver_filename,
-        )
-
-    async def accept_task_offer(self, offer_id, worker_id):
-        return await self._task_sched.accept_task_offer(offer_id, worker_id)
-
-    async def reject_task_offer(self, offer_id, worker_id, reason=""):
-        return await self._task_sched.reject_task_offer(offer_id, worker_id, reason)
-
-    async def _notify_offer_result(self, offer_id, winner_id, status):
-        return await self._task_sched._notify_offer_result(offer_id, winner_id, status)
 
     async def fail_task(self, task_id: str, reason: str) -> None:
         """Record task failure."""

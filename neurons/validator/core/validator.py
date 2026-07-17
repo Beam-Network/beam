@@ -104,7 +104,6 @@ class WorkSummary:
 
     # Extended work metrics
     uptime_percent: float = 100.0  # Orchestrator uptime over 24h window
-    acceptance_rate: float = 100.0  # Task acceptance rate
     latency_p95_ms: float = 0.0  # 95th percentile latency
 
     # Worker contribution breakdown

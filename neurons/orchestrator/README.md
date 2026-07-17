@@ -1,6 +1,6 @@
 # Beam Orchestrator
 
-Orchestrators coordinate data transfers and manage worker pools on the Beam subnet. They connect to BeamCore over NATS through `ORCH_GATEWAY_URL`, advertise a worker gateway, route task offers to connected workers, and relay worker decisions/results back to BeamCore.
+Orchestrators coordinate data transfers and manage worker pools on the Beam subnet. They connect to BeamCore over NATS through `ORCH_GATEWAY_URL`, advertise a worker gateway, route task offers to connected workers, and relay worker results back to BeamCore.
 
 ## Install
 
