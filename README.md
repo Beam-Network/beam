@@ -33,6 +33,7 @@ Set `ORCH_GATEWAY_URL` to a NATS endpoint using `nats://` or `tls://`. Set `WORK
 - [Orchestrator guide](docs/orchestrator.md): run a miner that receives BeamCore task batches and routes work to connected workers.
 - [Worker guide](docs/worker.md): run a worker that executes chunk transfers.
 - [Validator guide](docs/validator.md): run a validator that sets weights from BeamCore epoch summaries.
+- [Public guide](guide/intro.md): public dashboard, PRISM, transfer, and scoring docs copied from `beam-core-dashboard/docs/docs`.
 
 ## Quick Install
 

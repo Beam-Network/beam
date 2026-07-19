@@ -1,0 +1,147 @@
+---
+id: api-reference
+title: API Reference
+sidebar_label: API Reference
+hide_table_of_contents: true
+---
+
+# API Reference
+
+The BeamCore API is a REST + WebSocket API served at [beamcore.b1m.ai](https://beamcore.b1m.ai).
+
+## Interactive Documentation
+
+<div style={{display: "flex", gap: "1.5rem", flexWrap: "wrap", marginTop: "1.5rem"}}>
+
+<a
+  href="https://beamcore.b1m.ai/docs"
+  style={{
+    display: "flex",
+    flexDirection: "column",
+    padding: "1.5rem",
+    borderRadius: "8px",
+    border: "1px solid var(--ifm-color-emphasis-300)",
+    textDecoration: "none",
+    color: "inherit",
+    flex: "1",
+    minWidth: "220px",
+    transition: "border-color 0.2s",
+  }}
+>
+  <strong style={{fontSize: "1.1rem"}}>Swagger UI ↗</strong>
+  <span style={{marginTop: "0.5rem", color: "var(--ifm-color-secondary-darkest)"}}>
+    Try requests directly in the browser. Explore all endpoints with an interactive playground.
+  </span>
+</a>
+
+<a
+  href="https://beamcore.b1m.ai/redoc"
+  style={{
+    display: "flex",
+    flexDirection: "column",
+    padding: "1.5rem",
+    borderRadius: "8px",
+    border: "1px solid var(--ifm-color-emphasis-300)",
+    textDecoration: "none",
+    color: "inherit",
+    flex: "1",
+    minWidth: "220px",
+    transition: "border-color 0.2s",
+  }}
+>
+  <strong style={{fontSize: "1.1rem"}}>ReDoc ↗</strong>
+  <span style={{marginTop: "0.5rem", color: "var(--ifm-color-secondary-darkest)"}}>
+    Clean, readable API documentation with a three-panel layout. Great for browsing schemas.
+  </span>
+</a>
+
+</div>
+
+## Authentication
+
+All non-public endpoints require an `x-api-key` header.
+
+```http
+x-api-key: your_api_key
+```
+
+API keys are scoped by role (`client`, `orchestrator`, `worker`, `validator`). Each role has access only to the routes relevant to that role.
+
+## Base URL
+
+```
+http://<host>:8000
+```
+
+The OpenAPI schema is also available as JSON at <a href="https://beamcore.b1m.ai/openapi.json"><code>/openapi.json</code></a>.
+
+## Dashboard Audit Routes
+
+These dashboard routes expose audit evidence for verifying transfer behavior: database rows grouped by table, with sensitive credentials and signatures redacted. They are intended for data verification and operator investigation, not for public client API use.
+
+Audit routes are served from the dashboard domain:
+
+```http
+https://data.b1m.ai
+```
+
+### Orchestrator transfer raw data
+
+```http
+GET https://data.b1m.ai/api/audit/orchestrator/{orchestratorId}/transfers/{transferId}?limit=100&offset=0
+```
+
+Returns raw rows for one orchestrator on one transfer, grouped by table:
+
+- `transfer_assignment_plans`
+- `task_offer_batches`
+- `tasks`
+- `task_attempts`
+- `task_results`
+- `overseer_interventions`
+
+`orchestratorId` may be an orchestrator UUID, UID, or hotkey. `transferId` must be a transfer UUID.
+
+### Worker transfer raw data
+
+```http
+GET https://data.b1m.ai/api/audit/worker/{workerId}/transfers/{transferId}?limit=100&offset=0
+```
+
+Returns raw rows for one worker on one transfer, grouped by table:
+
+- `workers`
+- `transfer_assignment_plans`
+- `tasks`
+- `task_attempts`
+- `task_results`
+- `overseer_interventions`
+
+`workerId` may be a worker ID or hotkey. `transferId` must be a transfer UUID.
+
+### Pagination
+
+Both routes accept:
+
+- `limit`: number of rows per table, default `1000`, max `5000`
+- `offset`: row offset per table, default `0`
+
+Responses include per-table pagination metadata:
+
+```json
+{
+  "pagination": {
+    "limit": 100,
+    "offset": 0,
+    "tables": {
+      "tasks": {
+        "limit": 100,
+        "offset": 0,
+        "returned": 100,
+        "has_more": true,
+        "next_offset": 100
+      }
+    }
+  }
+}
+```
