@@ -284,6 +284,42 @@ class SubnetCoreClient:
             logger.error("Failed to get API key: %s", e)
             return None
 
+    async def _ensure_rest_registration(self) -> bool:
+        """Create/refresh our orchestrator row in BeamCore via REST.
+
+        BeamCore's NATS `register` binds to an existing orchestrator row; if no
+        row exists it answers `orchestrator_not_routable` (nothing to do with
+        network reachability — BeamCore never probes the advertised URL, and
+        plenty of live orchestrators advertise RFC1918/localhost addresses).
+        Upstream never calls this endpoint, so a fresh hotkey can never register.
+        """
+        api_key = await self._ensure_api_key()
+        if not api_key:
+            logger.warning("Cannot REST-register orchestrator: no API key")
+            return False
+        cfg = dict(self._registration_config or {})
+        payload = {"hotkey": self.orchestrator_hotkey}
+        # /orchestrators/register has additionalProperties:false — send only
+        # fields it declares (no gateway_url, no ready).
+        for key in ("url", "region", "max_workers", "uid", "fee_percentage"):
+            if cfg.get(key) is not None:
+                payload[key] = cfg[key]
+        try:
+            client = await self._get_client()
+            resp = await client.post(
+                f"{self.base_url}/orchestrators/register",
+                json=payload,
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            if resp.status_code != 200:
+                logger.error("Orchestrator REST registration failed: %s - %s", resp.status_code, resp.text[:300])
+                return False
+            logger.info("Orchestrator REST registration OK: %s", resp.json().get("message"))
+            return True
+        except Exception as e:
+            logger.error("Orchestrator REST registration error: %s", e)
+            return False
+
     async def start_polling(self):
         if self._running:
             logger.warning("Already running")
@@ -292,6 +328,7 @@ class SubnetCoreClient:
         last_error: Optional[Exception] = None
         for attempt in range(1, STARTUP_CONNECT_ATTEMPTS + 1):
             try:
+                await self._ensure_rest_registration()
                 await self._connect_nats_session()
                 registered = await self._register_via_nats()
                 if not registered:
@@ -560,6 +597,11 @@ class SubnetCoreClient:
         self._desired_ready = self._registration_ready()
         cfg["ready"] = self._desired_ready
         cfg["signature"] = signature
+        logger.info(
+            "Registering via NATS: url=%s gateway_url=%s region=%s uid=%s ready=%s max_workers=%s",
+            cfg.get("url"), cfg.get("gateway_url"), cfg.get("region"),
+            cfg.get("uid"), cfg.get("ready"), cfg.get("max_workers"),
+        )
         response = await self._send_nats_request("register", cfg, timeout=max(REQUEST_TIMEOUT, 3.0))
         if response.get("type") == "register_ack":
             self._registered = True
@@ -567,7 +609,7 @@ class SubnetCoreClient:
             self._schedule_ready_sync_if_needed()
             return True
         self._registered = False
-        logger.error("Registration failed: %s", response.get("message") or response.get("reason") or response)
+        logger.error("Registration failed, full response: %s", response)
         return False
 
     async def _heartbeat_loop(self) -> None:
