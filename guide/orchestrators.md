@@ -38,6 +38,8 @@ sequenceDiagram
     participant WG as Worker gateway
     participant W as Worker
 
+    O->>BC: POST /orchestrators/register (one-time)
+    BC-->>O: orchestrator_id, api_key
     W->>WG: connect /ws/<worker_id>?api_key=...
     O->>NATS: register { url, gateway_url, ready }
     BC->>NATS: worker_task_offer_batch
@@ -97,9 +99,63 @@ Workers report task outcomes with canonical `task_result`:
 
 BeamCore derives verified bytes from trusted task metadata and computes bandwidth from offer send time to completion time.
 
+## Registration
+
+Registration is a one-time step that creates your orchestrator record in BeamCore and issues your API key. It must happen **before** the orchestrator connects to NATS — the NATS `register` message only declares your live gateway and readiness, it cannot create the record. An orchestrator that connects without registering first is rejected with `orchestrator_not_routable`.
+
+**Prerequisite:** the hotkey must already be registered on the subnet's metagraph netuid. Otherwise registration fails with `403 hotkey is not registered on this subnet`.
+
+**First-time registration** is unauthenticated and requires a hotkey signature over the message `{hotkey}:{fee_percentage}`:
+
+```
+POST $CORE_SERVER_URL/orchestrators/register
+Content-Type: application/json
+
+{
+  "hotkey": "5F...",
+  "signature": "0x...",
+  "fee_percentage": 10,
+  "name": "my-orchestrator",
+  "region": "us-east",
+  "url": "https://my-orchestrator.example.com",
+  "max_workers": 1000
+}
+```
+
+Only `hotkey` is required. `fee_percentage` accepts `0`-`100` and defaults to `10`. `name`, `description`, `contact`, `url`, `region`, `max_workers`, `uid`, and `slot_number` are optional; the UID is resolved from the metagraph, so a submitted `uid` is reconciled rather than trusted.
+
+**Example response:**
+
+```json
+{
+  "orchestrator_id": "...",
+  "hotkey": "5F...",
+  "api_key": "...",
+  "message": "orchestrator registered"
+}
+```
+
+The `api_key` field is returned **only on first registration** and is not retrievable afterwards — save it immediately.
+
+**Updating metadata** later uses the same endpoint with `x-api-key` instead of a signature:
+
+```
+POST $CORE_SERVER_URL/orchestrators/register
+x-api-key: <orchestrator-api-key>
+Content-Type: application/json
+
+{ "hotkey": "5F...", "region": "eu-west", "max_workers": 2000 }
+```
+
+In production, `$CORE_SERVER_URL` is `https://beamcore.b1m.ai`.
+
+### Troubleshooting
+
+`orchestrator_not_routable` when the orchestrator sends its NATS `register` message means BeamCore has no orchestrator record for that hotkey — either registration was never completed, or the hotkey is registered on a different chain or netuid than the environment you are connecting to.
+
 ## Setup
 
-Set `CORE_SERVER_URL`, `ORCH_GATEWAY_URL`, wallet settings, and `READY=true` when the orchestrator should receive routed work. Set production `ORCH_GATEWAY_URL` to `tls://orch-gateway.b1m.ai:4222`. If workers connect through a public or reverse-proxied gateway origin, set `ORCHESTRATOR_WORKER_GATEWAY_URL` to that origin and set each worker's `WORKER_GATEWAY_URL` to the same gateway origin. Keep the NATS control connection and worker gateway sessions healthy so BeamCore can deliver batches.
+Complete [Registration](#registration) first, then set `CORE_SERVER_URL`, `ORCH_GATEWAY_URL`, wallet settings, and `READY=true` when the orchestrator should receive routed work. Set `BEAMCORE_ORCHESTRATOR_API_KEY` to the API key from registration — it is the credential used to connect to NATS. Set production `ORCH_GATEWAY_URL` to `tls://orch-gateway.b1m.ai:4222`. If workers connect through a public or reverse-proxied gateway origin, set `ORCHESTRATOR_WORKER_GATEWAY_URL` to that origin and set each worker's `WORKER_GATEWAY_URL` to the same gateway origin. Keep the NATS control connection and worker gateway sessions healthy so BeamCore can deliver batches.
 
 ## Dashboard
 
