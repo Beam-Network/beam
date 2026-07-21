@@ -1,9 +1,8 @@
 """
 Dedicated FIFO queue for BeamCore NATS task-offer delivery.
 
-The orchestrator acknowledges a NATS task-offer batch after it is accepted into
-this local queue. Worker websocket delivery then happens asynchronously, keeping
-BeamCore control request/reply latency independent from local worker I/O.
+This queue keeps worker websocket delivery asynchronous so NATS message handling stays independent
+from local worker I/O.
 """
 
 from __future__ import annotations
