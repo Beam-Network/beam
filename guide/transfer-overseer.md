@@ -7,9 +7,9 @@ sidebar_position: 4
 
 # Recovery Timeouts
 
-BeamCore treats each task offer as participant-owned when it is sent. A physical task-offer batch must keep producing newly claimed valid `task_result` messages without a **5 second** gap.
+BeamCore treats each task offer as participant-owned once its assignment wave has been dispatched. Each assignment wave has a **15 second** timeout that starts after the full dispatch wave settles.
 
-A valid current result, whether successful or failed, refreshes the batch window. Duplicate, invalid, late, conflicting, or superseded results do not. After a blackout, unfinished work is reassigned through the same participant-neutral PRISM allocation path and the intervention contributes to reliability evidence.
+When the timeout fires, unfinished work is reassigned through the same participant-neutral PRISM allocation path. Every other recovery types use that same reassignment path immediately.
 
 ## Orchestrator obligations
 
@@ -22,7 +22,7 @@ A valid current result, whether successful or failed, refreshes the batch window
 
 - Queue every valid offer and execute it as capacity becomes available.
 - Report success and failure through `task_result`.
-- Keep active batches producing valid results within the **5 second** window.
+- Keep active tasks moving and report results before the assignment timeout expires.
 
 Stalled or failed work is reassigned and can reduce future PRISM routing share.
 

@@ -5,7 +5,7 @@ title: PRISM Scoring
 
 # PRISM Scoring
 
-**PRISM** (Performance and Reliability Incentive for Subnet Mining) is Beam's orchestrator scoring system. Your **PRISM final score** shapes how much production traffic you receive and how validators weight your share of subnet emissions.
+**PRISM** (Performance and Reliability Incentive for Subnet Mining) is Beam's orchestrator scoring system. Your **PRISM final score** shapes how much production traffic you receive. Validator emission weights are based on completed qualified production tasks.
 
 ## Final score
 
@@ -36,7 +36,7 @@ Beam compares orchestrators in the same pool cohort and maps each value linearly
 transfer_mbps = SUM(batch_mbps x batch_task_count) / SUM(batch_task_count)
 ```
 
-Initial batches always count toward throughput. Recovery batches below BeamCore's configured minimum task count for verified BW (5) are excluded from throughput scoring, while their task outcomes still count for reliability and task totals.
+`first assignment` batches always count toward throughput. Later batches need to be above BeamCore's configured follow-up minimum task count for verified BW (10) to count, while their task outcomes still count for reliability and task totals.
 
 **Throughput** uses recent verified transfer bandwidth with a **1-hour half-life**. A bandwidth sample around 1 hour old contributes about `0.5`; a sample around 2 hours old contributes about `0.25`.
 
@@ -53,7 +53,7 @@ Beam routes each orchestrator through one of two pools:
 | **Qualifying** | Calibration transfers (test mode) |
 | **Qualified**  | Production client transfers       |
 
-You begin in **qualifying**. Verified calibration work builds your **confidence score**. At **0.9** confidence, Beam graduates you to **qualified** for production routing and full emissions weighting. Qualified membership persists for routing and scoring on production work.
+You begin in **qualifying**. Verified calibration work builds your **confidence score**. At **0.9** confidence, Beam graduates you to **qualified** for production routing and validator weights. Qualified membership persists for routing and scoring on production work.
 
 ```text
 verified_task_ratio = min(1, verified_task_count / target_verified_tasks)
@@ -68,6 +68,14 @@ The verified-task target is about **120** distinct tasks in the evidence window.
 Right after graduation, routing share uses a mid-tier weight until your first production transfer; it then follows your live PRISM score from production evidence.
 
 Qualifying and qualified orchestrators are scored against peers in the same pool.
+
+## Qualified seasonal reset
+
+Qualified PRISM runs in weekly seasons. A new season starts on Sunday at **00:00 UTC**.
+
+At the start of a season, every qualified orchestrator begins from a neutral routing score of **0.5** until Beam sees fresh qualified PRISM evidence for that season. Readiness still applies, so disconnected or not-ready orchestrators do not receive traffic from the neutral score.
+
+Your first qualified evidence in the season clears the reset status on the next score refresh.
 
 ## Readiness
 

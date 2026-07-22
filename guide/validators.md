@@ -9,7 +9,7 @@ sidebar_position: 6
 
 Validators are Bittensor-native nodes that read BeamCore's materialized epoch summary, set metagraph weights for subnet 105, and report the on-chain weight proof back to BeamCore.
 
-PRISM scoring is computed and materialized by BeamCore services; the validator runtime consumes that output and performs the chain submission.
+BeamCore computes PRISM for routing and materializes task-count-based epoch weights; the validator runtime consumes that output and performs the chain submission.
 
 ---
 
@@ -51,7 +51,7 @@ The validator waits until its configured weight interval has elapsed before call
 
 ## PRISM And Epoch Summaries
 
-BeamCore computes PRISM from verified throughput, reliability, readiness, and penalty inputs. The [PRISM](./prism) page documents the formulas and pool behavior.
+BeamCore computes PRISM from verified throughput, reliability, readiness, and penalty inputs for routing. Validator epoch summaries use completed qualified production task counts for emissions.
 
 Validators consume the already-materialized epoch summary:
 
@@ -60,7 +60,7 @@ Validators consume the already-materialized epoch summary:
 	"epoch": 17925,
 	"uids": [12, 47, 52],
 	"weights": [0.8, 0.075, 0.05],
-	"formula_version": "tiered_weight_prism_score_x_prism_evidence_tasks_v2",
+	"formula_version": "tiered_weight_task_done_count_based",
 	"params_hash": "..."
 }
 ```

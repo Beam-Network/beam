@@ -46,7 +46,7 @@ graph LR
     BC --> O[Orchestrators\nmanage worker pools]
     O --> W[Workers\nmove data]
     W --> V[Validators\nverify & enforce]
-    V -->|PRISM scores + emissions| O
+    V -->|scores + emissions| O
 ```
 
 ---
@@ -84,7 +84,7 @@ Beam is composed of five roles that coordinate to move data across a distributed
 
 Beam creates a fluid, performance-driven marketplace with aligned incentives at every layer:
 
-**Orchestrators** compete to build and maintain the most reliable worker pools. Better performance → higher PRISM score → more transfer assignments → more $TAO emissions. Orchestrators are evaluated at the *pool level*, so even a small number of weak workers degrades their score. They must also compensate workers fairly — validators enforce this, and failure to pay appropriately reduces future assignments.
+**Orchestrators** compete to build and maintain the most reliable worker pools. Better performance -> higher PRISM score -> more transfer assignments, while completed qualified production work drives validator weight and $TAO emissions. Orchestrators are evaluated at the *pool level*, so even a small number of weak workers degrades their score. They must also compensate workers fairly - validators enforce this, and failure to pay appropriately reduces future assignments.
 
 **Workers** compete to remain in high-performing pools. They are continuously evaluated on delivery success, throughput, and latency consistency. Workers are not locked into a single orchestrator — they migrate toward orchestrators offering the most reliable work and the best rewards, reinforcing a system where fairness is enforced by market dynamics, not policy alone.
 
@@ -114,7 +114,7 @@ Beam creates a fluid, performance-driven marketplace with aligned incentives at 
 
 ## Bittensor Subnet 105
 
-Beam operates as **subnet 105** on the Bittensor network. Validators score orchestrators using the **PRISM** algorithm, and those scores determine $TAO emission allocations each epoch (~12 minutes). This creates economic incentives for orchestrators to maintain high-quality workers and reliable uptime.
+Beam operates as **subnet 105** on the Bittensor network. PRISM scores shape production routing, and validators submit task-count-based epoch weights for $TAO emissions. This creates economic incentives for orchestrators to maintain high-quality workers and complete real production work.
 
 :::info
 You do not need to interact with Bittensor directly to use Beam as a client. Connectors (S3, R2, GCS, HTTP) abstract all network details.
@@ -127,7 +127,7 @@ You do not need to interact with Bittensor directly to use Beam as a client. Con
 - **Transfer** — A request to move data from source to destination, split into chunks and distributed across workers.
 - **Task** — A single chunk-level work unit assigned to a specific worker.
 - **PRISM** — The scoring algorithm that evaluates orchestrators across throughput, reliability, and performance.
-- **Epoch** — A Bittensor time unit (~12 minutes) after which PRISM scores are updated and emissions are distributed.
+- **Epoch** — A Bittensor time unit (~12 minutes) after which weights are updated and emissions are distributed.
 
 ---
 

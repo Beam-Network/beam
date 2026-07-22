@@ -5,15 +5,14 @@ title: Weights
 
 # Weights
 
-Beam validator weights are the final UID vector submitted to Bittensor. BeamCore materializes the vector from qualified PRISM performance, readiness active time, penalties, and completed production work in the PRISM evidence window, then validators read it and call `set_weights`.
+Beam validator weights are the final UID vector submitted to Bittensor. BeamCore materializes the vector from completed production work by qualified orchestrators in the PRISM evidence window, then validators read it and call `set_weights`.
 
 ## Final weight formula
 
 BeamCore first computes a base raw score for every qualified orchestrator with a subnet UID:
 
 ```text
-weight_prism_score_i = performance_score_i x readiness_active_time_multiplier_i x penalty_multiplier_i
-base_raw_i           = weight_prism_score_i x task_done_count_i
+base_raw_i = task_done_count_i
 ```
 
 It then ranks qualified orchestrators by `base_raw` and splits emissions into three tiers:
@@ -50,15 +49,10 @@ Assume ten qualified orchestrators have positive raw score. Tier A contains one 
 
 Weights are computed only for orchestrators in the **qualified** pool.
 
-| Input                             | Source                                                   |
-| --------------------------------- | -------------------------------------------------------- |
-| `performance_score`               | Qualified PRISM metrics                                  |
-| `readiness_active_time_multiplier`| Qualified PRISM metrics                                  |
-| `penalty_multiplier`              | Qualified PRISM metrics                                  |
-| `task_done_count`                 | Distinct completed production tasks in the PRISM evidence window (7 days by default) |
-| UID and hotkey                    | Current orchestrator and metagraph state                 |
-
-PRISM matters inside every active tier. Stronger performance, active-time, and penalty components give more weight per completed task.
+| Input             | Source                                                   |
+| ----------------- | -------------------------------------------------------- |
+| `task_done_count` | Distinct completed production tasks in the PRISM evidence window (7 days by default) |
+| UID and hotkey    | Current orchestrator and metagraph state                 |
 
 ## No-transfer behavior
 
@@ -90,7 +84,7 @@ The response includes matching `uids` and `weights` arrays:
 	"uids": [12, 47, 52],
 	"weights": [0.8, 0.075, 0.05],
 	"uint16_weights": [52428, 4915, 3276],
-	"formula_version": "tiered_weight_prism_score_x_prism_evidence_tasks_v2",
+	"formula_version": "tiered_weight_task_done_count_based",
 	"all_weights_zero": false
 }
 ```
@@ -101,6 +95,5 @@ When `current_epoch` differs from `epoch`, validators are applying the latest va
 
 - Graduate to the qualified pool by completing calibration work reliably.
 - Complete enough production work inside the PRISM evidence window to rank into a higher emission tier.
-- Keep your orchestrator connected and ready so its readiness active-time remains high.
-- Improve throughput and reliability so each evidence-window task carries a stronger PRISM score.
-- Avoid fraud and sybil penalties that reduce the PRISM final score before weight materialization.
+- Keep your orchestrator connected and ready so it can receive production assignments.
+- Maintain strong PRISM performance so routing gives you more opportunities to complete production work.
