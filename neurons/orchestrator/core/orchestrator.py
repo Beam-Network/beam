@@ -1023,10 +1023,26 @@ class Orchestrator:
                 gateway_url,
             )
 
-            # Start NATS control connection for real-time notifications and
-            # orchestrator control-plane requests.
-            await self.subnet_core_client.start_polling()
-            logger.info("SubnetCore NATS control connection started")
+            # Start NATS control connection in the background with infinite
+            # retry. Awaiting the handshake here blocks uvicorn from binding,
+            # but BeamCore's registration probe needs our HTTP/gateway port
+            # answering — so a first-time registration deadlocks and the
+            # client is torn down permanently after 12 attempts.
+            async def _start_nats_control_forever() -> None:
+                delay = 5.0
+                while True:
+                    try:
+                        await self.subnet_core_client.start_polling()
+                        logger.info("SubnetCore NATS control connection started")
+                        return
+                    except Exception as e:
+                        logger.warning(
+                            f"NATS control startup failed ({e}); retrying in {delay:.0f}s"
+                        )
+                        await asyncio.sleep(delay)
+                        delay = min(delay * 2, 120.0)
+
+            self._nats_control_task = asyncio.create_task(_start_nats_control_forever())
 
         except Exception as e:
             logger.warning(f"Failed to initialize SubnetCoreClient: {e}")
