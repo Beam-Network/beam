@@ -121,7 +121,7 @@ The validator expects BeamCore to return matching `uids` and `weights` arrays:
   "epoch": 17925,
   "uids": [12, 47, 52],
   "weights": [0.42, 0.33, 0.25],
-  "formula_version": "prism_final_x_task_done_count",
+  "formula_version": "tiered_weight_task_done_x_penalty_based",
   "params_hash": "..."
 }
 ```

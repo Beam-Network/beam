@@ -12,7 +12,7 @@ Beam validator weights are the final UID vector submitted to Bittensor. BeamCore
 BeamCore first computes a base raw score for every qualified orchestrator with a subnet UID:
 
 ```text
-base_raw_i = task_done_count_i
+base_raw_i = task_done_count_i * penalty_multiplier_i
 ```
 
 It then ranks qualified orchestrators by `base_raw` and splits emissions into three tiers:
@@ -52,6 +52,7 @@ Weights are computed only for orchestrators in the **qualified** pool.
 | Input             | Source                                                   |
 | ----------------- | -------------------------------------------------------- |
 | `task_done_count` | Distinct completed production tasks in the PRISM evidence window (7 days by default) |
+| `penalty_multiplier` | Qualified PRISM penalty multiplier from configured penalty pressure |
 | UID and hotkey    | Current orchestrator and metagraph state                 |
 
 ## No-transfer behavior
@@ -84,7 +85,7 @@ The response includes matching `uids` and `weights` arrays:
 	"uids": [12, 47, 52],
 	"weights": [0.8, 0.075, 0.05],
 	"uint16_weights": [52428, 4915, 3276],
-	"formula_version": "tiered_weight_task_done_count_based",
+	"formula_version": "tiered_weight_task_done_x_penalty_based",
 	"all_weights_zero": false
 }
 ```
@@ -94,6 +95,6 @@ When `current_epoch` differs from `epoch`, validators are applying the latest va
 ## Improving weight share
 
 - Graduate to the qualified pool by completing calibration work reliably.
-- Complete enough production work inside the PRISM evidence window to rank into a higher emission tier.
+- Complete enough penalty-adjusted production work inside the PRISM evidence window to rank into a higher emission tier.
 - Keep your orchestrator connected and ready so it can receive production assignments.
 - Maintain strong PRISM performance so routing gives you more opportunities to complete production work.

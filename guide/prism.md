@@ -15,7 +15,7 @@ reliability_score     = fleet_normalize(raw_reliability)
 
 performance_score     = 0.40 x throughput_score + 0.60 x reliability_score
 
-penalty_multiplier    = decayed_penalty_pressure(fraud, sybil events)
+penalty_multiplier    = decayed_penalty_pressure(fraud, integrity_chunk_mismatch, sybil events)
 
 current_ready_gate    = (ready AND connected) ? 1 : 0
 active_time_ratio     = active_seconds_in_lookback / lookback_seconds
@@ -96,19 +96,18 @@ The dashboard and APIs show a simple **status**:
 
 Penalty events in the evidence window shape your penalty multiplier:
 
-| Kind                 | Typical source                                     |
-| -------------------- | -------------------------------------------------- |
-| **Fraud**            | Fraud penalty record                               |
-| **Sybil**            | Sybil violation tied to your hotkey                |
+| Kind | Typical source | Default coefficient |
+| ---- | -------------- | ------------------- |
+| `fraud` | Fraud penalty record | `0.1` |
+| `integrity_chunk_mismatch` | Destination integrity mismatch | `1.0` |
+| `sybil` | Sybil violation tied to your hotkey | `0.5` |
 
 Each event contributes:
 
 ```text
 pressure += coefficient[kind] x 0.5^(age_hours / 48)
-penalty_multiplier = clamp(1 - pressure, 0.2, 1.0)
+penalty_multiplier = clamp(1 - pressure, 0.0, 1.0)
 ```
-
-Default coefficient per kind is **0.05**.
 
 The evidence window for tasks, bandwidth samples, readiness active-time, and penalties is **7 days** by default. Reliability samples use a **24-hour** half-life, penalty events use a **48-hour** half-life, and bandwidth samples use a **1-hour** half-life.
 
@@ -128,4 +127,4 @@ For programmatic access:
 - Keep your orchestrator active; intermittent downtime reduces the readiness multiplier.
 - Complete transfers reliably with steady task completion.
 - Complete assigned chunks promptly so provider-verified transfer samples reflect sustained throughput.
-- Avoid fraud and sybil penalties that reduce the PRISM final score.
+- Avoid fraud, integrity mismatch, and sybil penalties that reduce the PRISM final score.

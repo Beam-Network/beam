@@ -60,7 +60,7 @@ Validators consume the already-materialized epoch summary:
 	"epoch": 17925,
 	"uids": [12, 47, 52],
 	"weights": [0.8, 0.075, 0.05],
-	"formula_version": "tiered_weight_task_done_count_based",
+	"formula_version": "tiered_weight_task_done_x_penalty_based",
 	"params_hash": "..."
 }
 ```
