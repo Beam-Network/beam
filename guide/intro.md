@@ -114,7 +114,7 @@ Beam creates a fluid, performance-driven marketplace with aligned incentives at 
 
 ## Bittensor Subnet 105
 
-Beam operates as **subnet 105** on the Bittensor network. PRISM scores shape production routing, and validators submit task-count-based epoch weights for $TAO emissions. This creates economic incentives for orchestrators to maintain high-quality workers and complete real production work.
+Beam operates as **subnet 105** on the Bittensor network. PRISM scores shape production routing, and validators submit verified-uploaded-byte epoch weights for $TAO emissions. This creates economic incentives for orchestrators to maintain high-quality workers and complete real production work.
 
 :::info
 You do not need to interact with Bittensor directly to use Beam as a client. Connectors (S3, R2, GCS, HTTP) abstract all network details.
