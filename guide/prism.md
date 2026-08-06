@@ -40,7 +40,7 @@ transfer_mbps = SUM(batch_mbps x batch_task_count) / SUM(batch_task_count)
 
 **Throughput** uses recent verified transfer bandwidth with a **1-hour half-life**. A bandwidth sample around 1 hour old contributes about `0.5`; a sample around 2 hours old contributes about `0.25`.
 
-**Reliability** uses time-decayed task outcomes - completions, failures, and reassignment-style failures - over the same window with a **24-hour half-life**. A reliability sample around 24 hours old contributes about `0.5`; a sample around 48 hours old contributes about `0.25`. Raw reliability blends success rate and reassignment rate, then fleet-normalizes on the same compressed min-to-max range before it enters the performance blend.
+**Reliability** uses time-decayed task outcomes - completions, failures, and reassignment-style failures - over the same window with a **1-hour half-life**. A reliability sample around 1 hour old contributes about `0.5`; a sample around 2 hours old contributes about `0.25`. Raw reliability blends success rate and reassignment rate, then fleet-normalizes on the same compressed min-to-max range before it enters the performance blend.
 
 **Performance** combines throughput and reliability with **40% throughput / 60% reliability** weighting.
 
@@ -94,7 +94,7 @@ The dashboard and APIs show a simple **status**:
 
 ## Penalties
 
-Penalty events in the evidence window shape your penalty multiplier:
+Penalty events in the penalty window shape your penalty multiplier:
 
 | Kind | Typical source | Default coefficient |
 | ---- | -------------- | ------------------- |
@@ -109,7 +109,9 @@ pressure += coefficient[kind] x 0.5^(age_hours / 48)
 penalty_multiplier = clamp(1 - pressure, 0.0, 1.0)
 ```
 
-The evidence window for tasks, bandwidth samples, readiness active-time, and penalties is **7 days** by default. Reliability samples use a **24-hour** half-life, penalty events use a **48-hour** half-life, and bandwidth samples use a **1-hour** half-life.
+The evidence window for tasks, bandwidth samples, and readiness active-time is **1 day** by default. Reliability and bandwidth samples use a **1-hour** half-life.
+Penalty events use a **48-hour** half-life.
+Penalty events use a separate **7 day** penalty window.
 
 Guardrail reassignments feed **reliability** samples.
 

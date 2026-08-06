@@ -51,7 +51,7 @@ Weights are computed only for orchestrators in the **qualified** pool.
 
 | Input             | Source                                                   |
 | ----------------- | -------------------------------------------------------- |
-| `verified_uploaded_mib` | Whole MiB from server-planned chunk sizes for completed production tasks in the PRISM evidence window (7 days by default) |
+| `verified_uploaded_mib` | Whole MiB from server-planned chunk sizes for completed production tasks in the PRISM evidence window (1 day by default) |
 | `penalty_multiplier` | Qualified PRISM penalty multiplier from configured penalty pressure |
 | UID and hotkey    | Current orchestrator and metagraph state                 |
 
