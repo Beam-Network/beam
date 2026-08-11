@@ -1996,7 +1996,7 @@ class Validator:
         if not uids or len(uids) != len(weights):
             logger.warning("BeamCore epoch summary missing uids/weights vectors")
             return None
-        fv = str(snapshot.get("formula_version") or "tiered_weight_verified_uploaded_mib_x_penalty_based")
+        fv = str(snapshot.get("formula_version") or "tiered_weight_verified_uploaded_mib_x_penalty_v2")
         ph = snapshot.get("params_hash")
         if isinstance(ph, str):
             params_hash: Optional[str] = ph

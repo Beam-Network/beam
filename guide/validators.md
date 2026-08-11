@@ -59,8 +59,8 @@ Validators consume the already-materialized epoch summary:
 {
 	"epoch": 17925,
 	"uids": [12, 47, 52],
-	"weights": [0.8, 0.075, 0.05],
-	"formula_version": "tiered_weight_verified_uploaded_mib_x_penalty_based",
+	"weights": [0.5, 0.3, 0.2],
+	"formula_version": "tiered_weight_verified_uploaded_mib_x_penalty_v2",
 	"params_hash": "..."
 }
 ```

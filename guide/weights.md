@@ -15,13 +15,15 @@ BeamCore first computes a base raw score for every qualified orchestrator with a
 base_raw_i = verified_uploaded_mib_i * penalty_multiplier_i
 ```
 
-It then ranks qualified orchestrators by `base_raw` and splits emissions into three tiers:
+It then ranks qualified orchestrators by `base_raw` and splits emissions into five fixed-rank tiers:
 
-| Tier  | Rank band               | Nominal emission bucket |
-| ----- | ----------------------- | ----------------------- |
-| **A** | Top 10%                 | **80%**                 |
-| **B** | Next 30%                | **15%**                 |
-| **C** | Remaining orchestrators | **5%**                  |
+| Tier  | Rank band      | Nominal emission bucket |
+| ----- | -------------- | ----------------------- |
+| **A** | Top 30         | **50%**                 |
+| **B** | Next 30        | **35%**                 |
+| **C** | Next 20        | **10%**                 |
+| **D** | Next 20        | **4%**                  |
+| **E** | Remaining UIDs | **1%**                  |
 
 Within each active tier, that tier's bucket is split proportionally by `base_raw`:
 
@@ -31,19 +33,21 @@ normalized_weight_i = effective_tier_bucket_i x tier_weight_i
 uint16_weight_i     = floor(normalized_weight_i x 65535)
 ```
 
-If Tier B or Tier C is empty or has zero total raw score, its bucket rolls up into Tier A. Zero-raw orchestrators never receive positive weight.
+If Tier B, C, D, or E is empty or has zero total raw score, its bucket rolls up into Tier A. Zero-raw orchestrators never receive positive weight.
 
 ## Example
 
-Assume ten qualified orchestrators have positive raw score. Tier A contains one orchestrator, Tier B contains 3, and Tier C contains 6.
+Assume 200 qualified orchestrators have equal positive raw scores. The fixed bands and per-UID shares are:
 
-| UID   | `base_raw`   | Tier | Effective tier bucket | Final weight             |
-| ----- | ------------ | ---- | --------------------- | ------------------------ |
-| 12    | 50           | A    | 80%                   | 80.00%                   |
-| 47    | 30           | B    | 15%                   | 7.50%                    |
-| 52    | 20           | B    | 15%                   | 5.00%                    |
-| 61    | 10           | B    | 15%                   | 2.50%                    |
-| 70-75 | split by raw | C    | 5%                    | proportional share of 5% |
+| Tier | Ranks   | Members | Tier bucket | Per-UID share |
+| ---- | ------- | ------- | ----------- | ------------- |
+| A    | 1-30    | 30      | 50%         | 1.6667%       |
+| B    | 31-60   | 30      | 35%         | 1.1667%       |
+| C    | 61-80   | 20      | 10%         | 0.5%          |
+| D    | 81-100  | 20      | 4%          | 0.2%          |
+| E    | 101-200 | 100     | 1%          | 0.01%         |
+
+When raw scores differ, each tier's bucket is divided proportionally instead.
 
 ## Inputs
 
@@ -83,9 +87,9 @@ The response includes matching `uids` and `weights` arrays:
 	"epoch": 17925,
 	"current_epoch": 17926,
 	"uids": [12, 47, 52],
-	"weights": [0.8, 0.075, 0.05],
-	"uint16_weights": [52428, 4915, 3276],
-	"formula_version": "tiered_weight_verified_uploaded_mib_x_penalty_based",
+	"weights": [0.5, 0.3, 0.2],
+	"uint16_weights": [32767, 19660, 13107],
+	"formula_version": "tiered_weight_verified_uploaded_mib_x_penalty_v2",
 	"all_weights_zero": false
 }
 ```
