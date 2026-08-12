@@ -69,14 +69,6 @@ Right after graduation, routing share uses a mid-tier weight until your first pr
 
 Qualifying and qualified orchestrators are scored against peers in the same pool.
 
-## Qualified seasonal reset
-
-Qualified PRISM runs in weekly seasons. A new season starts on Sunday at **00:00 UTC**.
-
-At the start of a season, every qualified orchestrator begins from a neutral routing score of **0.5** until Beam sees fresh qualified PRISM evidence for that season. Readiness still applies, so disconnected or not-ready orchestrators do not receive traffic from the neutral score.
-
-Your first qualified evidence in the season clears the reset status on the next score refresh.
-
 ## Readiness
 
 Readiness has two parts:
