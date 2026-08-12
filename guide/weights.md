@@ -21,8 +21,8 @@ It then ranks qualified orchestrators by `base_raw` and splits emissions into fi
 | ----- | -------------- | ----------------------- |
 | **A** | Top 30         | **50%**                 |
 | **B** | Next 30        | **35%**                 |
-| **C** | Next 20        | **10%**                 |
-| **D** | Next 20        | **4%**                  |
+| **C** | Next 30        | **10%**                 |
+| **D** | Next 30        | **4%**                  |
 | **E** | Remaining UIDs | **1%**                  |
 
 Within each active tier, that tier's bucket is split proportionally by `base_raw`:
@@ -43,9 +43,9 @@ Assume 200 qualified orchestrators have equal positive raw scores. The fixed ban
 | ---- | ------- | ------- | ----------- | ------------- |
 | A    | 1-30    | 30      | 50%         | 1.6667%       |
 | B    | 31-60   | 30      | 35%         | 1.1667%       |
-| C    | 61-80   | 20      | 10%         | 0.5%          |
-| D    | 81-100  | 20      | 4%          | 0.2%          |
-| E    | 101-200 | 100     | 1%          | 0.01%         |
+| C    | 61-90   | 30      | 10%         | 0.3333%       |
+| D    | 91-120  | 30      | 4%          | 0.1333%       |
+| E    | 121-200 | 80      | 1%          | 0.0125%       |
 
 When raw scores differ, each tier's bucket is divided proportionally instead.
 
@@ -89,7 +89,7 @@ The response includes matching `uids` and `weights` arrays:
 	"uids": [12, 47, 52],
 	"weights": [0.5, 0.3, 0.2],
 	"uint16_weights": [32767, 19660, 13107],
-	"formula_version": "tiered_weight_verified_uploaded_mib_x_penalty_v2",
+	"formula_version": "tiered_weight_verified_uploaded_mib_x_penalty_v3",
 	"all_weights_zero": false
 }
 ```

@@ -121,7 +121,7 @@ The validator expects BeamCore to return matching `uids` and `weights` arrays:
   "epoch": 17925,
   "uids": [12, 47, 52],
   "weights": [0.5, 0.3, 0.2],
-  "formula_version": "tiered_weight_verified_uploaded_mib_x_penalty_v2",
+  "formula_version": "tiered_weight_verified_uploaded_mib_x_penalty_v3",
   "params_hash": "..."
 }
 ```
