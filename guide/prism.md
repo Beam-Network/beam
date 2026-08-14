@@ -57,13 +57,13 @@ You begin in **qualifying**. Verified calibration work builds your **confidence 
 
 ```text
 verified_task_ratio = min(1, verified_task_count / target_verified_tasks)
-age_ratio           = min(1, age_days / 7)
+age_ratio           = min(1, age_days / 1)
 maturity_factor     = 0.8 + 0.2 x age_ratio
 
 confidence_score    = verified_task_ratio x success_rate x maturity_factor
 ```
 
-The verified-task target is about **120** distinct tasks in the evidence window. Confidence also reflects your recent success rate and account age (full maturity around **7 days**).
+The verified-task target is about **120** distinct tasks in the evidence window. Confidence also reflects your recent success rate and account age (full maturity around **1 day**).
 
 Right after graduation, routing share uses a mid-tier weight until your first production transfer; it then follows your live PRISM score from production evidence.
 
