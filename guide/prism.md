@@ -15,7 +15,7 @@ reliability_score     = fleet_normalize(raw_reliability)
 
 performance_score     = 0.40 x throughput_score + 0.60 x reliability_score
 
-penalty_multiplier    = decayed_penalty_pressure(fraud, integrity_chunk_mismatch, sybil events)
+penalty_multiplier    = active_penalty_pressure(fraud, integrity_chunk_mismatch, sybil rows)
 
 current_ready_gate    = (ready AND connected) ? 1 : 0
 active_time_ratio     = active_seconds_in_lookback / lookback_seconds
@@ -86,24 +86,24 @@ The dashboard and APIs show a simple **status**:
 
 ## Penalties
 
-Penalty events in the penalty window shape your penalty multiplier:
+Active penalties shape your penalty multiplier:
 
-| Kind | Typical source | Default coefficient |
-| ---- | -------------- | ------------------- |
-| `fraud` | Fraud penalty record | `0.1` |
-| `integrity_chunk_mismatch` | Destination integrity mismatch | `1.0` |
-| `sybil` | Sybil violation tied to your hotkey | `0.5` |
+| Kind | Typical source | Default coefficient | Duration |
+| ---- | -------------- | ------------------- | ---------------- |
+| `fraud` | Fraud penalty record | `0.1` | `168h` |
+| `integrity_chunk_mismatch` | Destination integrity mismatch | `1.0` | permanent |
+| `sybil` | Sybil violation tied to your hotkey | `0.5` | `168h` |
 
 Each event contributes:
 
 ```text
-pressure += coefficient[kind] x 0.5^(age_hours / 48)
+pressure += coefficient[kind] x active_row_count[kind]
 penalty_multiplier = clamp(1 - pressure, 0.0, 1.0)
 ```
 
+Each penalty captures its duration when it is created.
+
 The evidence window for tasks, bandwidth samples, and readiness active-time is **1 day** by default. Reliability and bandwidth samples use a **1-hour** half-life.
-Penalty events use a **48-hour** half-life.
-Penalty events use a separate **7 day** penalty window.
 
 Guardrail reassignments feed **reliability** samples.
 
