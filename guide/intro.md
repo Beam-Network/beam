@@ -126,6 +126,7 @@ You do not need to interact with Bittensor directly to use Beam as a client. Con
 
 - **Transfer** — A request to move data from source to destination, split into chunks and distributed across workers.
 - **Task** — A single chunk-level work unit assigned to a specific worker.
+- **Room** — A shared room or channel that can run live workloads such as fanout, messages, commands, streams, media, and room-scoped transfer work.
 - **PRISM** — The scoring algorithm that evaluates orchestrators across throughput, reliability, and performance.
 - **Epoch** — A Bittensor time unit (~12 minutes) after which weights are updated and emissions are distributed.
 
@@ -135,6 +136,7 @@ You do not need to interact with Bittensor directly to use Beam as a client. Con
 
 - [Architecture](./architecture) — Understand how the components connect
 - [How Transfers Work](./transfers) — Step through the full transfer lifecycle
+- [Rooms](./rooms) — Understand live room workloads and recovery
 - [Recovery Timeouts](./transfer-overseer) — Per-stage limits and recovery ranking
 - [Orchestrators](./orchestrators) — Learn how to operate or connect to an orchestrator
 - [Workers](./workers) — Learn how workers connect and earn

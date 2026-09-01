@@ -2,31 +2,29 @@
 
 Run a worker on BEAM mainnet.
 
-## Public Endpoints
-
-| Service | Environment variable | URL |
-| ------- | -------------------- | --- |
-| Core server | `CORE_SERVER_URL` | `https://beamcore.b1m.ai` |
-| Worker gateway | `WORKER_GATEWAY_URL` | Operator/orchestrator-owned worker gateway |
-
 ## Requirements
 
 - Python 3.10-3.12
-- A Bittensor wallet with a registered hotkey on subnet 105
+- A Bittensor wallet hotkey registered on subnet 105
 - Stable upload and download bandwidth
-- Enough disk space for transfer scratch data
+- Network access to BeamCore, the worker gateway, and task storage URLs
 
-## Install
+## 1. Install
+
+Install from the repository root, the directory that contains `pyproject.toml`:
 
 ```bash
 git clone https://github.com/Beam-Network/beam.git
 cd beam
-python3 -m venv .venv
+python -m venv .venv
 source .venv/bin/activate
-pip install -e "."
+python -m pip install --upgrade pip
+python -m pip install -e .
 ```
 
-## Register
+## 2. Register
+
+Register the hotkey on subnet 105 before starting the worker:
 
 ```bash
 btcli subnet register --netuid 105 --subtensor.network finney \
@@ -34,29 +32,33 @@ btcli subnet register --netuid 105 --subtensor.network finney \
   --wallet.hotkey your_hotkey
 ```
 
-## Configure
+## 3. Configure
 
-Create or export the worker environment before starting the process:
+Ask your orchestrator operator for the worker gateway origin, then export the worker environment:
 
 ```bash
-CORE_SERVER_URL=https://beamcore.b1m.ai
-WORKER_GATEWAY_URL=https://your-orchestrator-worker-gateway.example
-SUBTENSOR_NETWORK=finney
-NETUID=105
+export CORE_SERVER_URL=https://beamcore.b1m.ai
+export WORKER_GATEWAY_URL=https://your-orchestrator-worker-gateway.example
+export SUBTENSOR_NETWORK=finney
+export NETUID=105
+export CONNECTION_MODE=websocket
 ```
 
-The worker uses BeamCore HTTP for registration and signed bootstrap calls. Transfer runtime uses `WORKER_GATEWAY_URL` over WebSocket.
+`WORKER_GATEWAY_URL` is the orchestrator-owned worker gateway that serves `/ws/<worker_id>?api_key=<worker-api-key>`. It is not BeamCore and not `ORCH_GATEWAY_URL`.
 
-## Run
+## 4. Run
 
 ```bash
-cd neurons/worker
+cd actors/worker
 python worker.py --wallet.name your_coldkey --wallet.hotkey your_hotkey --subtensor.network finney
 ```
+
+The worker registers with BeamCore over HTTP, connects to the worker gateway over WebSocket, advertises `transfer.multipart`, queues valid offers, executes one task at a time, and reports `task_result` until BeamCore returns a terminal acknowledgement.
 
 ## Troubleshooting
 
 - Verify the hotkey is registered on subnet 105.
-- Verify `WORKER_GATEWAY_URL` points to the orchestrator-owned worker gateway.
 - Verify `CORE_SERVER_URL=https://beamcore.b1m.ai`.
-- If the worker starts but receives no tasks, keep it connected and confirm the gateway URL is reachable from the host.
+- Verify `WORKER_GATEWAY_URL` points to the orchestrator-owned worker gateway and is reachable from the worker host.
+- Verify the owning orchestrator is ready and has at least one connected worker.
+- If startup fails with a transport error, remove any polling-mode override.

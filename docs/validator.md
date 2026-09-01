@@ -20,7 +20,7 @@ The validator does not move transfer payloads, does not manage workers, does not
 
 ```text
 Bittensor subnet 105       BeamCore                    Validator
-metagraph                  https://beamcore.b1m.ai     neurons/validator
+metagraph                  https://beamcore.b1m.ai     actors/validator
     ▲                                │                     │
     │ set_weights                    │ epoch summary        │
     └────────────────────────────────┴─────────────────────┘
@@ -46,12 +46,12 @@ cd beam
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[validator]"
-cd neurons/validator
+cd actors/validator
 ```
 
 ## Mainnet Configuration
 
-Create `neurons/validator/.env` or set these variables in your process manager:
+Create `actors/validator/.env` or set these variables in your process manager:
 
 ```dotenv
 BEAM_VALIDATOR_WALLET_NAME=validator
@@ -74,7 +74,7 @@ Validator-specific settings use the `BEAM_VALIDATOR_` prefix. `NETUID` and `SUBT
 ## Running
 
 ```bash
-cd neurons/validator
+cd actors/validator
 source ../../.venv/bin/activate
 python main.py
 ```
@@ -184,9 +184,9 @@ After=network.target
 [Service]
 Type=simple
 User=beam
-WorkingDirectory=/srv/beam/neurons/validator
+WorkingDirectory=/srv/beam/actors/validator
 Environment="PATH=/srv/beam/.venv/bin:/usr/local/bin:/usr/bin:/bin"
-EnvironmentFile=/srv/beam/neurons/validator/.env
+EnvironmentFile=/srv/beam/actors/validator/.env
 ExecStart=/srv/beam/.venv/bin/python main.py
 Restart=always
 RestartSec=10

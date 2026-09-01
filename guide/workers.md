@@ -16,7 +16,7 @@ A worker is responsible for:
 1. Connecting to its owning orchestrator's worker gateway.
 2. Queuing every valid task offer and starting execution as capacity becomes available.
 3. Executing chunk transfers from source storage to destination storage.
-4. Reporting task results through the orchestrator-owned worker gateway.
+4. Advertising capabilities and reporting task results through the orchestrator-owned worker gateway.
 
 Workers are identified by their Bittensor hotkey. A worker is assigned to one orchestrator endpoint at a time.
 
@@ -37,6 +37,7 @@ sequenceDiagram
 
     Worker->>WorkerGateway: Connect with worker API key
     WorkerGateway-->>Worker: Session established
+    Worker-->>WorkerGateway: worker_capability_update
     BeamCore->>Orchestrator: worker_task_offer_batch
     Orchestrator->>WorkerGateway: task_offer
     WorkerGateway->>Worker: task_offer
@@ -57,9 +58,10 @@ Workers keep their runtime session on the worker gateway and use BeamCore HTTP s
 
 | Event from worker | Description                           |
 | ----------------- | ------------------------------------- |
+| `worker_capability_update` | Worker reports its canonical capability manifest |
 | `task_result`     | Worker reports chunk transfer outcome |
 
-Current public workers report version `0.2.1` and validate each offer's `minimum_worker_version` before execution. Keepalive uses WebSocket ping/pong frames.
+Current public workers advertise `transfer.multipart` in a canonical capability manifest. They do not use a pre-result acceptance or version-floor gate. Keepalive uses WebSocket ping/pong frames.
 
 ## Task Execution
 
@@ -76,8 +78,7 @@ The worker receives:
 	"urls_expires_at": "2026-05-22T01:00:00.000Z",
 	"etag_required": true,
 	"source_headers": {},
-	"dest_headers": {},
-	"minimum_worker_version": "0.2.0"
+	"dest_headers": {}
 }
 ```
 
@@ -98,7 +99,7 @@ A worker appears in an orchestrator's assignable pool when:
 | -------------------- | -------------------------------------------------------------------------- |
 | Network connectivity | Stable outbound internet to storage backends and the orchestrator endpoint |
 | Bittensor hotkey     | Used for worker identity and authentication                                |
-| Worker version        | Current public worker version `0.2.1`                                      |
+| Capability            | Default public worker advertises `transfer.multipart`                      |
 
 ## Session Displacement
 

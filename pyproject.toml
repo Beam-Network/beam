@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "beam"
-version = "0.2.1"
+version = "0.2.0"
 description = "Beam - Distributed Bandwidth Subnet on Bittensor"
 readme = "README.md"
 license = {text = "MIT"}
@@ -65,7 +65,7 @@ Repository = "https://github.com/Beam-Network/Beam"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["beam*", "neurons*"]
+include = ["beam*", "actors*"]
 exclude = ["tests*"]
 
 [tool.black]
@@ -80,7 +80,7 @@ select = ["E", "F", "I", "W"]
 ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
-"neurons/validator/main.py" = ["E402"]
+"actors/validator/main.py" = ["E402"]
 
 [tool.mypy]
 python_version = "3.10"

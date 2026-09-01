@@ -17,7 +17,8 @@ An orchestrator is responsible for:
 2. Receiving `worker_task_offer_batch` messages from BeamCore over NATS.
 3. Selecting a connected local worker for each offer.
 4. Relaying worker results to BeamCore immediately.
-5. Staying connected and ready so BeamCore can route work.
+5. Publishing aggregate capability updates from connected workers.
+6. Staying connected and ready so BeamCore can route work.
 
 ## Pools
 
@@ -42,6 +43,8 @@ sequenceDiagram
     BC-->>O: orchestrator_id, api_key
     W->>WG: connect /ws/<worker_id>?api_key=...
     O->>NATS: register { url, gateway_url, ready }
+    W->>WG: worker_capability_update
+    O->>NATS: capability_update
     BC->>NATS: worker_task_offer_batch
     NATS->>O: worker_task_offer_batch
     O->>WG: task_offer
@@ -70,14 +73,19 @@ BeamCore sends executable offers directly:
 			"urls_expires_at": "2026-06-13T12:00:00.000Z",
 			"etag_required": true,
 			"source_headers": {},
-			"dest_headers": {},
-			"minimum_worker_version": "0.2.0"
+			"dest_headers": {}
 		}
 	]
 }
 ```
 
 Each offer is assigned work for one chunk. The orchestrator keeps worker assignment local and forwards every offer to a connected worker. Local validation or execution failures are reported as failed `task_result` messages.
+
+## Capability Advertisement
+
+Workers send canonical `worker_capability_update` manifests to the orchestrator. The orchestrator aggregates fresh worker manifests and publishes `capability_update` to BeamCore. Manifest fields are `actor_type`, `actor_id`, `software_version`, `protocols`, `capabilities`, `capacity`, `observed_at`, and `expires_at`.
+
+`transfer.multipart` is the baseline normal-transfer capability. A ready orchestrator with no manifest remains eligible for normal transfer only; fresh manifests are authoritative.
 
 ## Task Results
 

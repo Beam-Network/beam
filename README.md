@@ -8,9 +8,9 @@ BeamCore operates the public HTTP API, NATS orchestrator control endpoint, trans
 
 | Component | Runs at | Responsibility |
 | --- | --- | --- |
-| Orchestrator | Operator | Connects to BeamCore over NATS, advertises a worker gateway, routes task offers to workers, and relays worker results |
+| Orchestrator | Operator | Connects to BeamCore over NATS, advertises a worker gateway and capabilities, routes task offers to workers, and relays worker results |
 | Worker gateway | Operator | WebSocket edge for worker sessions at `/ws/<worker_id>?api_key=...` |
-| Worker | Operator | Registers with BeamCore, connects to the worker gateway, executes chunk transfers, and sends `task_result` receipts |
+| Worker | Operator | Registers with BeamCore, connects to the worker gateway, advertises capabilities, executes chunk transfers, and sends `task_result` receipts |
 | Validator | Bittensor validator | Reads BeamCore epoch summaries, sets subnet weights, and posts weight proofs |
 
 Workers move object bytes directly between storage endpoints using task-scoped, short-lived source and destination URLs.
@@ -33,16 +33,17 @@ Set `ORCH_GATEWAY_URL` to a NATS endpoint using `nats://` or `tls://`. Set `WORK
 - [Orchestrator guide](docs/orchestrator.md): run a miner that receives BeamCore task batches and routes work to connected workers.
 - [Worker guide](docs/worker.md): run a worker that executes chunk transfers.
 - [Validator guide](docs/validator.md): run a validator that sets weights from BeamCore epoch summaries.
-- [Public guide](guide/intro.md): public dashboard, PRISM, transfer, and scoring docs copied from `beam-core-dashboard/docs/docs`.
+- [Public guide](guide/intro.md): public dashboard, Rooms, PRISM, transfer, and scoring docs copied from `beam-core-dashboard/docs/docs`.
 
 ## Quick Install
 
 ```bash
 git clone https://github.com/Beam-Network/beam.git
 cd beam
-python3 -m venv .venv
+python -m venv .venv
 source .venv/bin/activate
-pip install -e "."
+python -m pip install --upgrade pip
+python -m pip install -e .
 ```
 
 Install validator extras when running the validator:

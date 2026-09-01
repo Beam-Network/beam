@@ -7,7 +7,7 @@ This guide covers the public mainnet orchestrator path for Beam subnet 105. An o
 The orchestrator process:
 
 1. Registers with BeamCore using wallet-signed NATS control messages.
-2. Advertises its HTTP URL and worker gateway URL.
+2. Advertises its HTTP URL, worker gateway URL, and capabilities.
 3. Maintains an in-process worker gateway at `/ws/<worker_id>?api_key=...` unless `ORCHESTRATOR_WORKER_GATEWAY_URL` points at an externally reachable gateway origin.
 4. Receives `worker_task_offer_batch` messages from BeamCore through NATS.
 5. Selects connected local workers and sends `task_offer` messages.
@@ -62,7 +62,7 @@ btcli wallet overview --wallet.name orchestrator --subtensor.network finney
 
 ## Configure
 
-Create `neurons/orchestrator/.env` or set these variables in your process manager:
+Create `actors/orchestrator/.env` or set these variables in your process manager:
 
 ```dotenv
 WALLET_NAME=orchestrator
@@ -94,10 +94,16 @@ Important settings:
 
 The documented production path uses BeamCore HTTP registration, BeamCore NATS control, and the orchestrator-owned worker gateway.
 
+## Capabilities
+
+Workers send canonical `worker_capability_update` manifests to the orchestrator. The orchestrator aggregates fresh worker manifests and publishes `capability_update` to BeamCore after registration and on heartbeat. Manifest fields are `actor_type`, `actor_id`, `software_version`, `protocols`, `capabilities`, `capacity`, `observed_at`, and `expires_at`.
+
+`transfer.multipart` is the baseline normal-transfer capability. A worker without a fresh canonical manifest is treated as legacy baseline transfer only.
+
 ## Run
 
 ```bash
-cd neurons/orchestrator
+cd actors/orchestrator
 source ../../.venv/bin/activate
 python main.py
 ```
@@ -161,17 +167,16 @@ The gateway relays:
 | Direction | Message types |
 |---|---|
 | BeamCore/orchestrator to worker | `task_offer`, `task_result_ack` |
-| Worker to BeamCore/orchestrator | `task_result` |
+| Worker to BeamCore/orchestrator | `worker_capability_update`, `task_result` |
 
 ## Task Offer Flow
 
 ```text
 BeamCore -> NATS -> orchestrator -> worker gateway -> worker
-worker -> worker gateway -> orchestrator -> NATS -> BeamCore
 worker -> worker gateway -> orchestrator -> NATS -> BeamCore task_result
 ```
 
-Each task offer includes executable URLs, headers, `signed_url_flow`, and `minimum_worker_version`. `signed_url_v1` object-storage upload offers use direct multipart URLs. Current public workers report `0.2.1`. The orchestrator assigns every delivered offer to a connected worker. Workers start valid offers immediately and report success or failure through `task_result`;
+Each task offer includes executable URLs, headers, and `signed_url_flow`. `signed_url_v1` object-storage upload offers use direct multipart URLs. The orchestrator assigns every delivered offer to a connected worker. Workers start valid offers immediately and report success or failure through `task_result`; there is no pre-result acceptance or version-floor gate.
 
 ## Troubleshooting
 
@@ -209,9 +214,9 @@ After=network.target
 [Service]
 Type=simple
 User=beam
-WorkingDirectory=/srv/beam/neurons/orchestrator
+WorkingDirectory=/srv/beam/actors/orchestrator
 Environment="PATH=/srv/beam/.venv/bin:/usr/local/bin:/usr/bin:/bin"
-EnvironmentFile=/srv/beam/neurons/orchestrator/.env
+EnvironmentFile=/srv/beam/actors/orchestrator/.env
 ExecStart=/srv/beam/.venv/bin/python main.py
 Restart=always
 RestartSec=10
