@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     # Local Development Mode
     # ==========================================================================
 
-    # Note: LOCAL_MODE is read directly from env (no prefix) for consistency
+    # LOCAL_MODE is a shared process setting.
     local_mode: bool = False
 
     # ==========================================================================
@@ -41,8 +41,8 @@ class Settings(BaseSettings):
     wallet_hotkey: str = "default"
     wallet_path: str = "~/.bittensor/wallets"
 
-    netuid: int = Field(default=105, validation_alias="NETUID")
-    subtensor_network: str = Field(default="finney", validation_alias="SUBTENSOR_NETWORK")
+    netuid: int = Field(default=304, validation_alias="NETUID")
+    subtensor_network: str = Field(default="test", validation_alias="SUBTENSOR_NETWORK")
     subtensor_address: Optional[str] = None
 
     # ==========================================================================
@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     # Weight Setting
     # ==========================================================================
 
-    # Override via BEAM_VALIDATOR_BLOCKS_BETWEEN_WEIGHTS env var.
+    # Override via BEAM_VALIDATOR_BLOCKS_BETWEEN_WEIGHTS env var (e.g., =360 for testnet ~100s/block)
     blocks_between_weights: int = 100  # ~20 minutes on mainnet
     weight_alpha: float = 0.3  # EMA smoothing factor
 
@@ -88,10 +88,10 @@ class Settings(BaseSettings):
     score_weight_tier: float = 0.15
 
     # ==========================================================================
-    # BeamCore API (replaces direct DB access)
+    # BeamCore API
     # ==========================================================================
 
-    # BeamCore HTTP base URL for score submission
+    # URL of the BeamCore service for validator routes
     core_server_url: str = "https://beamcore.b1m.ai"
 
     # ==========================================================================
@@ -112,7 +112,7 @@ class Settings(BaseSettings):
     invalid_proof_penalty: float = 0.3  # 30% score reduction
     proof_lookback_epochs: int = 10  # How many epochs to consider for compliance
 
-    # Local-mode only fallback URL used by the standalone validator/orchestrator harness.
+    # Local-mode orchestrator URL used by the standalone validator harness.
     orchestrator_url: str = "http://localhost:8000"
 
     # ==========================================================================
@@ -121,7 +121,7 @@ class Settings(BaseSettings):
 
     sync_interval: int = 12  # Metagraph sync interval (match tempo)
     heartbeat_interval_seconds: int = 60  # BeamCore heartbeat interval
-    disable_weight_set: bool = False  # Operator guard: skip on-chain set_weights
+    disable_weight_set: bool = False  # Live-test guard: skip on-chain set_weights
     job_timeout_seconds: int = 60  # Task completion timeout
 
     # ==========================================================================
@@ -137,6 +137,6 @@ def get_settings() -> Settings:
     """Get cached settings instance"""
     import os
 
-    # Check for LOCAL_MODE without prefix (for consistency with orchestrator)
+    # Read LOCAL_MODE as a shared process setting.
     local_mode = os.getenv("LOCAL_MODE", "").lower() in ("true", "1", "yes")
     return Settings(local_mode=local_mode)

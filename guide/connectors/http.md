@@ -72,7 +72,7 @@ destination = DestConfig(
 
 ## Worker Requirements
 
-Workers receive signed or direct HTTP URLs in `task_offer` messages. They must be able to reach both endpoints from their host network.
+Workers receive signed or direct HTTP URLs in `workload.offer` messages. They must be able to reach both endpoints from their host network.
 
 For efficient parallel transfers, HTTP sources should support byte ranges:
 

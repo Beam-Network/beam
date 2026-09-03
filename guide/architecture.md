@@ -17,12 +17,12 @@ Beam is composed of four distinct layers: the client-facing **Core Server**, the
 Client
   ↓  transfer request
 Core Server ─────────────────────→ Validator
-  ↓  assign tasks                      ↓  set weights
+  ↓  assign workload offers            ↓  set weights
 Orchestrator ←── $TAO ←── Metagraph ←──┘
   ↓
-Worker Gateway
-  ↓  offer tasks
-Worker ──────────────────────────→ Storage (S3 · R2 · GCS · HTTP)
+BeamLink/WCP
+  ↓  offer workloads
+Worker ──────────────────────────→ Storage (S3 · R2 · GCS · HTTP) / Room transfer leases
 ```
 
 ---
@@ -33,7 +33,7 @@ Worker ────────────────────────�
 | ------------------ | ------------------- | ----------------------------------------------------------- |
 | **Core Server**    | Beam-operated       | API, task orchestration, transfer tracking, PRISM data      |
 | **Orchestrator**   | Operator-run        | Worker pool management, task routing, task result reporting |
-| **Worker Gateway** | Orchestrator-run    | WebSocket session hub for workers                           |
+| **BeamLink/WCP**   | Orchestrator/worker | Authenticated worker session and workload transport         |
 | **Worker**         | Operator-run        | Data movement, chunk execution, task result reporting       |
 | **Validator**      | Bittensor validator | Reads BeamCore epoch summaries and sets metagraph weights   |
 
@@ -53,15 +53,15 @@ GET  /transfers/:transfer_id/status
 
 ### Core Server → Orchestrators
 
-The Core Server and each orchestrator communicate over an authenticated **NATS control session**. Task assignments, recovery offers, readiness, and task results travel on this channel in real time.
+The Core Server and each orchestrator communicate over an authenticated **NATS control session**. Task assignments, Room offers, recovery offers, readiness, and task results travel on this channel in real time.
 
 ### Orchestrators → Workers
 
-Orchestrators operate a **Worker Gateway** — a WebSocket server that workers connect to.
+Orchestrators accept worker sessions over **BeamLink/WCP**.
 
 ### Workers to Orchestrators
 
-After completing or failing a chunk, workers send `task_result` through the orchestrator-owned worker gateway.
+After completing or failing a workload, workers send results through BeamLink/WCP.
 
 ---
 
@@ -73,4 +73,4 @@ BeamCore keeps active transfers moving by watching task-offer batches and author
 
 ## Data Plane
 
-Data never passes through the Core Server. Chunks are transferred directly from the origin (or client) to the worker, which writes to the destination storage. This keeps the Core Server lightweight and prevents it from becoming a bandwidth bottleneck.
+Data never passes through the Core Server. Chunks are transferred directly from the origin or Room transfer lease to the worker, which writes to the destination storage or Room transfer lease. This keeps the Core Server lightweight and prevents it from becoming a bandwidth bottleneck.

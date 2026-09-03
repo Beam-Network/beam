@@ -56,7 +56,7 @@ async def _update_scores(validator) -> None:
             f"final_score={final_score:.6f}"
         )
 
-    # Also update connection scores for legacy compatibility
+    # Refresh the connection score view.
     for uid in validator.connections:
         conn_results = [
             r

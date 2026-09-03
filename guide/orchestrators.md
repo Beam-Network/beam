@@ -7,16 +7,16 @@ sidebar_position: 4
 
 # Orchestrators
 
-Orchestrators operate worker pools, connect to BeamCore over NATS, route executable task offers to workers, and report worker outcomes back to BeamCore. PRISM uses BeamCore-verified throughput and reliability to determine routing share.
+Orchestrators operate worker pools, connect to BeamCore over NATS, route executable task and Room transfer offers to workers, and report worker outcomes back to BeamCore. PRISM uses BeamCore-verified throughput and reliability to determine routing share.
 
 ## Role
 
 An orchestrator is responsible for:
 
-1. Maintaining an orchestrator-owned worker gateway and worker session pool.
-2. Receiving `worker_task_offer_batch` messages from BeamCore over NATS.
+1. Maintaining a BeamLink/WCP worker session pool.
+2. Receiving `worker_task_offer_batch` and `room_task_offer_batch` messages from BeamCore over NATS.
 3. Selecting a connected local worker for each offer.
-4. Relaying worker results to BeamCore immediately.
+4. Relaying `task_result` and `room_task_result` messages to BeamCore immediately.
 5. Publishing aggregate capability updates from connected workers.
 6. Staying connected and ready so BeamCore can route work.
 
@@ -27,37 +27,37 @@ An orchestrator is responsible for:
 | Qualifying | Calibration transfers       |
 | Qualified  | Production client transfers |
 
-## Worker Gateway
+## Worker Sessions
 
-Workers connect to the orchestrator-owned worker gateway at `/ws/<worker_id>?api_key=<worker-api-key>`. The worker derives this WebSocket URL from `WORKER_GATEWAY_URL`; the orchestrator advertises the externally reachable gateway origin with `ORCHESTRATOR_WORKER_GATEWAY_URL`, or derives it from its own HTTP address when no override is set. The gateway forwards each task offer to a selected worker and relays worker results back through the orchestrator.
+Workers connect to the orchestrator over BeamLink/WCP. The orchestrator listens on `BEAM_WCP_LISTEN_ADDR` with `BEAM_WCP_TLS_CERT` and `BEAM_WCP_TLS_KEY`; workers connect to `BEAM_WCP_ADDRESS` and validate `BEAM_WCP_CA` and `BEAM_WCP_SERVER_NAME`. The orchestrator advertises `BEAMCORE_GATEWAY_URL` to BeamCore. The WCP session forwards each workload offer to a selected worker and relays worker results back through the orchestrator.
 
 ```mermaid
 sequenceDiagram
     participant BC as BeamCore
     participant NATS
     participant O as Orchestrator
-    participant WG as Worker gateway
+    participant WCP as BeamLink/WCP
     participant W as Worker
 
     O->>BC: POST /orchestrators/register (one-time)
     BC-->>O: orchestrator_id, api_key
-    W->>WG: connect /ws/<worker_id>?api_key=...
+    W->>WCP: connect with worker_id, node identity, membership
     O->>NATS: register { url, gateway_url, ready }
-    W->>WG: worker_capability_update
+    W->>WCP: capability manifest
     O->>NATS: capability_update
-    BC->>NATS: worker_task_offer_batch
-    NATS->>O: worker_task_offer_batch
-    O->>WG: task_offer
-    WG->>W: task_offer
-    W->>WG: task_result
-    WG->>O: task_result
-    O->>NATS: task_result
-    NATS->>BC: task_result
+    BC->>NATS: worker_task_offer_batch / room_task_offer_batch
+    NATS->>O: worker_task_offer_batch / room_task_offer_batch
+    O->>WCP: workload.offer
+    WCP->>W: workload.offer
+    W->>WCP: workload.result
+    WCP->>O: workload.result
+    O->>NATS: task_result / room_task_result
+    NATS->>BC: task_result / room_task_result
 ```
 
 ## Batch Offer Message
 
-BeamCore sends executable offers directly:
+BeamCore sends executable normal-transfer offers directly:
 
 ```json
 {
@@ -79,13 +79,15 @@ BeamCore sends executable offers directly:
 }
 ```
 
-Each offer is assigned work for one chunk. The orchestrator keeps worker assignment local and forwards every offer to a connected worker. Local validation or execution failures are reported as failed `task_result` messages.
+Each offer is assigned work for one chunk. The orchestrator keeps worker assignment local and forwards every offer to a connected worker as `workload.offer`. Local validation or execution failures are reported as failed `task_result` messages.
+
+Room transfer offers arrive as `room_task_offer_batch` with schema `room-transfer/v1`. The orchestrator turns each eligible lane into a `room.transfer` workload.
 
 ## Capability Advertisement
 
-Workers send canonical `worker_capability_update` manifests to the orchestrator. The orchestrator aggregates fresh worker manifests and publishes `capability_update` to BeamCore. Manifest fields are `actor_type`, `actor_id`, `software_version`, `protocols`, `capabilities`, `capacity`, `observed_at`, and `expires_at`.
+Workers send canonical capability manifests to the orchestrator over WCP. The orchestrator aggregates fresh worker manifests and publishes `capability_update` to BeamCore. Manifest fields are `actor_type`, `actor_id`, `software_version`, `protocols`, `capabilities`, `capacity`, `observed_at`, and `expires_at`.
 
-`transfer.multipart` is the baseline normal-transfer capability. A ready orchestrator with no manifest remains eligible for normal transfer only; fresh manifests are authoritative.
+`transfer.multipart` is the baseline normal-transfer capability. `room.transfer` enables Room data-transfer lanes. Fresh manifests are authoritative.
 
 ## Task Results
 
@@ -163,7 +165,7 @@ In production, `$CORE_SERVER_URL` is `https://beamcore.b1m.ai`.
 
 ## Setup
 
-Complete [Registration](#registration) first, then set `CORE_SERVER_URL`, `ORCH_GATEWAY_URL`, wallet settings, and `READY=true` when the orchestrator should receive routed work. Set `BEAMCORE_ORCHESTRATOR_API_KEY` to the API key from registration — it is the credential used to connect to NATS. Set production `ORCH_GATEWAY_URL` to `tls://orch-gateway.b1m.ai:4222`. If workers connect through a public or reverse-proxied gateway origin, set `ORCHESTRATOR_WORKER_GATEWAY_URL` to that origin and set each worker's `WORKER_GATEWAY_URL` to the same gateway origin. Keep the NATS control connection and worker gateway sessions healthy so BeamCore can deliver batches.
+Complete [Registration](#registration) first, then set `CORE_SERVER_URL`, `BEAM_ENV=prod`, `BEAMCORE_NATS_URL`, `BEAMCORE_NATS_USER`, `BEAMCORE_NATS_PASSWORD`, `BEAMCORE_GATEWAY_URL`, `BEAM_WCP_LISTEN_ADDR`, `BEAM_WCP_TLS_CERT`, `BEAM_WCP_TLS_KEY`, and wallet settings. Set production `BEAMCORE_NATS_URL` to `tls://orch-gateway.b1m.ai:4222`. Workers connect with `BEAM_WCP_ADDRESS`, `BEAM_WCP_CA`, `BEAM_WCP_SERVER_NAME`, and their orchestrator membership. Keep the NATS control connection and WCP worker sessions healthy so BeamCore can deliver batches.
 
 ## Dashboard
 

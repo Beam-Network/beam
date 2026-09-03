@@ -1,0 +1,105 @@
+syntax = "proto3";
+
+package beam.control.v1;
+
+option go_package = "github.com/Beam-Network/beam/gen/go/control/v1;controlv1";
+
+import "orchestrator/v1/orchestrator.proto";
+import "circuit/v1/circuit.proto";
+import "evidence/v1/evidence.proto";
+import "google/protobuf/timestamp.proto";
+import "workload/v1/workload.proto";
+
+message WorkerHello {
+  beam.workload.v1.WorkloadIdentity identity = 1;
+  bytes orchestrator_delegation = 2;
+  string software_version = 3;
+  uint32 protocol_version = 4;
+  repeated string capabilities = 5;
+  beam.workload.v1.ResourceRequirements total_resources = 6;
+  uint64 last_plan_version = 7;
+  uint64 last_event_cursor = 8;
+  bytes node_public_key = 9;
+  bytes challenge_signature = 10;
+  string circuit_endpoint = 11;
+}
+
+message OrchestratorChallenge {
+  string orchestrator_id = 1;
+  bytes nonce = 2;
+  google.protobuf.Timestamp sent_at = 3;
+}
+message OrchestratorWelcome {
+  string orchestrator_id = 1;
+  string session_id = 2;
+  uint32 heartbeat_interval_seconds = 3;
+  uint64 config_epoch = 4;
+  uint64 current_plan_version = 5;
+  bytes trust_bundle = 6;
+}
+
+message WorkerHeartbeat {
+  beam.orchestrator.v1.WorkerCapacity capacity = 1;
+  uint64 applied_plan_version = 2;
+  uint64 event_cursor = 3;
+  string circuit_endpoint = 4;
+}
+
+message AssignmentOffer {
+  beam.workload.v1.WorkloadOffer workload = 1;
+}
+
+message AssignmentDecision {
+  beam.workload.v1.WorkloadDecision decision = 1;
+}
+
+message AssignmentCommit {
+  beam.workload.v1.WorkloadCommit commit = 1;
+}
+
+message AssignmentCancel {
+  string workload_id = 1;
+  string attempt_id = 2;
+}
+
+message WorkerDrain {
+  string reason = 1;
+  google.protobuf.Timestamp deadline = 2;
+}
+
+message ControlError {
+  string code = 1;
+  string message = 2;
+}
+
+message ReceiptAcknowledgement {
+  string receipt_id = 1;
+  google.protobuf.Timestamp acknowledged_at = 2;
+}
+
+message ControlEnvelope {
+  string message_id = 1;
+  google.protobuf.Timestamp sent_at = 2;
+  string reply_to = 3;
+  uint64 sequence = 4;
+  uint64 ack = 5;
+  oneof body {
+    OrchestratorChallenge orchestrator_challenge = 9;
+    WorkerHello worker_hello = 10;
+    OrchestratorWelcome orchestrator_welcome = 11;
+    WorkerHeartbeat worker_heartbeat = 12;
+    AssignmentOffer assignment_offer = 13;
+    AssignmentDecision assignment_decision = 14;
+    AssignmentCommit assignment_commit = 15;
+    beam.workload.v1.WorkloadResult workload_result = 16;
+    AssignmentCancel assignment_cancel = 17;
+    WorkerDrain worker_drain = 18;
+    ControlError control_error = 19;
+    beam.workload.v1.WorkloadProgress workload_progress = 20;
+    beam.circuit.v1.CircuitPlan circuit_plan = 21;
+    beam.circuit.v1.CircuitRevocation circuit_revocation = 22;
+    beam.evidence.v1.Receipt evidence_receipt = 23;
+    ReceiptAcknowledgement receipt_acknowledgement = 24;
+    beam.workload.v1.WorkloadCheckpoint workload_checkpoint = 25;
+  }
+}

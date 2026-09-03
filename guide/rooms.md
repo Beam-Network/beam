@@ -9,7 +9,7 @@ sidebar_position: 4
 
 Rooms give applications a live place to coordinate work for a shared session. A room can carry messages, commands, streams, media, and room-scoped transfer work through participant worker pools.
 
-Participants support Rooms by keeping an orchestrator ready, workers connected, a worker gateway reachable, and capability listings accurate.
+Participants support Rooms by keeping an orchestrator ready, workers connected over BeamLink/WCP, and capability listings accurate.
 
 ---
 
@@ -18,11 +18,11 @@ Participants support Rooms by keeping an orchestrator ready, workers connected, 
 Room work uses the same participant path as transfers:
 
 ```text
-application -> Beam -> orchestrator -> worker gateway -> worker
+application -> Beam -> orchestrator -> BeamLink/WCP -> worker
 ```
 
 1. Your orchestrator stays registered, connected, and ready.
-2. Your worker gateway stays reachable by your workers.
+2. Your workers keep active WCP sessions with the orchestrator.
 3. Your workers advertise the room capabilities they support.
 4. Your workers accept assignments, run workloads, and report progress.
 5. Beam keeps room sessions moving through active assignments and recovery paths.
@@ -47,7 +47,7 @@ application -> Beam -> orchestrator -> worker gateway -> worker
 An orchestrator is ready for room work when:
 
 - it is registered, connected, and ready
-- its worker gateway is reachable by workers
+- its workers are connected over BeamLink/WCP
 - connected workers advertise the required room capability
 - the worker pool has available capacity
 

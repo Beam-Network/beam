@@ -337,19 +337,18 @@ class Validator:
         epoch_length_blocks = 360
         current_epoch = current_block // epoch_length_blocks
 
-        # Sync if epoch changed or if current epoch is obviously wrong (old calculation)
-        # Old calculation used block//25 which gave epochs like 258007 instead of ~17925
+        # Sync when the epoch advances or when a stale local epoch marker is present.
         should_sync = (
             current_epoch > self.current_epoch  # Normal case: new epoch
-            or self.current_epoch > 100_000  # Old epoch calculation was used
+            or self.current_epoch > 100_000
         )
 
         if should_sync and current_epoch != self.current_epoch:
-            previous_epoch = self.current_epoch
+            prior_epoch = self.current_epoch
             self.current_epoch = current_epoch
             self.epoch_start_block = current_epoch * epoch_length_blocks
 
-            logger.info("══════════════ EPOCH %s ══════════════ (prev=%s)", self.current_epoch, previous_epoch)
+            logger.info("══════════════ EPOCH %s ══════════════ (prior=%s)", self.current_epoch, prior_epoch)
             self.tasks_this_epoch = 0
 
             # Reset PoB verification stats for the new epoch

@@ -1,30 +1,24 @@
 # Beam Worker
 
-Workers register with BeamCore, connect to an orchestrator-owned worker gateway, execute transfer chunks, advertise capabilities, and report task results.
+The Go worker connects to an orchestrator over BeamLink/WCP, advertises capabilities, executes `transfer.multipart` and `room.transfer`, and reports results.
 
 ## Requirements
 
-- Python 3.10-3.12
-- A Bittensor wallet hotkey registered on subnet 105
-- Stable upload and download bandwidth
-- Network access to BeamCore, the worker gateway, and task storage URLs
+- Go 1.24+
+- Bittensor worker hotkey registered on subnet 105
+- BeamCore worker registration response with `worker_id`
+- Orchestrator WCP address, CA, server name, and membership
 
 ## Install
-
-Run installation from the repository root, the directory that contains `pyproject.toml`:
 
 ```bash
 git clone https://github.com/Beam-Network/beam.git
 cd beam
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e .
+mkdir -p bin
+go build -o bin/beam-worker ./cmd/beam-worker
 ```
 
 ## Register
-
-Register the worker hotkey on Beam subnet 105 before starting the worker:
 
 ```bash
 btcli subnet register --netuid 105 --subtensor.network finney \
@@ -32,41 +26,51 @@ btcli subnet register --netuid 105 --subtensor.network finney \
   --wallet.hotkey your_hotkey
 ```
 
-## Configure
-
-Create or export these environment variables before starting the process:
+Register the worker with BeamCore. Sign `<worker_hotkey_ss58>:<public_ip>:9000` with the worker hotkey:
 
 ```bash
-export CORE_SERVER_URL=https://beamcore.b1m.ai
-export WORKER_GATEWAY_URL=https://your-orchestrator-worker-gateway.example
-export SUBTENSOR_NETWORK=finney
-export NETUID=105
-export CONNECTION_MODE=websocket
+curl -X POST https://beamcore.b1m.ai/workers/register \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "hotkey": "worker_hotkey_ss58",
+    "coldkey": "worker_coldkey_ss58",
+    "ip": "worker_public_ip",
+    "port": 9000,
+    "claimed_bandwidth_mbps": 100,
+    "signature": "0x..."
+  }'
 ```
 
-`WORKER_GATEWAY_URL` must point to the orchestrator-owned worker gateway origin. It is not BeamCore and not `ORCH_GATEWAY_URL`. The worker converts it to `ws(s)://.../ws/<worker_id>?api_key=<worker-api-key>`.
+Store the returned `worker_id` and `api_key`.
+
+## Join
+
+```bash
+./bin/beam-worker node-id --node-key data/worker/node.key
+```
+
+Register the printed node identity with the orchestrator:
+
+```bash
+curl -X POST http://127.0.0.1:8781/v1/orchestrator/memberships \
+  -H 'Content-Type: application/json' \
+  -d '{"OrchestratorID":"orchestrator-id","WorkerID":"worker-id","NodeID":"worker-node-id","Status":"active"}'
+```
 
 ## Run
 
 ```bash
-cd actors/worker
-python worker.py --wallet.name your_coldkey --wallet.hotkey your_hotkey --subtensor.network finney
+export BEAM_WORKER_ID=worker-id
+export BEAM_ORCHESTRATOR_ID=orchestrator-id
+export BEAM_WCP_ADDRESS=orchestrator.example.com:8782
+export BEAM_WCP_CA=/path/to/wcp-ca.pem
+export BEAM_WCP_SERVER_NAME=orchestrator.example.com
+
+./bin/beam-worker serve \
+  --node-key data/worker/node.key \
+  --capabilities transfer.multipart,room.transfer
 ```
 
-## What The Worker Does
+## More Detail
 
-- Registers with BeamCore over HTTP.
-- Connects to the worker gateway over WebSocket.
-- Advertises the `transfer.multipart` capability.
-- Queues valid task offers and executes one task at a time.
-- Sends one `task_result` for each completed or failed task and retries until BeamCore returns a terminal acknowledgement.
-
-Workers do not send a pre-result acceptance message and do not reject offers based on a version floor.
-
-## Troubleshooting
-
-- Confirm the hotkey is registered on subnet 105.
-- Confirm `CORE_SERVER_URL=https://beamcore.b1m.ai`.
-- Confirm `WORKER_GATEWAY_URL` is reachable from the worker host.
-- Confirm the owning orchestrator has `READY=true` and at least one connected worker.
-- If startup fails with a transport error, remove any polling-mode override.
+See [../../docs/worker.md](../../docs/worker.md).

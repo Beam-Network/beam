@@ -93,7 +93,7 @@ class SubnetCoreClient:
             req_kwargs = dict(kwargs)
             return await client.request(method, f"{self.base_url}{path}", headers=headers, **req_kwargs)
 
-        # Default (e.g. legacy paths): try signature if wallet present, else minimal
+        # Build auth headers for BeamCore validator helper routes.
         try:
             headers = self._signed_headers(action) if self.wallet else {"X-Validator-Hotkey": self.validator_hotkey}
         except RuntimeError:

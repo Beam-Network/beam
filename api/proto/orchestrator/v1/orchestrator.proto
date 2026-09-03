@@ -1,0 +1,103 @@
+syntax = "proto3";
+
+package beam.orchestrator.v1;
+
+option go_package = "github.com/Beam-Network/beam/gen/go/orchestrator/v1;orchestratorv1";
+
+import "google/protobuf/timestamp.proto";
+import "workload/v1/workload.proto";
+
+message Orchestrator {
+  string orchestrator_id = 1;
+  string hotkey = 2;
+  uint32 netuid = 3;
+  string status = 4;
+  uint64 manifest_version = 5;
+}
+message OrchestratorMembership {
+  string orchestrator_id = 1;
+  string worker_id = 2;
+  string node_id = 3;
+  string role = 4;
+  string status = 5;
+  bytes delegation = 6;
+  google.protobuf.Timestamp expires_at = 7;
+}
+
+message WorkerCapacity {
+  string worker_id = 1;
+  string node_id = 2;
+  repeated string capabilities = 3;
+  beam.workload.v1.ResourceRequirements total = 4;
+  beam.workload.v1.ResourceRequirements available = 5;
+  string status = 6;
+  google.protobuf.Timestamp observed_at = 7;
+  string circuit_endpoint = 8;
+}
+
+message TransferAccessMetric {
+  string worker_id = 1;
+  double rtt_millis = 2;
+  double throughput_mbps = 3;
+}
+
+message WorkerLinkMetric {
+  string from_worker_id = 1;
+  string to_worker_id = 2;
+  double rtt_millis = 3;
+  double throughput_mbps = 4;
+  double loss_ppm = 5;
+  google.protobuf.Timestamp observed_at = 6;
+}
+
+message DistributionDestination {
+  string destination_id = 1;
+  beam.workload.v1.HttpEndpoint endpoint = 2;
+  repeated TransferAccessMetric access = 3;
+}
+
+message DistributionRouteRequest {
+  string transfer_id = 1;
+  beam.workload.v1.HttpEndpoint source = 2;
+  int64 offset = 3;
+  int64 length = 4;
+  string expected_sha256 = 5;
+  repeated DistributionDestination destinations = 6;
+  repeated TransferAccessMetric source_access = 7;
+  repeated WorkerLinkMetric links = 8;
+  beam.workload.v1.ResourceRequirements resources = 9;
+  int64 ttl_seconds = 10;
+}
+
+message DistributionRouteNode {
+  string worker_id = 1;
+  string node_id = 2;
+  string circuit_endpoint = 3;
+  string parent_worker_id = 4;
+  repeated string children = 5;
+  repeated beam.workload.v1.DistributionDestination destinations = 6;
+  double arrival_millis = 7;
+}
+
+message DistributionRoutePlan {
+  string transfer_id = 1;
+  string workload_id = 2;
+  string circuit_id = 3;
+  string root_worker_id = 4;
+  repeated DistributionRouteNode nodes = 5;
+  double estimated_completion_millis = 6;
+  uint64 plan_version = 7;
+  google.protobuf.Timestamp expires_at = 8;
+}
+
+message OrchestratorManifest {
+  string orchestrator_id = 1;
+  uint64 version = 2;
+  repeated string regions = 3;
+  repeated string capabilities = 4;
+  beam.workload.v1.ResourceRequirements total = 5;
+  beam.workload.v1.ResourceRequirements available = 6;
+  repeated string gateways = 7;
+  google.protobuf.Timestamp expires_at = 8;
+  bytes signature = 9;
+}

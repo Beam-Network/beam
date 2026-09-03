@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package beam.evidence.v1;
+
+option go_package = "github.com/Beam-Network/beam/gen/go/evidence/v1;evidencev1";
+
+import "google/protobuf/timestamp.proto";
+
+enum ReceiptType {
+  RECEIPT_TYPE_UNSPECIFIED = 0;
+  RECEIPT_TYPE_WORKLOAD = 1;
+  RECEIPT_TYPE_TRANSFER = 2;
+  RECEIPT_TYPE_TUNNEL = 3;
+  RECEIPT_TYPE_ROOM = 4;
+  RECEIPT_TYPE_CIRCUIT = 5;
+}
+
+message Commitment {
+  string name = 1;
+  string value = 2;
+}
+
+message Receipt {
+  uint32 format_version = 1;
+  string receipt_id = 2;
+  ReceiptType type = 3;
+  string event = 4;
+  string orchestrator_id = 5;
+  string worker_id = 6;
+  string node_id = 7;
+  string instance_id = 8;
+  string workload_id = 9;
+  string attempt_id = 10;
+  string circuit_id = 11;
+  string capability = 12;
+  string state = 13;
+  uint64 plan_version = 14;
+  int64 bytes_processed = 15;
+  repeated Commitment commitments = 16;
+  google.protobuf.Timestamp started_at = 17;
+  google.protobuf.Timestamp completed_at = 18;
+  google.protobuf.Timestamp issued_at = 19;
+  bytes signer_public_key = 20;
+  bytes node_signature = 21;
+}
+
+// PaymentEvidence is the Beam Orchestrator's durable, canonical proof that a
+// successful BeamCore transfer is eligible for payment. Embedded receipts
+// remain independently verifiable Worker signatures.
+message PaymentEvidence {
+  uint32 format_version = 1;
+  string evidence_id = 2;
+  string orchestrator_id = 3;
+  string worker_id = 4;
+  string task_id = 5;
+  string offer_id = 6;
+  bool success = 7;
+  bool required_payment = 8;
+  int64 bytes_transferred = 9;
+  string chunk_hash = 10;
+  google.protobuf.Timestamp started_at = 11;
+  google.protobuf.Timestamp completed_at = 12;
+  repeated string receipt_ids = 13;
+  bytes receipt_merkle_root = 14;
+  repeated Receipt receipts = 15;
+  string legacy_hotkey = 16;
+  string legacy_message = 17;
+  bytes worker_signature = 18;
+  bytes attestation_public_key = 19;
+  bytes orchestrator_attestation = 20;
+  google.protobuf.Timestamp issued_at = 21;
+}

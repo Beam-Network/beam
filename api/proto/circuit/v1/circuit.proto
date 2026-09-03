@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package beam.circuit.v1;
+
+option go_package = "github.com/Beam-Network/beam/gen/go/circuit/v1;circuitv1";
+
+import "google/protobuf/timestamp.proto";
+
+message CircuitPeer {
+  string worker_id = 1;
+  string node_id = 2;
+  string endpoint = 3;
+  repeated string roles = 4;
+  repeated string capabilities = 5;
+  repeated string standby_endpoints = 6;
+}
+
+message CircuitPlan {
+  string circuit_id = 1;
+  string workload_id = 2;
+  uint64 plan_version = 3;
+  bytes token = 4;
+  repeated CircuitPeer peers = 5;
+  google.protobuf.Timestamp expires_at = 6;
+  google.protobuf.Timestamp issued_at = 7;
+}
+
+message CircuitRevocation {
+  string circuit_id = 1;
+  uint64 plan_version = 2;
+  string reason = 3;
+  string workload_id = 4;
+  google.protobuf.Timestamp revoked_at = 5;
+}

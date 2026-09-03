@@ -27,7 +27,7 @@ A Beam transfer moves data from a source to a destination by splitting it into c
     Client->>CoreServer: POST /transfers/distribute
 
     CoreServer->>Orchestrator: Assign transfer task
-    Orchestrator->>Worker: Offer chunk task
+    Orchestrator->>Worker: Offer chunk task over BeamLink/WCP
 
     alt Worker completes assigned work
         Worker->>Storage: Upload chunk
@@ -91,7 +91,7 @@ Tasks are dispatched to the orchestrator's control plane connection.
 
 ### 3. Worker Execution
 
-The orchestrator assigns each task to an available worker via the Worker Gateway WebSocket:
+The orchestrator assigns each task to an available worker over BeamLink/WCP:
 
 1. Download the source chunk
 2. Write it to the destination backend
@@ -146,7 +146,7 @@ When an active task-offer batch has a **5 second** gap between valid task result
 Recovery follows the same orchestrator flow as initial delivery:
 
 1. Eligible orchestrators receive `worker_task_offer_batch` with executable task offers.
-2. Each orchestrator selects connected local workers and forwards individual `task_offer` messages.
+2. Each orchestrator selects connected local workers and forwards individual workload offers over BeamLink/WCP.
 3. Workers report success or failure with `task_result`; orchestrators relay each result immediately until BeamCore returns a terminal acknowledgement.
 
 Qualifying transfers draw recovery candidates from the qualifying pool. Qualified transfers draw from the qualified pool.

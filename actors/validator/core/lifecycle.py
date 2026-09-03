@@ -29,7 +29,7 @@ async def initialize(validator) -> None:
     logger.debug("Validator node initialized")
 
 async def _initialize_local_mode(validator) -> None:
-    """Initialize validator in local development mode (no Bittensor connection)"""
+    """Initialize validator in local development mode."""
     # Create a mock wallet for local testing
     validator.wallet = bt.Wallet(
         name=validator.settings.wallet_name,
@@ -170,7 +170,7 @@ async def _initialize_bittensor_mode(validator) -> None:
         except Exception as _exc:
             logger.debug("Could not read LastUpdate from chain: %s", _exc)
 
-    # Cache the chain's weights_rate_limit so we can compute wait times without hitting chain
+    # Cache the chain's weights_rate_limit for local wait calculations.
     if validator.subtensor is not None:
         try:
             validator._chain_weights_rate_limit = validator.subtensor.weights_rate_limit(validator.settings.netuid) or 0
@@ -198,15 +198,15 @@ async def _check_registration(validator) -> None:
         logger.warning(f"Hotkey {validator.hotkey} not registered on subnet")
 
 def _get_uid_for_hotkey(validator, hotkey: str) -> Optional[int]:
-    """Get UID for a hotkey using Fiber or metagraph fallback."""
-    # Try Fiber first (if available and cached)
+    """Get UID for a hotkey using Fiber cache, then metagraph."""
+    # Use Fiber first when cached.
     if validator._fiber_nodes:
         node = validator._fiber_nodes.get(hotkey)
         if node:
             logger.debug(f"_get_uid_for_hotkey: {hotkey[:16]}... -> UID {node.uid} (via Fiber)")
             return node.uid
 
-    # Fallback to metagraph
+    # Use metagraph as the next source.
     if validator.metagraph and hotkey in validator.metagraph.hotkeys:
         uid = validator.metagraph.hotkeys.index(hotkey)
         logger.debug(f"_get_uid_for_hotkey: {hotkey[:16]}... -> UID {uid} (via metagraph)")
@@ -226,13 +226,13 @@ def _get_node_info(validator, hotkey: str) -> Optional[FiberNode]:
         else:
             logger.debug(f"_get_node_info: no Fiber node for {hotkey[:16]}...")
         return node
-    logger.debug(f"_get_node_info: no Fiber nodes available, cannot look up {hotkey[:16]}...")
+    logger.debug(f"_get_node_info: Fiber node cache empty for {hotkey[:16]}...")
     return None
 
 async def start(validator) -> None:
     """Start the Validator node"""
     if not validator.is_registered:
-        logger.error("Cannot start: not registered on subnet")
+        logger.error("Validator hotkey registration required for subnet start")
         return
 
     # Initialize redundancy system
@@ -381,11 +381,11 @@ async def _main_loop(validator) -> None:
 
 
             # Generate and send bandwidth challenges
-            # DISABLED: Challenges temporarily disabled - endpoint deprecated
+            # BeamCore manages production challenge delivery.
             # await validator._generate_and_send_challenges()
 
             # Issue additional challenges
-            # DISABLED: Challenges temporarily disabled - endpoint deprecated
+            # BeamCore manages production challenge delivery.
             # await validator._issue_challenges()
 
             # Collect and verify local proof submissions

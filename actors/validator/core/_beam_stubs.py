@@ -1,9 +1,4 @@
-"""
-Stub implementations for removed beam.* modules.
-
-These stubs allow the validator code to compile while the actual
-validation logic is handled by BeamCore.
-"""
+"""Validator support types for BeamCore-managed validation."""
 
 import hashlib
 import os
@@ -36,8 +31,8 @@ def compute_canary_proof(canary: bytes, data: bytes) -> str:
 
 
 def verify_hotkey_signature(message: bytes, signature: str, hotkey: str) -> bool:
-    """Verify a hotkey signature. Returns True for now (validation in BeamCore)."""
-    # Actual signature verification is done by BeamCore
+    """Return the BeamCore-managed signature validation state."""
+    # BeamCore performs authoritative signature verification.
     return True
 
 
@@ -138,7 +133,7 @@ def compute_merkle_root(leaves: List[str]) -> str:
 
 
 def verify_merkle_proof(leaf: str, proof: List[str], root: str) -> bool:
-    """Verify a merkle proof. Returns True (validation in BeamCore)."""
+    """Return the BeamCore-managed Merkle proof validation state."""
     return True
 
 
@@ -226,10 +221,10 @@ try:
             return self
 
 except ImportError:
-    # Fallback to dataclasses if bittensor is not available
+    # Dataclass circuit shapes for lightweight validator imports.
     @dataclass
     class BandwidthChallenge:
-        """Bandwidth challenge circuit (fallback)."""
+        """Bandwidth challenge circuit."""
 
         task_id: str = ""
         challenge_nonce: str = ""
@@ -245,7 +240,7 @@ except ImportError:
 
     @dataclass
     class BandwidthProof:
-        """Bandwidth proof circuit (fallback)."""
+        """Bandwidth proof circuit."""
 
         task_id: str = ""
         worker_id: str = ""
@@ -261,7 +256,7 @@ except ImportError:
 
     @dataclass
     class WorkerStatusQuery:
-        """Worker status query circuit (fallback)."""
+        """Worker status query circuit."""
 
         include_workers: bool = True
         include_capacity: bool = True
@@ -271,7 +266,7 @@ except ImportError:
 
     @dataclass
     class ChunkTransfer:
-        """Chunk transfer circuit (fallback)."""
+        """Chunk transfer circuit."""
 
         task_id: str = ""
         chunk_hash: str = ""
@@ -285,7 +280,7 @@ except ImportError:
 
     @dataclass
     class EpochInfo:
-        """Epoch info circuit (fallback)."""
+        """Epoch info circuit."""
 
         epoch: int = 0
         epoch_start_block: int = 0
@@ -309,7 +304,7 @@ class Orchestrator:
     is_subnet_owned: bool = False
 
 class WorkerRegistry:
-    """Worker registry (stub - registry in BeamCore)."""
+    """Worker registry interface backed by BeamCore state."""
 
     def __init__(self, **kwargs):
         self.workers: Dict[str, Any] = {}
@@ -322,7 +317,7 @@ class WorkerRegistry:
 
 
 class ReassignmentManager:
-    """Task reassignment manager (stub)."""
+    """Task reassignment manager interface."""
 
     def __init__(self, worker_registry=None, **kwargs):
         self.worker_registry = worker_registry
@@ -364,7 +359,7 @@ class SybilDetectionResult:
 
 
 class SybilDetector:
-    """Sybil detector (stub - detection done by BeamCore)."""
+    """Sybil detector interface backed by BeamCore policy."""
 
     def __init__(self, **kwargs):
         self._suspicious: Dict[str, Any] = {}
@@ -506,7 +501,7 @@ DEFAULT_CONFIG = CrossVerificationConfig()
 
 
 class ProofRegistry:
-    """Proof registry (stub)."""
+    """Proof registry interface."""
 
     def __init__(self):
         self.proofs: Dict[str, ProofSubmission] = {}

@@ -1,0 +1,451 @@
+package connectors
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"strings"
+	"time"
+
+	"github.com/Beam-Network/beam/internal/orchestrator/dispatch"
+	"github.com/Beam-Network/beam/internal/orchestrator/roomtransfer"
+	"github.com/Beam-Network/beam/internal/orchestrator/roomworkloads"
+	beamcoreadapter "github.com/Beam-Network/beam/internal/workload/adapters/beamcore"
+	"github.com/Beam-Network/beam/internal/workload/contracts"
+	"github.com/Beam-Network/beam/internal/workload/domain"
+	"github.com/nats-io/nats.go"
+	"github.com/vmihailenco/msgpack/v5"
+)
+
+const orchestratorControlSchema = "orchestrator-control/v1"
+
+type orchestratorControlEnvelope struct {
+	MessageID     string `msgpack:"message_id"`
+	SchemaVersion string `msgpack:"schema_version"`
+	Environment   string `msgpack:"environment"`
+	Hotkey        string `msgpack:"hotkey"`
+	MessageType   string `msgpack:"message_type"`
+	RequestID     string `msgpack:"request_id,omitempty"`
+	OccurredAt    string `msgpack:"occurred_at"`
+	Producer      string `msgpack:"producer"`
+	Payload       any    `msgpack:"payload"`
+}
+
+type roomControl struct {
+	config    NATSConfig
+	conn      *nats.Conn
+	rooms     *roomtransfer.Service
+	workloads *roomworkloads.Manager
+	tasks     *dispatch.Service
+}
+
+func newRoomControl(config NATSConfig, conn *nats.Conn, rooms *roomtransfer.Service,
+	workloads *roomworkloads.Manager, tasks *dispatch.Service) *roomControl {
+	if config.Environment == "" {
+		config.Environment = "prod"
+	}
+	if config.ControlPrefix == "" {
+		config.ControlPrefix = "beam.orch.control"
+	}
+	if config.RequestTimeout <= 0 {
+		config.RequestTimeout = 10 * time.Second
+	}
+	config.Hotkey = strings.TrimSpace(config.Hotkey)
+	return &roomControl{config: config, conn: conn, rooms: rooms, workloads: workloads, tasks: tasks}
+}
+
+func (control *roomControl) enabled() bool {
+	return control != nil && control.conn != nil && control.tasks != nil && control.config.Hotkey != "" && control.config.GatewayURL != ""
+}
+
+func (control *roomControl) run(ctx context.Context) error {
+	if !control.enabled() {
+		return nil
+	}
+	if err := control.request(ctx, "register", map[string]any{"gateway_url": control.config.GatewayURL, "ready": true}); err != nil {
+		return fmt.Errorf("register Orchestrator: %w", err)
+	}
+	if err := control.publishCapability(ctx); err != nil {
+		return err
+	}
+	messages := make(chan *nats.Msg, 256)
+	normalOfferSubscription, err := control.conn.ChanSubscribe(control.subject("runtime", "worker_task_offer_batch"), messages)
+	if err != nil {
+		return err
+	}
+	defer normalOfferSubscription.Unsubscribe()
+	var offerSubscription, cancelSubscription, workloadOfferSubscription, workloadCancelSubscription *nats.Subscription
+	if control.rooms != nil {
+		offerSubscription, err = control.conn.ChanSubscribe(control.subject("runtime", "room_task_offer_batch"), messages)
+		if err != nil {
+			return err
+		}
+		defer offerSubscription.Unsubscribe()
+		cancelSubscription, err = control.conn.ChanSubscribe(control.subject("runtime", "room_task_cancel"), messages)
+		if err != nil {
+			return err
+		}
+		defer cancelSubscription.Unsubscribe()
+	}
+	if control.workloads != nil {
+		workloadOfferSubscription, err = control.conn.ChanSubscribe(control.subject("runtime", "room_workload_offer"), messages)
+		if err != nil {
+			return err
+		}
+		defer workloadOfferSubscription.Unsubscribe()
+		workloadCancelSubscription, err = control.conn.ChanSubscribe(control.subject("runtime", "room_workload_cancel"), messages)
+		if err != nil {
+			return err
+		}
+		defer workloadCancelSubscription.Unsubscribe()
+	}
+	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
+	defer stopHeartbeat()
+	heartbeatErrors := make(chan error, 1)
+	go control.runHeartbeat(heartbeatCtx, heartbeatErrors)
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case err := <-heartbeatErrors:
+			return err
+		case message := <-messages:
+			if message == nil {
+				return nil
+			}
+			if strings.HasSuffix(message.Subject, ".worker_task_offer_batch") {
+				if err := control.handleTaskOfferBatch(ctx, message.Data); err != nil {
+					log.Printf("ignore invalid BeamCore task offer: %v", err)
+				}
+			} else if strings.HasSuffix(message.Subject, ".room_workload_offer") {
+				if err := control.handleRoomWorkloadOffer(ctx, message.Data); err != nil {
+					log.Printf("ignore invalid BeamCore room workload offer: %v", err)
+				}
+			} else if strings.HasSuffix(message.Subject, ".room_workload_cancel") {
+				if err := control.handleRoomWorkloadCancel(ctx, message.Data); err != nil {
+					log.Printf("ignore invalid BeamCore room workload cancellation: %v", err)
+				}
+			} else if strings.HasSuffix(message.Subject, ".room_task_cancel") {
+				if err := control.handleCancel(ctx, message.Data); err != nil {
+					log.Printf("ignore invalid BeamCore room cancellation: %v", err)
+				}
+			} else if err := control.handleOffer(ctx, message.Data); err != nil {
+				log.Printf("ignore invalid BeamCore room transfer offer: %v", err)
+			}
+		}
+	}
+}
+
+// runHeartbeat keeps routing liveness independent from workload admission.
+// Room path provisioning may involve remote agents and must not prevent the
+// orchestrator from renewing its short-lived BeamCore capability manifest.
+func (control *roomControl) runHeartbeat(ctx context.Context, failures chan<- error) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := control.request(ctx, "heartbeat", map[string]any{}); err != nil {
+				reportHeartbeatFailure(ctx, failures, err)
+				return
+			}
+			if err := control.publishCapability(ctx); err != nil {
+				reportHeartbeatFailure(ctx, failures, err)
+				return
+			}
+		}
+	}
+}
+
+func reportHeartbeatFailure(ctx context.Context, failures chan<- error, err error) {
+	select {
+	case failures <- err:
+	case <-ctx.Done():
+	}
+}
+
+func (control *roomControl) handleRoomWorkloadOffer(ctx context.Context, encoded []byte) error {
+	payload, err := control.roomWorkloadPayload(encoded, "room_workload_offer")
+	if err != nil {
+		return err
+	}
+	return control.workloads.Submit(ctx, payload)
+}
+
+func (control *roomControl) handleRoomWorkloadCancel(ctx context.Context, encoded []byte) error {
+	payload, err := control.roomWorkloadPayload(encoded, "room_workload_cancel")
+	if err != nil {
+		return err
+	}
+	var cancel contracts.RoomWorkloadCancelWire
+	if err := decodeStrictRoomWire(payload, &cancel); err != nil {
+		return err
+	}
+	return control.workloads.Cancel(ctx, cancel)
+}
+
+func (control *roomControl) roomWorkloadPayload(encoded []byte, messageType string) ([]byte, error) {
+	if control.workloads == nil {
+		return nil, errors.New("generic room workload service is missing")
+	}
+	var envelope orchestratorControlEnvelope
+	if err := msgpack.Unmarshal(encoded, &envelope); err != nil {
+		return nil, err
+	}
+	if envelope.SchemaVersion != orchestratorControlSchema || envelope.Environment != control.config.Environment ||
+		strings.TrimSpace(envelope.Hotkey) != control.config.Hotkey || envelope.MessageType != messageType ||
+		envelope.Producer != "transfer-runtime" {
+		return nil, errors.New("BeamCore room workload envelope is invalid")
+	}
+	return json.Marshal(envelope.Payload)
+}
+
+func (control *roomControl) handleTaskOfferBatch(ctx context.Context, encoded []byte) error {
+	var envelope orchestratorControlEnvelope
+	if err := msgpack.Unmarshal(encoded, &envelope); err != nil {
+		return err
+	}
+	if envelope.SchemaVersion != orchestratorControlSchema || envelope.Environment != control.config.Environment ||
+		strings.TrimSpace(envelope.Hotkey) != control.config.Hotkey || envelope.MessageType != "worker_task_offer_batch" ||
+		envelope.Producer != "transfer-runtime" {
+		return errors.New("BeamCore task offer envelope is invalid")
+	}
+	payload, err := json.Marshal(envelope.Payload)
+	if err != nil {
+		return err
+	}
+	var batch struct {
+		BatchID string                      `json:"batch_id"`
+		Offers  []beamcoreadapter.TaskOffer `json:"offers"`
+	}
+	if err := json.Unmarshal(payload, &batch); err != nil {
+		return err
+	}
+	if batch.BatchID == "" || len(batch.Offers) == 0 {
+		return errors.New("BeamCore task offer batch is empty")
+	}
+	for _, offer := range batch.Offers {
+		spec, err := beamcoreadapter.ToWorkload(offer, domain.Identity{}, time.Now())
+		if err != nil {
+			return err
+		}
+		if _, err := control.tasks.Dispatch(ctx, dispatch.DispatchRequest{
+			Source: dispatch.SourceBeamCore, ExternalID: offer.OfferID, Spec: spec,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (control *roomControl) handleCancel(ctx context.Context, encoded []byte) error {
+	var envelope orchestratorControlEnvelope
+	if err := msgpack.Unmarshal(encoded, &envelope); err != nil {
+		return err
+	}
+	if envelope.SchemaVersion != orchestratorControlSchema || envelope.Environment != control.config.Environment ||
+		strings.TrimSpace(envelope.Hotkey) != control.config.Hotkey || envelope.MessageType != "room_task_cancel" ||
+		envelope.Producer != "transfer-runtime" {
+		return errors.New("BeamCore room cancellation envelope is invalid")
+	}
+	payload, err := json.Marshal(envelope.Payload)
+	if err != nil {
+		return err
+	}
+	var request contracts.RoomTaskCancel
+	if err := json.Unmarshal(payload, &request); err != nil {
+		return err
+	}
+	return control.rooms.Cancel(ctx, request)
+}
+
+func (control *roomControl) handleOffer(ctx context.Context, encoded []byte) error {
+	var envelope orchestratorControlEnvelope
+	if err := msgpack.Unmarshal(encoded, &envelope); err != nil {
+		return err
+	}
+	if envelope.SchemaVersion != orchestratorControlSchema || envelope.Environment != control.config.Environment ||
+		strings.TrimSpace(envelope.Hotkey) != control.config.Hotkey || envelope.MessageType != "room_task_offer_batch" ||
+		envelope.Producer != "transfer-runtime" {
+		return errors.New("BeamCore room offer envelope is invalid")
+	}
+	payload, err := json.Marshal(envelope.Payload)
+	if err != nil {
+		return err
+	}
+	var batch contracts.RoomTaskOfferBatch
+	if err := json.Unmarshal(payload, &batch); err != nil {
+		return err
+	}
+	return control.rooms.Submit(ctx, batch)
+}
+
+func (control *roomControl) submitResult(ctx context.Context, result contracts.RoomTaskResult) error {
+	return control.request(ctx, "room_task_result", result)
+}
+
+func (control *roomControl) submitTaskResult(ctx context.Context, record dispatch.Record, result domain.Result) error {
+	return control.request(ctx, "task_result", map[string]any{
+		"worker_id":  record.WorkerID,
+		"task_id":    record.Spec.WorkloadID,
+		"offer_id":   record.Spec.AttemptID,
+		"success":    result.State == domain.StateCompleted || result.State == domain.StateReceiptCommitted,
+		"chunk_hash": result.Outputs["sha256"],
+		"etag":       result.Outputs["etag"],
+		"error":      result.ErrorMessage,
+	})
+}
+
+func (control *roomControl) submitRoomWorkload(ctx context.Context, messageType string, encoded []byte) error {
+	var payload any
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		return err
+	}
+	return control.request(ctx, messageType, payload)
+}
+
+func (control *roomControl) SubmitRoomWorkloadProgress(ctx context.Context, value contracts.RoomGenericProgress) error {
+	encoded, err := encodeRoomWorkloadProgress(value)
+	if err != nil {
+		return err
+	}
+	return control.submitRoomWorkload(ctx, "room_workload_progress", encoded)
+}
+
+func (control *roomControl) SubmitRoomWorkloadResult(ctx context.Context, value contracts.RoomGenericResult) error {
+	encoded, err := encodeRoomWorkloadResult(value, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	return control.submitRoomWorkload(ctx, "room_workload_result", encoded)
+}
+
+func (control *roomControl) SubmitRoomWorkloadStatus(context.Context, json.RawMessage) error {
+	return nil
+}
+
+func (control *roomControl) SubmitRoomWorkloadProvisioningResult(ctx context.Context,
+	value contracts.RoomWorkloadProvisioningResultWire) error {
+	return control.request(ctx, "room_workload_provisioning_result", value)
+}
+
+func (control *roomControl) publishCapability(ctx context.Context) error {
+	now := time.Now().UTC()
+	return control.request(ctx, "capability_update", control.capabilityManifest(now))
+}
+
+func (control *roomControl) capabilityManifest(now time.Time) contracts.CapabilityManifest {
+	version := control.config.SoftwareVersion
+	if version == "" {
+		version = "0.2.0"
+	}
+	capabilities := make([]string, 0, 8)
+	if control.tasks.CapabilityAvailable(contracts.TransferMultipartCapability, beamcoreadapter.MultipartTransferResources()) {
+		capabilities = append(capabilities, contracts.TransferMultipartCapability)
+	}
+	if control.rooms != nil && control.rooms.CapabilityAvailable() {
+		capabilities = append(capabilities, contracts.RoomTransferCapability)
+	}
+	for _, kind := range []domain.Kind{domain.KindRoomDatagram, domain.KindRoomMessage, domain.KindRoomCommand,
+		domain.KindRoomStream, domain.KindRoomMedia} {
+		if control.workloads == nil || !control.workloads.CapabilityAvailable(kind) {
+			continue
+		}
+		capabilities = append(capabilities, string(kind))
+	}
+	if control.workloads != nil && control.workloads.CapacityCapabilityAvailable(
+		domain.KindRoomMedia, contracts.RoomMediaWebRTCCapability) {
+		capabilities = append(capabilities, contracts.RoomMediaWebRTCCapability)
+	}
+	availableConnections := int64(0)
+	if len(capabilities) > 0 {
+		availableConnections = 1
+	}
+	manifest := contracts.NewOrchestratorCapabilityManifest(
+		control.config.Hotkey,
+		version,
+		capabilities,
+		availableConnections,
+		availableConnections,
+		now,
+	)
+	return manifest
+}
+
+func (control *roomControl) request(ctx context.Context, messageType string, payload any) error {
+	requestID := controlID()
+	jsonPayload, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	var normalizedPayload any
+	if err := json.Unmarshal(jsonPayload, &normalizedPayload); err != nil {
+		return err
+	}
+	envelope := orchestratorControlEnvelope{MessageID: controlID(), SchemaVersion: orchestratorControlSchema,
+		Environment: control.config.Environment, Hotkey: control.config.Hotkey, MessageType: messageType,
+		RequestID: requestID, OccurredAt: time.Now().UTC().Format(time.RFC3339Nano), Producer: "orchestrator", Payload: normalizedPayload}
+	encoded, err := msgpack.Marshal(envelope)
+	if err != nil {
+		return err
+	}
+	requestContext, cancel := context.WithTimeout(ctx, control.config.RequestTimeout)
+	defer cancel()
+	message, err := control.conn.RequestWithContext(requestContext, control.subject("orch", messageType), encoded)
+	if err != nil {
+		return err
+	}
+	var response orchestratorControlEnvelope
+	if err := msgpack.Unmarshal(message.Data, &response); err != nil {
+		return err
+	}
+	if response.RequestID != requestID || response.Producer != "transfer-runtime" || response.MessageType == "error" ||
+		response.MessageType == "register_error" {
+		return fmt.Errorf("BeamCore rejected %s", messageType)
+	}
+	if messageType == "room_task_result" || messageType == "task_result" {
+		encodedPayload, err := json.Marshal(response.Payload)
+		if err != nil {
+			return err
+		}
+		var acknowledgement struct {
+			Received bool   `json:"received"`
+			Reason   string `json:"reason"`
+		}
+		if err := json.Unmarshal(encodedPayload, &acknowledgement); err != nil {
+			return err
+		}
+		if !acknowledgement.Received {
+			// Ownership rejections are permanent for this attempt. Treating them
+			// like a transient delivery failure leaves the terminal result in the
+			// durable replay journal, which resubmits it every five seconds even
+			// after BeamCore has reassigned the task to another orchestrator.
+			if permanentResultRejection(messageType, acknowledgement.Reason) {
+				return nil
+			}
+			return fmt.Errorf("BeamCore rejected %s: %s", messageType, fallback(acknowledgement.Reason, "not received"))
+		}
+	}
+	return nil
+}
+
+func permanentResultRejection(messageType, reason string) bool {
+	return messageType == "task_result" && strings.TrimSpace(reason) == "task_not_owned_by_orchestrator"
+}
+
+func (control *roomControl) subject(direction, messageType string) string {
+	return fmt.Sprintf("%s.%s.%s.%s.%s", strings.Trim(control.config.ControlPrefix, "."), control.config.Environment,
+		direction, strings.ToLower(control.config.Hotkey), messageType)
+}
+
+func controlID() string {
+	value := make([]byte, 16)
+	_, _ = rand.Read(value)
+	return hex.EncodeToString(value)
+}

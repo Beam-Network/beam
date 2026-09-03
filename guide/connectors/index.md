@@ -9,7 +9,7 @@ sidebar_position: 1
 
 Connectors are client SDK helpers for preparing transfers from storage providers. They run in the SDK process, keep provider credentials local, create task-scoped source and destination access, and submit the prepared transfer to BeamCore.
 
-Participant workers do not load connector plugins or provider credentials. Workers receive executable `task_offer` messages with source/destination URLs and headers, then move bytes directly between storage endpoints.
+Participant workers do not load connector plugins or provider credentials. Workers receive executable `workload.offer` messages with source/destination URLs and headers, then move bytes directly between storage endpoints.
 
 ## TypeScript SDK
 

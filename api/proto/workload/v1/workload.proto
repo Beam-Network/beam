@@ -1,0 +1,282 @@
+syntax = "proto3";
+
+package beam.workload.v1;
+
+option go_package = "github.com/Beam-Network/beam/gen/go/workload/v1;workloadv1";
+
+import "google/protobuf/any.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+enum WorkloadClass {
+  WORKLOAD_CLASS_UNSPECIFIED = 0;
+  WORKLOAD_CLASS_JOB = 1;
+  WORKLOAD_CLASS_SESSION = 2;
+  WORKLOAD_CLASS_SERVICE = 3;
+}
+message WorkloadIdentity {
+  string worker_id = 1;
+  string orchestrator_id = 2;
+  string node_id = 3;
+  string instance_id = 4;
+}
+
+message ResourceRequirements {
+  int64 cpu_millis = 1;
+  int64 memory_bytes = 2;
+  int64 scratch_bytes = 3;
+  int64 bandwidth_mbps = 4;
+  int64 connections = 5;
+  int64 streams = 6;
+}
+
+message WorkloadLease {
+  google.protobuf.Timestamp offer_expires_at = 1;
+  google.protobuf.Timestamp assignment_expires_at = 2;
+}
+
+message SecurityPolicy {
+  repeated string network_targets = 1;
+  repeated string permissions = 2;
+  string trust_profile = 3;
+}
+
+message EvidencePolicy {
+  bool receipt_required = 1;
+  repeated string commitments = 2;
+}
+
+message HttpEndpoint {
+  string url = 1;
+  string method = 2;
+  map<string, string> headers = 3;
+}
+
+message TransferPart {
+  int32 index = 1;
+  HttpEndpoint source = 2;
+  HttpEndpoint destination = 3;
+  bool source_range = 4;
+  int64 offset = 5;
+  int64 length = 6;
+  string expected_sha256 = 7;
+}
+
+message MultipartTransferSpec {
+  string transfer_id = 1;
+  repeated TransferPart parts = 2;
+}
+
+message DistributionChild {
+  string worker_id = 1;
+  string node_id = 2;
+  repeated string standby_node_ids = 3;
+}
+
+message DistributionDestination {
+  string destination_id = 1;
+  HttpEndpoint endpoint = 2;
+}
+
+message DistributionTransferSpec {
+  string transfer_id = 1;
+  string circuit_id = 2;
+  bool root = 3;
+  HttpEndpoint source = 4;
+  string parent_node_id = 5;
+  repeated DistributionChild children = 6;
+  repeated DistributionDestination destinations = 7;
+  int64 offset = 8;
+  int64 length = 9;
+  string expected_sha256 = 10;
+}
+
+message ActionRegistryArtifact {
+  string url = 1;
+  map<string, string> headers = 2;
+  string media_type = 3;
+  int64 size_bytes = 4;
+  bytes publisher_public_key = 5;
+  bytes publisher_signature = 6;
+}
+
+message ActionSecretBroker {
+  string endpoint = 1;
+  string bearer_token = 2;
+  repeated string allowed_names = 3;
+}
+
+message ActionArtifactPublisher {
+  string endpoint = 1;
+  string bearer_token = 2;
+  map<string, string> headers = 3;
+  int64 max_artifact_bytes = 4;
+}
+
+message ActionSandbox {
+  string runtime = 1;
+  string oci_image = 2;
+  repeated string command = 3;
+  uint64 fuel = 4;
+  bool legacy_node = 5;
+}
+
+message ActionExecutionSpec {
+  string task_id = 1;
+  string action_package_name = 2;
+  string action_version = 3;
+  string entrypoint = 4;
+  string artifact_sha256 = 5;
+  int64 timeout_seconds = 6;
+  google.protobuf.Struct input = 7;
+  google.protobuf.Struct config = 8;
+  ActionRegistryArtifact registry_artifact = 9;
+  ActionSecretBroker secret_broker = 10;
+  ActionArtifactPublisher artifact_publisher = 11;
+  ActionSandbox sandbox = 12;
+  repeated string host_rpc_methods = 13;
+}
+
+message TunnelSpec {
+  string tunnel_id = 1;
+  string mode = 2;
+  string protocol = 3;
+  string listen_address = 4;
+  string target = 5;
+  string ingress_token = 6;
+  map<string, string> metadata = 7;
+}
+
+message RoomSpec {
+  string room_id = 1;
+  string role = 2;
+  string protocol = 3;
+  string listen_address = 4;
+  map<string, string> members = 5;
+  int32 max_datagram_bytes = 6;
+  int64 idle_timeout_seconds = 7;
+  map<string, string> metadata = 8;
+}
+
+message RoomDeliveryCell {
+  string cell_id = 1;
+  int64 chunk_index = 2;
+  int64 offset = 3;
+  int64 length = 4;
+  string target_member_id = 5;
+  string cipher_sha256 = 6;
+}
+
+message TunnelLeaseEndpoint {
+  string url = 1;
+  string method = 2;
+  map<string, string> headers = 3;
+}
+
+message TunnelLease {
+  string lease_id = 1;
+  string intent_id = 2;
+  string role = 3;
+  string target_member_id = 4;
+  string protocol = 5;
+  repeated TunnelLeaseEndpoint endpoints = 6;
+  bytes agent_public_key = 7;
+  google.protobuf.Timestamp expires_at = 8;
+}
+
+message RoomTransferTarget {
+  RoomDeliveryCell cell = 1;
+  TunnelLease lease = 2;
+}
+
+message RoomTransferSpec {
+  string batch_id = 1;
+  string room_id = 2;
+  string transfer_id = 3;
+  uint64 snapshot_version = 4;
+  string lane_id = 5;
+  TunnelLease source_lease = 6;
+  repeated RoomTransferTarget targets = 7;
+}
+
+message ArtifactSpec {
+  string artifact_id = 1;
+  string path = 2;
+  string media_type = 3;
+  int64 ttl_seconds = 4;
+}
+
+message WorkloadSpec {
+  string workload_id = 1;
+  string attempt_id = 2;
+  WorkloadIdentity identity = 3;
+  string kind = 4;
+  WorkloadClass class = 5;
+  string source_system = 6;
+  string source_reference = 7;
+  repeated string required_capabilities = 8;
+  ResourceRequirements resources = 9;
+  WorkloadLease lease = 10;
+  google.protobuf.Any legacy_payload = 11 [deprecated = true];
+  SecurityPolicy security = 12;
+  EvidencePolicy evidence = 13;
+  oneof payload {
+    MultipartTransferSpec multipart_transfer = 20;
+    ActionExecutionSpec action = 21;
+    TunnelSpec tunnel = 22;
+    RoomSpec room = 23;
+    ArtifactSpec artifact = 24;
+    DistributionTransferSpec distribution_transfer = 25;
+    RoomTransferSpec room_transfer = 26;
+  }
+}
+
+message WorkloadOffer {
+  WorkloadSpec spec = 1;
+}
+
+message WorkloadDecision {
+  string workload_id = 1;
+  string attempt_id = 2;
+  bool accepted = 3;
+  string reason = 4;
+}
+
+message WorkloadCommit {
+  string workload_id = 1;
+  string attempt_id = 2;
+  uint64 plan_version = 3;
+  string assignment_token = 4;
+  google.protobuf.Timestamp assignment_expires_at = 5;
+}
+
+message WorkloadResult {
+  string workload_id = 1;
+  string attempt_id = 2;
+  string state = 3;
+  int64 bytes_processed = 4;
+  map<string, string> outputs = 5;
+  string error_code = 6;
+  string error_message = 7;
+  google.protobuf.Timestamp started_at = 8;
+  google.protobuf.Timestamp completed_at = 9;
+}
+
+message WorkloadProgress {
+  string workload_id = 1;
+  string attempt_id = 2;
+  string state = 3;
+  map<string, string> outputs = 4;
+  google.protobuf.Timestamp observed_at = 5;
+}
+
+message WorkloadCheckpoint {
+  string workload_id = 1;
+  string attempt_id = 2;
+  string kind = 3;
+  uint64 sequence = 4;
+  string schema = 5;
+  map<string, string> cursor = 6;
+  bytes payload_json = 7;
+  google.protobuf.Timestamp observed_at = 8;
+}

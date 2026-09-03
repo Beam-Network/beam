@@ -1,226 +1,103 @@
-# BEAM Orchestrator Onboarding Guide
+# BEAM Orchestrator Guide
 
-This guide covers the public mainnet orchestrator path for Beam subnet 105. An orchestrator connects to BeamCore over NATS, advertises a worker gateway, selects connected workers for task offers, and forwards worker results back to BeamCore.
-
-## Runtime Responsibilities
-
-The orchestrator process:
-
-1. Registers with BeamCore using wallet-signed NATS control messages.
-2. Advertises its HTTP URL, worker gateway URL, and capabilities.
-3. Maintains an in-process worker gateway at `/ws/<worker_id>?api_key=...` unless `ORCHESTRATOR_WORKER_GATEWAY_URL` points at an externally reachable gateway origin.
-4. Receives `worker_task_offer_batch` messages from BeamCore through NATS.
-5. Selects connected local workers and sends `task_offer` messages.
-6. Relays each worker `task_result` upstream immediately.
-7. Stays `READY=true` when it should receive routed production work.
-
-Workers use BeamCore HTTP for registration; runtime task delivery and results use the worker gateway relay path.
-
-## Mainnet Endpoints
-
-| Setting | Value |
-|---|---|
-| `CORE_SERVER_URL` | `https://beamcore.b1m.ai` |
-| `ORCH_GATEWAY_URL` | `tls://orch-gateway.b1m.ai:4222` |
-| `ORCHESTRATOR_WORKER_GATEWAY_URL` | Your externally reachable worker gateway origin |
-| `SUBTENSOR_NETWORK` | `finney` |
-| `NETUID` | `105` |
-
-Set `ORCH_GATEWAY_URL` to a NATS endpoint using `nats://` or `tls://`. `ORCHESTRATOR_WORKER_GATEWAY_URL` and worker `WORKER_GATEWAY_URL` should refer to the same worker gateway origin when workers connect through a public domain or reverse proxy.
+Run a Go orchestrator on BEAM mainnet for `worker_task_offer_batch` and `room_task_offer_batch`.
 
 ## Requirements
 
-| Component | Requirement |
-|---|---|
-| Python | 3.10-3.12 |
-| Wallet | Registered miner hotkey on subnet 105 |
-| Network | Stable outbound access to BeamCore HTTP, BeamCore NATS, Bittensor, and storage backends |
-| Port | Default orchestrator HTTP/worker-gateway port `8000` unless `API_PORT` is changed |
+- Go 1.24+
+- Bittensor miner hotkey registered on subnet 105
+- BeamCore orchestrator registration response with `orchestrator_id` and `api_key`
+- Public orchestrator gateway URL
+- WCP TLS certificate and key
+- Room tunnel coordinator URL and worker token for `room.transfer`
 
-## Install
+## 1. Install
 
 ```bash
 git clone https://github.com/Beam-Network/beam.git
 cd beam
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e "."
+mkdir -p bin
+go build -o bin/beam-orchestrator ./cmd/beam-orchestrator
+go build -o bin/beam-worker ./cmd/beam-worker
 ```
 
-## Register On Subnet 105
+## 2. Register
+
+Register the hotkey on subnet 105:
 
 ```bash
 btcli subnet register --netuid 105 --subtensor.network finney \
-  --wallet.name orchestrator --wallet.hotkey default
+  --wallet.name your_coldkey \
+  --wallet.hotkey your_hotkey
 ```
 
-Confirm the hotkey is registered:
+Register the orchestrator with BeamCore. Sign `<orchestrator_hotkey_ss58>:<fee_percentage>` with the orchestrator hotkey and send:
 
 ```bash
-btcli wallet overview --wallet.name orchestrator --subtensor.network finney
+export CORE_SERVER_URL=https://beamcore.b1m.ai
+
+curl -X POST "$CORE_SERVER_URL/orchestrators/register" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "hotkey": "orchestrator_hotkey_ss58",
+    "signature": "0x...",
+    "fee_percentage": 10,
+    "name": "my-orchestrator",
+    "region": "global",
+    "url": "https://orchestrator.example.com",
+    "max_workers": 1000
+  }'
 ```
 
-## Configure
+Store the returned `orchestrator_id` and `api_key`.
 
-Create `actors/orchestrator/.env` or set these variables in your process manager:
+## 3. Configure
 
-```dotenv
-WALLET_NAME=orchestrator
-WALLET_HOTKEY=default
-CORE_SERVER_URL=https://beamcore.b1m.ai
-ORCH_GATEWAY_URL=tls://orch-gateway.b1m.ai:4222
-ORCHESTRATOR_WORKER_GATEWAY_URL=https://orchestrator.example.com
-SUBTENSOR_NETWORK=finney
-NETUID=105
-READY=true
-
-# Optional
-API_PORT=8000
-LOG_LEVEL=INFO
-REGION=global
-FEE_PERCENTAGE=0
-MAX_WORKERS=10000
+```bash
+export CORE_SERVER_URL=https://beamcore.b1m.ai
+export BEAM_ENV=prod
+export BEAM_BITTENSOR_HOTKEY=orchestrator_hotkey_ss58
+export BEAMCORE_NATS_URL=tls://orch-gateway.b1m.ai:4222
+export BEAMCORE_NATS_USER=orchestrator_hotkey_ss58
+export BEAMCORE_NATS_PASSWORD=orchestrator-api-key
+export BEAMCORE_GATEWAY_URL=https://orchestrator.example.com
+export BEAM_WCP_LISTEN_ADDR=0.0.0.0:8782
+export BEAM_WCP_TLS_CERT=/path/to/wcp.crt
+export BEAM_WCP_TLS_KEY=/path/to/wcp.key
+export BEAM_ROOM_TUNNEL_COORDINATOR_URL=https://room-coordinator.example.com
+export BEAM_ROOM_TUNNEL_WORKER_TOKEN=room-tunnel-token
 ```
 
-Important settings:
+Credentials-file auth uses `BEAMCORE_NATS_CREDS`. Token auth uses `BEAMCORE_NATS_TOKEN`.
 
-| Variable | Purpose |
-|---|---|
-| `CORE_SERVER_URL` | BeamCore HTTP base used for registration/auth bootstrap |
-| `ORCH_GATEWAY_URL` | BeamCore NATS control endpoint |
-| `ORCHESTRATOR_WORKER_GATEWAY_URL` | Public worker gateway origin advertised to BeamCore |
-| `READY` | `true` opts the orchestrator into routed work; default is `false` |
-| `API_PORT` | FastAPI port and in-process worker-gateway port |
+## 4. Run
 
-The documented production path uses BeamCore HTTP registration, BeamCore NATS control, and the orchestrator-owned worker gateway.
+```bash
+./bin/beam-orchestrator serve \
+  --hotkey "$BEAM_BITTENSOR_HOTKEY" \
+  --netuid 105
+```
+
+The startup log and `data/orchestrator/registry.json` contain the local `orchestrator_id`.
+
+## 5. Register Worker Membership
+
+```bash
+curl -X POST http://127.0.0.1:8781/v1/orchestrator/memberships \
+  -H 'Content-Type: application/json' \
+  -d '{"OrchestratorID":"orchestrator-id","WorkerID":"worker-id","NodeID":"worker-node-id","Status":"active"}'
+```
 
 ## Capabilities
 
-Workers send canonical `worker_capability_update` manifests to the orchestrator. The orchestrator aggregates fresh worker manifests and publishes `capability_update` to BeamCore after registration and on heartbeat. Manifest fields are `actor_type`, `actor_id`, `software_version`, `protocols`, `capabilities`, `capacity`, `observed_at`, and `expires_at`.
+`transfer.multipart` handles normal transfer chunks from `worker_task_offer_batch`.
 
-`transfer.multipart` is the baseline normal-transfer capability. A worker without a fresh canonical manifest is treated as legacy baseline transfer only.
+`room.transfer` handles Room data-transfer lanes from `room_task_offer_batch`.
 
-## Run
+The orchestrator publishes `capability_update` from connected WCP worker manifests and live capacity.
 
-```bash
-cd actors/orchestrator
-source ../../.venv/bin/activate
-python main.py
-```
-
-## Health And Readiness
+## Health
 
 ```bash
-curl http://localhost:8000/health
-```
-
-Actual basic health response:
-
-```json
-{
-  "status": "healthy",
-  "service": "beam-orchestrator"
-}
-```
-
-Use `/ready` for readiness checks:
-
-```bash
-curl http://localhost:8000/ready | jq
-```
-
-The readiness response includes wallet, subtensor, metagraph, worker availability, background task checks, and `active_workers`.
-
-Other useful endpoints:
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /state` | Full orchestrator state |
-| `GET /workers/stats` | Connected worker stats |
-| `GET /metrics` | Prometheus metrics |
-| `GET /metrics/json` | JSON metrics |
-
-Logs default to `/tmp/beam_logs/orchestrator.log` unless `LOG_DIR` is set.
-
-## Worker Gateway
-
-The in-process worker gateway accepts:
-
-```text
-ws(s)://<worker-gateway-origin>/ws/<worker_id>?api_key=<worker-api-key>
-```
-
-Workers derive this URL from `WORKER_GATEWAY_URL`. If the orchestrator is reachable directly on `https://orchestrator.example.com`, set:
-
-```dotenv
-ORCHESTRATOR_WORKER_GATEWAY_URL=https://orchestrator.example.com
-```
-
-Then each worker owned by this orchestrator should use:
-
-```dotenv
-WORKER_GATEWAY_URL=https://orchestrator.example.com
-```
-
-The gateway relays:
-
-| Direction | Message types |
-|---|---|
-| BeamCore/orchestrator to worker | `task_offer`, `task_result_ack` |
-| Worker to BeamCore/orchestrator | `worker_capability_update`, `task_result` |
-
-## Task Offer Flow
-
-```text
-BeamCore -> NATS -> orchestrator -> worker gateway -> worker
-worker -> worker gateway -> orchestrator -> NATS -> BeamCore task_result
-```
-
-Each task offer includes executable URLs, headers, and `signed_url_flow`. `signed_url_v1` object-storage upload offers use direct multipart URLs. The orchestrator assigns every delivered offer to a connected worker. Workers start valid offers immediately and report success or failure through `task_result`; there is no pre-result acceptance or version-floor gate.
-
-## Troubleshooting
-
-### No tasks are assigned
-
-- Confirm `READY=true`.
-- Confirm the NATS endpoint in `ORCH_GATEWAY_URL` is reachable.
-- Confirm the hotkey is registered on subnet 105.
-- Confirm at least one worker is connected to the worker gateway.
-- Check `/ready` for failed readiness checks.
-
-### Worker cannot connect
-
-- Confirm `WORKER_GATEWAY_URL` points to the worker gateway origin.
-- Confirm the gateway is reachable from the worker host.
-- Confirm the worker registered with BeamCore and has a worker API key.
-
-### BeamCore NATS connection fails
-
-```bash
-curl https://beamcore.b1m.ai/health
-```
-
-Check network egress, DNS, wallet signing errors, API-key validity, and `ORCH_GATEWAY_URL`.
-
-## Production Service Example
-
-Use your actual clone path in place of `/srv/beam`:
-
-```ini
-[Unit]
-Description=BEAM Orchestrator
-After=network.target
-
-[Service]
-Type=simple
-User=beam
-WorkingDirectory=/srv/beam/actors/orchestrator
-Environment="PATH=/srv/beam/.venv/bin:/usr/local/bin:/usr/bin:/bin"
-EnvironmentFile=/srv/beam/actors/orchestrator/.env
-ExecStart=/srv/beam/.venv/bin/python main.py
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
+curl http://127.0.0.1:8781/v1/orchestrator/health
 ```

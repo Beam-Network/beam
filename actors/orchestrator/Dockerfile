@@ -1,34 +1,31 @@
-# Build from the repository root, not from this directory:
+# Build from the repository root:
 #
 #   docker build -f actors/orchestrator/Dockerfile -t beam-orchestrator:latest .
-#
 
-FROM python:3.11-slim-bookworm
+FROM golang:1.24-bookworm AS build
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app
+WORKDIR /src
 
-WORKDIR /app/actors/orchestrator
+COPY go.mod go.sum ./
+RUN go mod download
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    pkg-config \
-    libssl-dev \
+COPY api ./api
+COPY cmd ./cmd
+COPY internal ./internal
+
+RUN CGO_ENABLED=0 go build -o /out/beam-orchestrator ./cmd/beam-orchestrator
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml README.md /app/
-COPY beam /app/beam/
-COPY actors /app/actors/
+WORKDIR /app
 
-# The orchestrator lifecycle uses the Bittensor 7-9 Metagraph API.
-RUN printf "async-substrate-interface>=1.5.6,<2\n" > /tmp/pip-constraints.txt \
-    && pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir . \
-    && pip install --no-cache-dir -c /tmp/pip-constraints.txt --upgrade "bittensor>=7.0.0,<10" \
-    && python -c "import bittensor as bt; v=bt.__version__; print('bittensor OK', v)"
+COPY --from=build /out/beam-orchestrator /usr/local/bin/beam-orchestrator
 
-EXPOSE 8000
+EXPOSE 8781 8782
 
-ENTRYPOINT ["sh", "-lc"]
-CMD ["python main.py"]
+ENTRYPOINT ["beam-orchestrator"]
+CMD ["serve"]

@@ -129,8 +129,8 @@ async def _issue_orchestrator_challenge(
     validator,
     orchestrator: OrchestratorInfo,
 ) -> Optional[ChallengeResult]:
-    """Bandwidth challenge flow has been removed from the BeamCore validator path."""
-    logger.debug("Challenge flow is disabled for orchestrator %s", orchestrator.hotkey[:16])
+    """BeamCore-managed validator path handles challenge flow."""
+    logger.debug("Challenge flow is managed by BeamCore for orchestrator %s", orchestrator.hotkey[:16])
     return None
 
 async def _send_challenge_http(
@@ -141,7 +141,7 @@ async def _send_challenge_http(
     challenge: BandwidthChallenge,
     connection: dict,
 ) -> Optional[BandwidthChallenge]:
-    """Legacy HTTP challenge path removed."""
+    """BeamCore-managed HTTP challenge hook."""
     return None
 
 async def _send_chunk_data_http(
@@ -152,7 +152,7 @@ async def _send_chunk_data_http(
     challenge: BandwidthChallenge,
     connection: dict,
 ) -> bool:
-    """Legacy HTTP challenge data path removed."""
+    """BeamCore-managed HTTP challenge data hook."""
     return False
 
 async def _send_challenge_dendrite(
