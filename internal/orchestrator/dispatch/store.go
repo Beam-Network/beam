@@ -56,6 +56,8 @@ type snapshot struct {
 	Records map[string]Record `json:"records"`
 }
 
+const maxRetainedDeliveredTasks = 256
+
 func OpenFileStore(path string) (*FileStore, error) {
 	if path == "" {
 		return nil, errors.New("Orchestrator orchestration state path is required")
@@ -139,7 +141,8 @@ func (s *FileStore) persistLocked() error {
 		file.Close()
 		return err
 	}
-	if err := json.NewEncoder(file).Encode(snapshot{Version: 1, Records: s.records}); err != nil {
+	compacted := compactDeliveredTasks(s.records, maxRetainedDeliveredTasks)
+	if err := json.NewEncoder(file).Encode(snapshot{Version: 1, Records: compacted}); err != nil {
 		file.Close()
 		return err
 	}
@@ -153,12 +156,44 @@ func (s *FileStore) persistLocked() error {
 	if err := os.Rename(temporary, s.path); err != nil {
 		return err
 	}
+	s.records = compacted
 	handle, err := os.Open(directory)
 	if err != nil {
 		return err
 	}
 	defer handle.Close()
 	return handle.Sync()
+}
+
+func compactDeliveredTasks(records map[string]Record, limit int) map[string]Record {
+	if limit < 0 {
+		limit = 0
+	}
+	delivered := make([]string, 0)
+	for key, record := range records {
+		if record.UpstreamDelivered && (record.State == StateCompleted || record.State == StateFailed ||
+			record.State == StateCancelled || record.State == StateRejected) {
+			delivered = append(delivered, key)
+		}
+	}
+	if len(delivered) <= limit {
+		return records
+	}
+	sort.Slice(delivered, func(i, j int) bool {
+		left, right := records[delivered[i]], records[delivered[j]]
+		if left.UpdatedAt.Equal(right.UpdatedAt) {
+			return delivered[i] > delivered[j]
+		}
+		return left.UpdatedAt.After(right.UpdatedAt)
+	})
+	compacted := make(map[string]Record, len(records)-(len(delivered)-limit))
+	for key, record := range records {
+		compacted[key] = record
+	}
+	for _, key := range delivered[limit:] {
+		delete(compacted, key)
+	}
+	return compacted
 }
 
 func sortedRecords(records map[string]Record) []Record {

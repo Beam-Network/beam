@@ -12,6 +12,7 @@ import (
 )
 
 const journalVersion = 1
+const maxRetainedAcknowledgedReceipts = 256
 
 var ErrReceiptNotFound = errors.New("receipt not found")
 
@@ -235,7 +236,8 @@ func (j *FileJournal) persistLocked() error {
 		temporary.Close()
 		return err
 	}
-	if err := json.NewEncoder(temporary).Encode(fileSnapshot{Version: journalVersion, Records: j.records}); err != nil {
+	compacted := compactAcknowledgedReceipts(j.records, maxRetainedAcknowledgedReceipts)
+	if err := json.NewEncoder(temporary).Encode(fileSnapshot{Version: journalVersion, Records: compacted}); err != nil {
 		temporary.Close()
 		return err
 	}
@@ -249,12 +251,43 @@ func (j *FileJournal) persistLocked() error {
 	if err := os.Rename(temporaryPath, j.path); err != nil {
 		return err
 	}
+	j.records = compacted
 	directoryHandle, err := os.Open(directory)
 	if err == nil {
 		err = directoryHandle.Sync()
 		_ = directoryHandle.Close()
 	}
 	return err
+}
+
+func compactAcknowledgedReceipts(records map[string]JournalRecord, limit int) map[string]JournalRecord {
+	if limit < 0 {
+		limit = 0
+	}
+	acknowledged := make([]string, 0)
+	for id, record := range records {
+		if !record.AcknowledgedAt.IsZero() {
+			acknowledged = append(acknowledged, id)
+		}
+	}
+	if len(acknowledged) <= limit {
+		return records
+	}
+	sort.Slice(acknowledged, func(i, k int) bool {
+		left, right := records[acknowledged[i]], records[acknowledged[k]]
+		if left.AcknowledgedAt.Equal(right.AcknowledgedAt) {
+			return acknowledged[i] > acknowledged[k]
+		}
+		return left.AcknowledgedAt.After(right.AcknowledgedAt)
+	})
+	compacted := make(map[string]JournalRecord, len(records)-(len(acknowledged)-limit))
+	for id, record := range records {
+		compacted[id] = record
+	}
+	for _, id := range acknowledged[limit:] {
+		delete(compacted, id)
+	}
+	return compacted
 }
 
 func sameReceipt(left, right Receipt) bool {

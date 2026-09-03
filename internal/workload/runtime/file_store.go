@@ -9,10 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"sync"
+
+	"github.com/Beam-Network/beam/internal/workload/domain"
 )
 
 const fileStoreVersion = 1
+const maxRetainedReceiptCommittedWorkloads = 256
 
 type fileStoreSnapshot struct {
 	Version int               `json:"version"`
@@ -122,8 +126,9 @@ func (s *FileStore) persistLocked() error {
 		temporary.Close()
 		return err
 	}
+	compacted := compactReceiptCommittedWorkloads(s.records, maxRetainedReceiptCommittedWorkloads)
 	encoder := json.NewEncoder(temporary)
-	if err := encoder.Encode(fileStoreSnapshot{Version: fileStoreVersion, Records: s.records}); err != nil {
+	if err := encoder.Encode(fileStoreSnapshot{Version: fileStoreVersion, Records: compacted}); err != nil {
 		temporary.Close()
 		return err
 	}
@@ -137,12 +142,43 @@ func (s *FileStore) persistLocked() error {
 	if err := os.Rename(temporaryPath, s.path); err != nil {
 		return err
 	}
+	s.records = compacted
 	directoryHandle, err := os.Open(directory)
 	if err == nil {
 		err = directoryHandle.Sync()
 		_ = directoryHandle.Close()
 	}
 	return err
+}
+
+func compactReceiptCommittedWorkloads(records map[string]Record, limit int) map[string]Record {
+	if limit < 0 {
+		limit = 0
+	}
+	terminal := make([]string, 0)
+	for key, record := range records {
+		if record.State == domain.StateReceiptCommitted {
+			terminal = append(terminal, key)
+		}
+	}
+	if len(terminal) <= limit {
+		return records
+	}
+	sort.Slice(terminal, func(i, j int) bool {
+		left, right := records[terminal[i]], records[terminal[j]]
+		if left.UpdatedAt.Equal(right.UpdatedAt) {
+			return terminal[i] > terminal[j]
+		}
+		return left.UpdatedAt.After(right.UpdatedAt)
+	})
+	compacted := make(map[string]Record, len(records)-(len(terminal)-limit))
+	for key, record := range records {
+		compacted[key] = record
+	}
+	for _, key := range terminal[limit:] {
+		delete(compacted, key)
+	}
+	return compacted
 }
 
 func cloneRecord(record Record) Record {

@@ -191,15 +191,11 @@ func (s *Server) handleProgress(session *Session, envelope Envelope) error {
 	if err != nil {
 		return err
 	}
-	eventID := fmt.Sprintf("progress:%s:%s:%s:%d", session.workerID, progress.WorkloadID,
-		progress.AttemptID, progress.ObservedAt.UnixNano())
-	appended, err := s.journal.Append(JournalEvent{
-		EventID: eventID, WorkerID: session.workerID, Type: TypeProgress,
-		WorkloadID: progress.WorkloadID, AttemptID: progress.AttemptID, Progress: &progress,
-	})
-	if err != nil || !appended {
-		return err
-	}
+	// Progress is advisory and continuously refreshed. Persisting every sample
+	// forced an fsync on the WCP read loop and let historical telemetry delay a
+	// new workload's runtime endpoint beyond the publisher handshake deadline.
+	// Results, receipts and checkpoints remain journaled; current progress is
+	// also retained in the durable workload stores downstream.
 	select {
 	case s.progress <- ProgressEvent{WorkerID: session.workerID, Progress: progress}:
 		return nil
