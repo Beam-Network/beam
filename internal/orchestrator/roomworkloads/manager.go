@@ -455,7 +455,7 @@ func fromOffer[T any](value contracts.RoomWorkloadOfferWire[T]) contracts.RoomWo
 		ChannelID: value.ChannelID, SourceMemberID: value.SourceMemberID, TargetSnapshot: value.DestinationSnapshot.SnapshotVersion,
 		AuthorizationEpoch: value.AuthorizationEpoch, PlanEpoch: value.PlanEpoch, UnitID: value.UnitID,
 		Epoch: value.Epoch, Attempt: value.Attempt, ExpiresAt: value.OfferExpiresAt}
-	return internalDefinition(identity, value.RequiredCapacity, value.DestinationSnapshot.Targets, value.WorkloadID, value.Details)
+	return internalDefinition(identity, value.RequiredCapacity, value.DestinationSnapshot.Targets, "", value.Details, &value.PathAuthorizations)
 }
 
 func fromSubmit[D, T any](value contracts.RoomWorkloadSubmitWire[D], details T) contracts.RoomWorkloadDefinition[T] {
@@ -463,21 +463,40 @@ func fromSubmit[D, T any](value contracts.RoomWorkloadSubmitWire[D], details T) 
 		ChannelID: value.ChannelID, SourceMemberID: value.SourceMemberID, TargetSnapshot: value.PlanEpoch,
 		AuthorizationEpoch: value.AuthorizationEpoch, PlanEpoch: value.PlanEpoch, UnitID: value.WorkloadID + "/unit-1",
 		Epoch: value.PlanEpoch, Attempt: 1, ExpiresAt: value.ExpiresAt}
-	return internalDefinition(identity, value.RequiredCapacity, value.Targets, value.IdempotencyKey, details)
+	return internalDefinition(identity, value.RequiredCapacity, value.Targets, value.IdempotencyKey, details, nil)
 }
 
 func internalDefinition[T any](identity contracts.RoomWorkloadIdentity, capacity contracts.RoomCapacityRequirement,
-	targets []contracts.RoomWireTarget, authorization string, details T) contracts.RoomWorkloadDefinition[T] {
-	protocol := string(identity.Kind) + "/1"
+	targets []contracts.RoomWireTarget, authorization string, details T,
+	pathAuthorizations *contracts.RoomPathAuthorizations) contracts.RoomWorkloadDefinition[T] {
+	protocol := contracts.RoomPathProtocol(identity.Kind)
+	source := contracts.RoomPathIntent{PathID: identity.UnitID + "/source", Role: "source", Protocol: protocol,
+		Authorization: authorization, ExpiresAt: identity.ExpiresAt}
+	targetAuthorizationByMember := map[string]contracts.RoomPathAuthorization{}
+	if pathAuthorizations != nil {
+		source = roomPathIntent(pathAuthorizations.Source, authorization)
+		for _, target := range pathAuthorizations.Targets {
+			targetAuthorizationByMember[target.TargetMemberID] = target
+		}
+	}
 	result := contracts.RoomWorkloadDefinition[T]{Schema: contracts.RoomWorkloadSchema, Identity: identity,
-		Source: contracts.RoomPathIntent{PathID: identity.UnitID + "/source", Role: "source", Protocol: protocol,
-			Authorization: authorization, ExpiresAt: identity.ExpiresAt},
+		Source:           source,
 		RequiredCapacity: capacity,
 		Resources:        domain.Resources{Connections: max(1, capacity.Units), Streams: max(1, capacity.Units)}, Details: details}
 	for _, target := range targets {
+		path := contracts.RoomPathIntent{PathID: identity.UnitID + "/target/" + target.MemberID, Role: "target",
+			TargetMemberID: target.MemberID, Protocol: protocol, Authorization: authorization, ExpiresAt: identity.ExpiresAt}
+		if pathAuthorization, ok := targetAuthorizationByMember[target.MemberID]; ok {
+			path = roomPathIntent(pathAuthorization, authorization)
+		}
 		result.Targets = append(result.Targets, contracts.RoomInternalTarget{MemberID: target.MemberID,
-			Path: contracts.RoomPathIntent{PathID: identity.UnitID + "/target/" + target.MemberID, Role: "target",
-				TargetMemberID: target.MemberID, Protocol: protocol, Authorization: authorization, ExpiresAt: identity.ExpiresAt}})
+			Path: path})
 	}
 	return result
+}
+
+func roomPathIntent(value contracts.RoomPathAuthorization, authorization string) contracts.RoomPathIntent {
+	return contracts.RoomPathIntent{PathID: value.PathID, Role: value.Role, TargetMemberID: value.TargetMemberID,
+		Protocol: value.Protocol, Authorization: authorization, CoordinatorSignature: value.CoordinatorSignature,
+		ExpiresAt: value.ExpiresAt}
 }

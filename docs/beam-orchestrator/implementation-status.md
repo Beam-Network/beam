@@ -47,7 +47,7 @@ export NETUID=105
 - Offer: `room_task_offer_batch`
 - Cancel: `room_task_cancel`
 - Result: `room_task_result`
-- Manifest update: `capability_update`
+- Manifest update: `capability_update`, sent after registration and on capability/capacity changes
 
 ## Guides
 

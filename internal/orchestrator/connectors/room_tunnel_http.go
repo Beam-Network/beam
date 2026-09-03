@@ -7,33 +7,36 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/Beam-Network/beam/internal/orchestrator/roomtransfer"
 	"github.com/Beam-Network/beam/internal/orchestrator/roomworkloads"
 	"github.com/Beam-Network/beam/internal/workload/contracts"
-	"github.com/Beam-Network/beam/internal/workload/domain"
 )
 
 type RoomTunnelHTTPProvisioner struct {
 	transferEndpoint string
 	workloadEndpoint string
-	token            string
 	client           *http.Client
 }
 
-func NewRoomTunnelHTTPProvisioner(coordinatorURL, token string, client *http.Client) (*RoomTunnelHTTPProvisioner, error) {
-	coordinatorURL, token = strings.TrimRight(strings.TrimSpace(coordinatorURL), "/"), strings.TrimSpace(token)
-	if coordinatorURL == "" || token == "" {
-		return nil, errors.New("room tunnel coordinator URL and worker token are required")
+func NewRoomTunnelHTTPProvisioner(coordinatorURL string, client *http.Client) (*RoomTunnelHTTPProvisioner, error) {
+	coordinatorURL = strings.TrimRight(strings.TrimSpace(coordinatorURL), "/")
+	if coordinatorURL == "" {
+		return nil, errors.New("room tunnel coordinator URL is required")
+	}
+	if err := validateCoordinatorURL(coordinatorURL); err != nil {
+		return nil, err
 	}
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
 	return &RoomTunnelHTTPProvisioner{transferEndpoint: coordinatorURL + "/room-transfer/leases/redeem",
-		workloadEndpoint: coordinatorURL + "/room-workload/paths/redeem", token: token, client: client}, nil
+		workloadEndpoint: coordinatorURL + "/room-workload/paths/redeem", client: client}, nil
 }
 
 func (p *RoomTunnelHTTPProvisioner) Redeem(ctx context.Context, request roomtransfer.RedeemRequest) (contracts.TunnelLease, error) {
@@ -45,7 +48,6 @@ func (p *RoomTunnelHTTPProvisioner) Redeem(ctx context.Context, request roomtran
 	if err != nil {
 		return contracts.TunnelLease{}, err
 	}
-	httpRequest.Header.Set("Authorization", "Bearer "+p.token)
 	httpRequest.Header.Set("Content-Type", "application/json")
 	response, err := p.client.Do(httpRequest)
 	if err != nil {
@@ -79,14 +81,14 @@ var _ roomworkloads.Provisioner = (*RoomTunnelHTTPProvisioner)(nil)
 func (p *RoomTunnelHTTPProvisioner) RedeemRoomPath(ctx context.Context,
 	request contracts.RoomPathRedemptionRequest) (contracts.RoomPathLease, error) {
 	identity, path := request.Identity, request.Path
-	protocol := roomPathProtocol(identity.Kind)
+	protocol := contracts.RoomPathProtocol(identity.Kind)
 	payload, err := json.Marshal(map[string]any{
 		"schema_version": "room-workload-path/v1", "intent_id": path.PathID,
 		"workload_id": identity.WorkloadID, "kind": identity.Kind, "room_id": identity.RoomID,
 		"channel_id": identity.ChannelID, "unit_id": identity.UnitID, "epoch": identity.Epoch,
 		"attempt": identity.Attempt, "role": path.Role, "target_member_id": path.TargetMemberID,
 		"worker_id": request.WorkerID, "protocol": protocol, "details": json.RawMessage("{}"),
-		"expires_at": minRoomPathExpiry(identity.ExpiresAt, path.ExpiresAt),
+		"expires_at": minRoomPathExpiry(identity.ExpiresAt, path.ExpiresAt), "coordinator_signature": path.CoordinatorSignature,
 	})
 	if err != nil {
 		return contracts.RoomPathLease{}, err
@@ -95,7 +97,6 @@ func (p *RoomTunnelHTTPProvisioner) RedeemRoomPath(ctx context.Context,
 	if err != nil {
 		return contracts.RoomPathLease{}, err
 	}
-	httpRequest.Header.Set("Authorization", "Bearer "+p.token)
 	httpRequest.Header.Set("Content-Type", "application/json")
 	response, err := p.client.Do(httpRequest)
 	if err != nil {
@@ -128,24 +129,31 @@ func (p *RoomTunnelHTTPProvisioner) RedeemRoomPath(ctx context.Context,
 		ExpiresAt: result.Lease.ExpiresAt}, nil
 }
 
-func roomPathProtocol(kind domain.Kind) string {
-	switch kind {
-	case domain.KindRoomDatagram:
-		return "btr-datagram"
-	case domain.KindRoomMessage, domain.KindRoomCommand:
-		return "btr-message"
-	case domain.KindRoomStream:
-		return "btr-stream"
-	case domain.KindRoomMedia:
-		return "webrtc"
-	default:
-		return string(kind)
-	}
-}
-
 func minRoomPathExpiry(left, right time.Time) time.Time {
 	if right.Before(left) {
 		return right
 	}
 	return left
+}
+
+func validateCoordinatorURL(raw string) error {
+	endpoint, err := url.Parse(raw)
+	if err != nil || endpoint.Host == "" {
+		return errors.New("room tunnel coordinator URL must be an absolute URL")
+	}
+	if endpoint.Scheme == "https" {
+		return nil
+	}
+	if endpoint.Scheme == "http" && isLoopbackHost(endpoint.Hostname()) {
+		return nil
+	}
+	return errors.New("room tunnel coordinator URL must use HTTPS outside loopback; use https://coordinator.dev.b1m.ai or https://coordinator.b1m.ai")
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	parsed := net.ParseIP(host)
+	return parsed != nil && parsed.IsLoopback()
 }

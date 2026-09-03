@@ -39,7 +39,6 @@ type CapabilityManifest struct {
 		AvailableConnections int64 `json:"available_connections"`
 	} `json:"capacity"`
 	ObservedAt time.Time `json:"observed_at"`
-	ExpiresAt  time.Time `json:"expires_at"`
 }
 
 type RoomTaskOfferBatch struct {
@@ -306,7 +305,7 @@ func NewCapabilityManifest(actorType, actorID, softwareVersion string, capabilit
 	manifest := CapabilityManifest{SchemaVersion: RoomTransferSchemaVersion, ActorType: actorType,
 		ActorID: strings.TrimSpace(actorID), SoftwareVersion: strings.TrimSpace(softwareVersion),
 		Protocols: ProtocolRangesForCapabilities(capabilities), Capabilities: capabilities,
-		ObservedAt: now.UTC(), ExpiresAt: now.UTC().Add(45 * time.Second)}
+		ObservedAt: now.UTC()}
 	manifest.Capacity.MaxConnections = maxConnections
 	manifest.Capacity.AvailableConnections = availableConnections
 	return manifest
@@ -322,10 +321,9 @@ func NewWorkerCapabilityManifest(actorID, softwareVersion string, capabilities [
 	return NewCapabilityManifest("worker", actorID, softwareVersion, capabilities, maxConnections, availableConnections, now)
 }
 
-func SupportsCapability(manifest CapabilityManifest, capability string, now time.Time) bool {
+func SupportsCapability(manifest CapabilityManifest, capability string) bool {
 	capability = strings.TrimSpace(capability)
-	if capability == "" || manifest.ExpiresAt.IsZero() || !now.Before(manifest.ExpiresAt) ||
-		manifest.Capacity.AvailableConnections <= 0 {
+	if capability == "" || manifest.Capacity.AvailableConnections <= 0 {
 		return false
 	}
 	foundCapability := false

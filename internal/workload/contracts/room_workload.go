@@ -69,6 +69,20 @@ type RoomDestinationSnapshot struct {
 	Targets         []RoomWireTarget `json:"targets"`
 }
 
+type RoomPathAuthorization struct {
+	PathID               string    `json:"path_id"`
+	Role                 string    `json:"role"`
+	TargetMemberID       string    `json:"target_member_id,omitempty"`
+	Protocol             string    `json:"protocol"`
+	ExpiresAt            time.Time `json:"expires_at"`
+	CoordinatorSignature string    `json:"coordinator_signature"`
+}
+
+type RoomPathAuthorizations struct {
+	Source  RoomPathAuthorization   `json:"source"`
+	Targets []RoomPathAuthorization `json:"targets"`
+}
+
 type RoomWorkloadSubmitWire[T any] struct {
 	Type               string                  `json:"type"`
 	SchemaVersion      string                  `json:"schema_version"`
@@ -101,6 +115,7 @@ type RoomWorkloadOfferWire[T any] struct {
 	Epoch               uint64                  `json:"epoch"`
 	Attempt             uint64                  `json:"attempt"`
 	RequiredCapacity    RoomCapacityRequirement `json:"required_capacity"`
+	PathAuthorizations  RoomPathAuthorizations  `json:"path_authorizations"`
 	OfferExpiresAt      time.Time               `json:"offer_expires_at"`
 	Details             T                       `json:"details"`
 }
@@ -122,6 +137,62 @@ func (v RoomWorkloadOfferWire[T]) Validate(now time.Time) error {
 			return fmt.Errorf("duplicate canonical room workload target %s", target.MemberID)
 		}
 		seen[target.MemberID] = struct{}{}
+	}
+	if err := v.PathAuthorizations.Validate(v.Kind, v.UnitID, v.DestinationSnapshot.Targets, now); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (v RoomPathAuthorizations) Validate(kind domain.Kind, unitID string, targets []RoomWireTarget, now time.Time) error {
+	protocol := RoomPathProtocol(kind)
+	if err := v.Source.validate(unitID+"/source", "source", "", protocol, now); err != nil {
+		return err
+	}
+	byMember := make(map[string]RoomPathAuthorization, len(v.Targets))
+	for _, target := range v.Targets {
+		if target.TargetMemberID == "" {
+			return errors.New("canonical room workload target path authorization is missing target member")
+		}
+		if _, duplicate := byMember[target.TargetMemberID]; duplicate {
+			return fmt.Errorf("duplicate canonical room workload path authorization %s", target.TargetMemberID)
+		}
+		byMember[target.TargetMemberID] = target
+	}
+	if len(byMember) != len(targets) {
+		return errors.New("canonical room workload path authorization count mismatch")
+	}
+	for _, target := range targets {
+		authorization, ok := byMember[target.MemberID]
+		if !ok {
+			return fmt.Errorf("canonical room workload target path authorization missing %s", target.MemberID)
+		}
+		if err := authorization.validate(unitID+"/target/"+target.MemberID, "target", target.MemberID, protocol, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func RoomPathProtocol(kind domain.Kind) string {
+	switch kind {
+	case domain.KindRoomDatagram:
+		return "btr-datagram"
+	case domain.KindRoomMessage, domain.KindRoomCommand:
+		return "btr-message"
+	case domain.KindRoomStream:
+		return "btr-stream"
+	case domain.KindRoomMedia:
+		return "webrtc"
+	default:
+		return string(kind)
+	}
+}
+
+func (v RoomPathAuthorization) validate(pathID, role, targetMemberID, protocol string, now time.Time) error {
+	if v.PathID != pathID || v.Role != role || v.TargetMemberID != targetMemberID || v.Protocol != protocol ||
+		v.CoordinatorSignature == "" || v.ExpiresAt.IsZero() || !now.Before(v.ExpiresAt) {
+		return errors.New("canonical room workload path authorization is incomplete or expired")
 	}
 	return nil
 }
@@ -273,12 +344,13 @@ func (i RoomWorkloadIdentity) Validate(kind domain.Kind, now time.Time) error {
 }
 
 type RoomPathIntent struct {
-	PathID         string    `json:"path_id"`
-	Role           string    `json:"role"`
-	TargetMemberID string    `json:"target_member_id,omitempty"`
-	Protocol       string    `json:"protocol"`
-	Authorization  string    `json:"authorization"`
-	ExpiresAt      time.Time `json:"expires_at"`
+	PathID               string    `json:"path_id"`
+	Role                 string    `json:"role"`
+	TargetMemberID       string    `json:"target_member_id,omitempty"`
+	Protocol             string    `json:"protocol"`
+	Authorization        string    `json:"authorization"`
+	CoordinatorSignature string    `json:"coordinator_signature"`
+	ExpiresAt            time.Time `json:"expires_at"`
 }
 
 type RoomPathLease struct {

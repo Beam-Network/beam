@@ -81,7 +81,7 @@ func (s *Service) Accept(hello WorkerHello) (OrchestratorWelcome, error) {
 	if exists && observation.PlanVersion > currentPlanVersion {
 		currentPlanVersion = observation.PlanVersion
 	}
-	if _, err := workerCapabilities(hello.Identity, hello.CapabilityManifest, hello.Capabilities, s.now()); err != nil {
+	if _, err := workerCapabilities(hello.Identity, hello.CapabilityManifest, hello.Capabilities); err != nil {
 		return OrchestratorWelcome{}, err
 	}
 	sessionBytes := make([]byte, 16)
@@ -98,7 +98,7 @@ func (s *Service) Accept(hello WorkerHello) (OrchestratorWelcome, error) {
 func (s *Service) Heartbeat(identity workload.Identity, status, region, circuitEndpoint string,
 	capabilities []string, capabilityManifest *contracts.CapabilityManifest,
 	total, available workload.Resources, planVersion uint64) error {
-	canonicalCapabilities, err := workerCapabilities(identity, capabilityManifest, capabilities, s.now())
+	canonicalCapabilities, err := workerCapabilities(identity, capabilityManifest, capabilities)
 	if err != nil {
 		return err
 	}
@@ -109,7 +109,7 @@ func (s *Service) Heartbeat(identity workload.Identity, status, region, circuitE
 	}, s.now())
 }
 
-func workerCapabilities(identity workload.Identity, manifest *contracts.CapabilityManifest, legacy []string, now time.Time) ([]string, error) {
+func workerCapabilities(identity workload.Identity, manifest *contracts.CapabilityManifest, legacy []string) ([]string, error) {
 	if manifest == nil {
 		for _, capability := range contracts.NormalizeCapabilities(legacy) {
 			if capability == contracts.TransferMultipartCapability {
@@ -120,12 +120,12 @@ func workerCapabilities(identity workload.Identity, manifest *contracts.Capabili
 	}
 	if manifest.SchemaVersion != contracts.RoomTransferSchemaVersion || manifest.ActorType != "worker" ||
 		strings.TrimSpace(manifest.ActorID) != identity.WorkerID || strings.TrimSpace(manifest.SoftwareVersion) == "" ||
-		manifest.ObservedAt.IsZero() || manifest.ExpiresAt.IsZero() || !now.Before(manifest.ExpiresAt) {
+		manifest.ObservedAt.IsZero() {
 		return nil, errors.New("invalid worker capability manifest")
 	}
 	supported := make([]string, 0, len(manifest.Capabilities))
 	for _, capability := range contracts.NormalizeCapabilities(manifest.Capabilities) {
-		if contracts.SupportsCapability(*manifest, capability, now) {
+		if contracts.SupportsCapability(*manifest, capability) {
 			supported = append(supported, capability)
 		}
 	}

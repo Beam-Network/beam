@@ -34,7 +34,7 @@ Go worker -> BeamLink/WCP -> Go orchestrator -> Core NATS -> BeamCore room_task_
 
 `room.transfer` handles Room data-transfer lanes.
 
-Workers publish WCP capability manifests. The orchestrator aggregates live worker capacity and publishes `capability_update` to BeamCore.
+Workers publish WCP capability manifests. The orchestrator sends `capability_update` after registration and whenever aggregated capabilities or capacity change. BeamCore keeps the last accepted manifest until replacement. Heartbeat/session state determines liveness.
 
 ## Setup Guides
 

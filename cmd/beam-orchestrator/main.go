@@ -71,7 +71,6 @@ func serve(arguments []string) {
 	beamCoreNATS.SoftwareVersion = version
 	flags.StringVar(&beamCoreNATS.EvidenceSubject, "beamcore-nats-evidence-subject", "beam.workloads.beamcore.payment-evidence", "BeamCore payment evidence request/reply subject")
 	roomTunnelCoordinatorURL := flags.String("room-tunnel-coordinator-url", os.Getenv("BEAM_ROOM_TUNNEL_COORDINATOR_URL"), "room tunnel coordinator HTTPS URL")
-	roomTunnelWorkerToken := flags.String("room-tunnel-worker-token", os.Getenv("BEAM_ROOM_TUNNEL_WORKER_TOKEN"), "room tunnel coordinator worker credential")
 	studioNATS := natsFlags(flags, "studio", "BEAM_STUDIO", "BEAM_WORKFLOW_TASKS", "beam.workloads.studio.tasks",
 		"beam.workloads.studio.results", "beam-orchestrator-studio")
 	tunnelNATS := natsFlags(flags, "tunnel", "BEAM_TUNNEL", "TUNNEL_WORKLOADS", "beam.workloads.tunnel.tasks",
@@ -163,11 +162,8 @@ func serve(arguments []string) {
 		log.Fatal("WCP must be enabled when a NATS workload connector is configured")
 	}
 	if tasks != nil {
-		if (*roomTunnelCoordinatorURL == "") != (*roomTunnelWorkerToken == "") {
-			log.Fatal("room tunnel coordinator URL and worker token must be configured together")
-		}
 		if *roomTunnelCoordinatorURL != "" {
-			provisioner, provisionerErr := connectors.NewRoomTunnelHTTPProvisioner(*roomTunnelCoordinatorURL, *roomTunnelWorkerToken, nil)
+			provisioner, provisionerErr := connectors.NewRoomTunnelHTTPProvisioner(*roomTunnelCoordinatorURL, nil)
 			if provisionerErr != nil {
 				log.Fatal(provisionerErr)
 			}

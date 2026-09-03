@@ -36,11 +36,12 @@ type orchestratorControlEnvelope struct {
 }
 
 type roomControl struct {
-	config    NATSConfig
-	conn      *nats.Conn
-	rooms     *roomtransfer.Service
-	workloads *roomworkloads.Manager
-	tasks     *dispatch.Service
+	config                    NATSConfig
+	conn                      *nats.Conn
+	rooms                     *roomtransfer.Service
+	workloads                 *roomworkloads.Manager
+	tasks                     *dispatch.Service
+	lastCapabilityFingerprint string
 }
 
 func newRoomControl(config NATSConfig, conn *nats.Conn, rooms *roomtransfer.Service,
@@ -69,7 +70,7 @@ func (control *roomControl) run(ctx context.Context) error {
 	if err := control.request(ctx, "register", map[string]any{"gateway_url": control.config.GatewayURL, "ready": true}); err != nil {
 		return fmt.Errorf("register Orchestrator: %w", err)
 	}
-	if err := control.publishCapability(ctx); err != nil {
+	if err := control.publishCapability(ctx, true); err != nil {
 		return err
 	}
 	messages := make(chan *nats.Msg, 256)
@@ -140,9 +141,7 @@ func (control *roomControl) run(ctx context.Context) error {
 	}
 }
 
-// runHeartbeat keeps routing liveness independent from workload admission.
-// Room path provisioning may involve remote agents and must not prevent the
-// orchestrator from renewing its short-lived BeamCore capability manifest.
+// runHeartbeat sends liveness and capability changes.
 func (control *roomControl) runHeartbeat(ctx context.Context, failures chan<- error) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
@@ -155,7 +154,7 @@ func (control *roomControl) runHeartbeat(ctx context.Context, failures chan<- er
 				reportHeartbeatFailure(ctx, failures, err)
 				return
 			}
-			if err := control.publishCapability(ctx); err != nil {
+			if err := control.publishCapability(ctx, false); err != nil {
 				reportHeartbeatFailure(ctx, failures, err)
 				return
 			}
@@ -335,9 +334,18 @@ func (control *roomControl) SubmitRoomWorkloadProvisioningResult(ctx context.Con
 	return control.request(ctx, "room_workload_provisioning_result", value)
 }
 
-func (control *roomControl) publishCapability(ctx context.Context) error {
+func (control *roomControl) publishCapability(ctx context.Context, force bool) error {
 	now := time.Now().UTC()
-	return control.request(ctx, "capability_update", control.capabilityManifest(now))
+	manifest := control.capabilityManifest(now)
+	fingerprint := capabilityManifestFingerprint(manifest)
+	if !force && fingerprint == control.lastCapabilityFingerprint {
+		return nil
+	}
+	if err := control.request(ctx, "capability_update", manifest); err != nil {
+		return err
+	}
+	control.lastCapabilityFingerprint = fingerprint
+	return nil
 }
 
 func (control *roomControl) capabilityManifest(now time.Time) contracts.CapabilityManifest {
@@ -378,6 +386,29 @@ func (control *roomControl) capabilityManifest(now time.Time) contracts.Capabili
 	return manifest
 }
 
+func capabilityManifestFingerprint(manifest contracts.CapabilityManifest) string {
+	payload := struct {
+		SoftwareVersion string                    `json:"software_version"`
+		Protocols       []contracts.ProtocolRange `json:"protocols"`
+		Capabilities    []string                  `json:"capabilities"`
+		Capacity        struct {
+			MaxConnections       int64 `json:"max_connections"`
+			AvailableConnections int64 `json:"available_connections"`
+		} `json:"capacity"`
+	}{
+		SoftwareVersion: manifest.SoftwareVersion,
+		Protocols:       manifest.Protocols,
+		Capabilities:    manifest.Capabilities,
+	}
+	payload.Capacity.MaxConnections = manifest.Capacity.MaxConnections
+	payload.Capacity.AvailableConnections = manifest.Capacity.AvailableConnections
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
 func (control *roomControl) request(ctx context.Context, messageType string, payload any) error {
 	requestID := controlID()
 	jsonPayload, err := json.Marshal(payload)
@@ -408,6 +439,22 @@ func (control *roomControl) request(ctx context.Context, messageType string, pay
 	if response.RequestID != requestID || response.Producer != "transfer-runtime" || response.MessageType == "error" ||
 		response.MessageType == "register_error" {
 		return fmt.Errorf("BeamCore rejected %s", messageType)
+	}
+	if messageType == "capability_update" {
+		encodedPayload, err := json.Marshal(response.Payload)
+		if err != nil {
+			return err
+		}
+		var acknowledgement struct {
+			Accepted bool   `json:"accepted"`
+			Reason   string `json:"reason"`
+		}
+		if err := json.Unmarshal(encodedPayload, &acknowledgement); err != nil {
+			return err
+		}
+		if !acknowledgement.Accepted {
+			return fmt.Errorf("BeamCore rejected capability_update: %s", fallback(acknowledgement.Reason, "not accepted"))
+		}
 	}
 	if messageType == "room_task_result" || messageType == "task_result" {
 		encodedPayload, err := json.Marshal(response.Payload)

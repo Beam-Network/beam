@@ -9,7 +9,7 @@ The Go orchestrator connects to BeamCore over Core NATS, routes `transfer.multip
 - BeamCore orchestrator registration response with `orchestrator_id` and `api_key`
 - Public orchestrator gateway URL
 - WCP TLS certificate and key
-- Room tunnel coordinator URL and worker token for `room.transfer`
+- Room tunnel coordinator URL for `room.transfer` and generic room workloads
 
 ## Install
 
@@ -60,8 +60,7 @@ export BEAMCORE_GATEWAY_URL=https://orchestrator.example.com
 export BEAM_WCP_LISTEN_ADDR=0.0.0.0:8782
 export BEAM_WCP_TLS_CERT=/path/to/wcp.crt
 export BEAM_WCP_TLS_KEY=/path/to/wcp.key
-export BEAM_ROOM_TUNNEL_COORDINATOR_URL=https://room-coordinator.example.com
-export BEAM_ROOM_TUNNEL_WORKER_TOKEN=room-tunnel-token
+export BEAM_ROOM_TUNNEL_COORDINATOR_URL=https://coordinator.b1m.ai
 ```
 
 ## Run

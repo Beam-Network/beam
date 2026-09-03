@@ -39,8 +39,7 @@ export BEAMCORE_GATEWAY_URL=https://orchestrator.example.com
 export BEAM_WCP_LISTEN_ADDR=0.0.0.0:8782
 export BEAM_WCP_TLS_CERT=/path/to/wcp.crt
 export BEAM_WCP_TLS_KEY=/path/to/wcp.key
-export BEAM_ROOM_TUNNEL_COORDINATOR_URL=https://room-coordinator.example.com
-export BEAM_ROOM_TUNNEL_WORKER_TOKEN=room-tunnel-token
+export BEAM_ROOM_TUNNEL_COORDINATOR_URL=https://coordinator.b1m.ai
 
 ./bin/beam-orchestrator serve \
   --hotkey "$BEAM_BITTENSOR_HOTKEY" \

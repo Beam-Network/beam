@@ -9,7 +9,7 @@ Run a Go orchestrator on BEAM mainnet for `worker_task_offer_batch` and `room_ta
 - BeamCore orchestrator registration response with `orchestrator_id` and `api_key`
 - Public orchestrator gateway URL
 - WCP TLS certificate and key
-- Room tunnel coordinator URL and worker token for `room.transfer`
+- Room tunnel coordinator URL for `room.transfer` and generic room workloads
 
 ## 1. Install
 
@@ -64,8 +64,7 @@ export BEAMCORE_GATEWAY_URL=https://orchestrator.example.com
 export BEAM_WCP_LISTEN_ADDR=0.0.0.0:8782
 export BEAM_WCP_TLS_CERT=/path/to/wcp.crt
 export BEAM_WCP_TLS_KEY=/path/to/wcp.key
-export BEAM_ROOM_TUNNEL_COORDINATOR_URL=https://room-coordinator.example.com
-export BEAM_ROOM_TUNNEL_WORKER_TOKEN=room-tunnel-token
+export BEAM_ROOM_TUNNEL_COORDINATOR_URL=https://coordinator.b1m.ai
 ```
 
 Credentials-file auth uses `BEAMCORE_NATS_CREDS`. Token auth uses `BEAMCORE_NATS_TOKEN`.
@@ -94,7 +93,7 @@ curl -X POST http://127.0.0.1:8781/v1/orchestrator/memberships \
 
 `room.transfer` handles Room data-transfer lanes from `room_task_offer_batch`.
 
-The orchestrator publishes `capability_update` from connected WCP worker manifests and live capacity.
+The orchestrator publishes `capability_update` after registration and whenever advertised capabilities or capacity change. BeamCore keeps the last accepted manifest until replacement. Heartbeat/session state determines liveness.
 
 ## Health
 
