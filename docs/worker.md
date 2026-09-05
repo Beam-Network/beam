@@ -1,6 +1,6 @@
 # BEAM Worker Guide
 
-Run a Go worker on BEAM mainnet for `transfer.multipart` and `room.transfer`.
+Run a Go worker on BEAM mainnet for `transfer.multipart` and direct E2EE `room.transfer` workloads.
 
 ## Requirements
 
@@ -74,8 +74,15 @@ export BEAM_WCP_SERVER_NAME=orchestrator.example.com
 
 ./bin/beam-worker serve \
   --node-key data/worker/node.key \
-  --capabilities transfer.multipart,room.transfer
+  --capabilities transfer.multipart,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v1 \
+  --room-transfer-addr 0.0.0.0:9470 \
+  --room-transfer-advertise-url https://worker.example.com:9470
 ```
+
+The Worker accepts only `btr.object.chunk.aead.v1` envelopes bound to the
+offer's room/channel key epoch. It buffers ciphertext and validates signed
+ciphertext hash receipts; encryption keys and plaintext remain in the room
+agents.
 
 Add `BEAM_ORCHESTRATOR_DELEGATION=<base64url-value>` when the membership response includes a delegation.
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -83,7 +84,8 @@ func (s *Service) CapabilityAvailable() bool {
 	if !ready {
 		return false
 	}
-	_, err := s.dispatcher.SelectWorker([]string{contracts.RoomTransferCapability}, s.config.Resources, nil)
+	_, err := s.dispatcher.SelectWorker([]string{contracts.RoomTransferCapability, contracts.RoomTransferDirectCapability,
+		contracts.RoomTransferE2EECapability}, s.config.Resources, nil)
 	return err == nil
 }
 
@@ -153,7 +155,8 @@ func (s *Service) Submit(ctx context.Context, batch contracts.RoomTaskOfferBatch
 			continue
 		}
 		if lane.WorkerID == "" {
-			placement, err := s.dispatcher.SelectWorker([]string{contracts.RoomTransferCapability}, s.resourcesFor(batch, offerLane), nil)
+			placement, err := s.dispatcher.SelectWorker([]string{contracts.RoomTransferCapability, contracts.RoomTransferDirectCapability,
+				contracts.RoomTransferE2EECapability}, s.resourcesFor(batch, offerLane), nil)
 			if err != nil {
 				return fmt.Errorf("select Worker for room lane %s: %w", offerLane.LaneID, err)
 			}
@@ -271,7 +274,8 @@ func (s *Service) DeliverCheckpoint(ctx context.Context, checkpoint domain.Check
 		ResultID: resultID(record.Batch.TransferID, laneID, offer.Attempt, fmt.Sprintf("checkpoint:%d", checkpoint.Sequence)),
 		BatchID:  record.Batch.BatchID, RoomID: record.Batch.RoomID, TransferID: record.Batch.TransferID, LaneID: laneID,
 		Attempt: offer.Attempt, WorkerID: lane.WorkerID, WorkerAcknowledgedAt: lane.WorkerAcknowledgedAt,
-		ExecutableLeaseIssuedAt: lane.ExecutableLeaseIssuedAt, ExecutionStage: "streaming", ReportedAt: s.config.Now().UTC()}
+		ExecutableLeaseIssuedAt: lane.ExecutableLeaseIssuedAt, Runtime: lane.Runtime,
+		ExecutionStage: "streaming", ReportedAt: s.config.Now().UTC()}
 	for _, receipt := range value.SourceReceipts {
 		result.SourceReceipts = append(result.SourceReceipts, receipt)
 	}
@@ -377,7 +381,8 @@ func (s *Service) DeliverResult(ctx context.Context, task dispatch.Record, resul
 		ResultID: resultID(record.Batch.TransferID, laneID, offer.Attempt, "terminal"), BatchID: record.Batch.BatchID,
 		RoomID: record.Batch.RoomID, TransferID: record.Batch.TransferID, LaneID: laneID, Attempt: offer.Attempt,
 		WorkerID: lane.WorkerID, WorkerAcknowledgedAt: lane.WorkerAcknowledgedAt,
-		ExecutableLeaseIssuedAt: lane.ExecutableLeaseIssuedAt, ExecutionStage: "terminal", ReportedAt: s.config.Now().UTC()}
+		ExecutableLeaseIssuedAt: lane.ExecutableLeaseIssuedAt, Runtime: lane.Runtime,
+		ExecutionStage: "terminal", ReportedAt: s.config.Now().UTC()}
 	if err := decodeOutput(result.Outputs, "source_receipts", &roomResult.SourceReceipts); err != nil {
 		return err
 	}
@@ -408,6 +413,49 @@ func (s *Service) DeliverResult(ctx context.Context, task dispatch.Record, resul
 	lane.State = LaneCompleted
 	record.Lanes[laneID] = lane
 	record.UpdatedAt = s.config.Now().UTC()
+	return s.store.Put(record)
+}
+
+func (s *Service) DeliverProgress(ctx context.Context, task dispatch.Record, progress domain.Progress) error {
+	encoded := strings.TrimSpace(progress.Outputs["room_transfer_runtime"])
+	if encoded == "" {
+		return nil
+	}
+	record, laneID, found := s.findByWorkload(task.WorkloadKey)
+	if !found {
+		return errors.New("room transfer progress does not match a durable lane")
+	}
+	lock := s.batchLock(record.Batch.BatchID)
+	lock.Lock()
+	defer lock.Unlock()
+	record, ok := s.store.Get(record.Batch.BatchID)
+	if !ok {
+		return errors.New("room transfer batch disappeared")
+	}
+	lane := record.Lanes[laneID]
+	offer, ok := findOfferLane(record.Batch, laneID)
+	if !ok {
+		return errors.New("room transfer lane disappeared")
+	}
+	var directRuntime contracts.DirectRoomTransferRuntime
+	if err := json.Unmarshal([]byte(encoded), &directRuntime); err != nil {
+		return fmt.Errorf("decode room transfer runtime: %w", err)
+	}
+	if err := directRuntime.Validate(lane.WorkerID, laneID, offer.Attempt, s.config.Now().UTC()); err != nil {
+		return err
+	}
+	roomResult := contracts.RoomTaskResult{Type: "room_task_result", SchemaVersion: contracts.RoomTransferSchemaVersion,
+		ResultID: resultID(record.Batch.TransferID, laneID, offer.Attempt, "runtime:"+directRuntime.AccessToken),
+		BatchID:  record.Batch.BatchID, RoomID: record.Batch.RoomID, TransferID: record.Batch.TransferID,
+		LaneID: laneID, Attempt: offer.Attempt, WorkerID: lane.WorkerID,
+		WorkerAcknowledgedAt: lane.WorkerAcknowledgedAt, ExecutableLeaseIssuedAt: lane.ExecutableLeaseIssuedAt,
+		ExecutionStage: "streaming", Runtime: &directRuntime, ReportedAt: progress.ObservedAt.UTC()}
+	if err := s.submitResult(ctx, &lane, roomResult); err != nil {
+		return err
+	}
+	lane.Runtime = &directRuntime
+	record.Lanes[laneID] = lane
+	record.UpdatedAt = roomResult.ReportedAt
 	return s.store.Put(record)
 }
 

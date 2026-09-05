@@ -5,7 +5,7 @@ Room transfer lets BeamCore assign file delivery lanes to participant workers in
 ## Contracts
 
 - Schema: `room-transfer/v1`
-- Capability: `room.transfer`
+- Capabilities: `room.transfer`, `room.transfer.direct.v1`, and `room.transfer.e2ee.v1`
 - Offer message: `room_task_offer_batch`
 - Cancel message: `room_task_cancel`
 - Result message: `room_task_result`
@@ -13,19 +13,38 @@ Room transfer lets BeamCore assign file delivery lanes to participant workers in
 ## Participant Setup
 
 1. Build `beam-orchestrator` and `beam-worker`.
-2. Run the orchestrator with `BEAM_ENV=prod`, BeamCore NATS auth, WCP TLS, and Room tunnel coordinator settings.
+2. Run the orchestrator with `BEAM_ENV=prod`, BeamCore NATS auth, WCP TLS, and the Room tunnel coordinator URL.
 3. Register each WCP worker membership through the orchestrator API.
-4. Run workers with `--capabilities transfer.multipart,room.transfer`.
+4. Give direct-capable workers a public HTTP port and run them with
+   `--capabilities transfer.multipart,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v1`,
+   `--room-transfer-addr`, and `--room-transfer-advertise-url`.
 
 ## Flow
 
 BeamCore sends `room_task_offer_batch` to an eligible orchestrator.
 
-The orchestrator redeems scoped Room tunnel leases, selects a connected WCP worker, and sends a `room.transfer` workload.
+The orchestrator redeems independently scoped source and target path leases,
+selects a connected WCP worker that advertises the direct and E2EE capabilities,
+and sends a `room.transfer` workload.
 
-The worker reads assigned source chunk ranges, writes target members, checkpoints delivered cells, and returns signed receipts.
+The Worker publishes a per-workload bearer and direct runtime URL through
+progress. Source and target agents learn that runtime from signed room status,
+then connect outbound with both the runtime bearer and their own path token.
+The source encrypts each immutable object cell with the room/channel key epoch
+and uploads one signed ciphertext chunk at a time. Targets authenticate and
+decrypt locally, write plaintext to their inboxes, and return signed range and
+final receipts over the ciphertext commitment. The Worker holds at most one
+ciphertext chunk per active lane, checkpoints completed cells, and returns the
+receipts through the orchestrator.
 
 The orchestrator sends `room_task_result` to BeamCore.
+
+Room transfers do not allocate a relay session or expose an agent listener.
+The coordinator controls membership and path authorization, while the selected
+Worker owns the shared data service in the same pattern as Worker-hosted media.
+Workers validate the required protection envelope and key epoch but never
+receive room/channel keys. Missing E2EE capability or invalid protection fails
+closed.
 
 ## Commands
 
@@ -65,5 +84,7 @@ export BEAM_WCP_SERVER_NAME=orchestrator.example.com
 
 ./bin/beam-worker serve \
   --node-key data/worker/node.key \
-  --capabilities transfer.multipart,room.transfer
+  --capabilities transfer.multipart,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v1 \
+  --room-transfer-addr 0.0.0.0:9470 \
+  --room-transfer-advertise-url https://worker.example.com:9470
 ```

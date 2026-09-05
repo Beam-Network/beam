@@ -358,7 +358,8 @@ func (control *roomControl) capabilityManifest(now time.Time) contracts.Capabili
 		capabilities = append(capabilities, contracts.TransferMultipartCapability)
 	}
 	if control.rooms != nil && control.rooms.CapabilityAvailable() {
-		capabilities = append(capabilities, contracts.RoomTransferCapability)
+		capabilities = append(capabilities, contracts.RoomTransferCapability, contracts.RoomTransferDirectCapability,
+			contracts.RoomTransferE2EECapability)
 	}
 	for _, kind := range []domain.Kind{domain.KindRoomDatagram, domain.KindRoomMessage, domain.KindRoomCommand,
 		domain.KindRoomStream, domain.KindRoomMedia} {

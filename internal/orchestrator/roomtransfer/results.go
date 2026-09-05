@@ -52,7 +52,8 @@ func (s *Service) workload(batch contracts.RoomTaskOfferBatch, offer contracts.R
 	}
 	payload, err := json.Marshal(contracts.RoomTransfer{SchemaVersion: contracts.RoomTransferSchemaVersion,
 		BatchID: batch.BatchID, RoomID: batch.RoomID, ChannelID: batch.ChannelID, PublicationID: batch.PublicationID,
-		TransferID: batch.TransferID, SnapshotVersion: batch.SnapshotVersion, LaneID: offer.LaneID, Attempt: offer.Attempt,
+		TransferID: batch.TransferID, SnapshotVersion: batch.SnapshotVersion, Protection: batch.Protection,
+		LaneID: offer.LaneID, Attempt: offer.Attempt,
 		FileSizeBytes: batch.FileSizeBytes, ChunkSizeBytes: batch.ChunkSizeBytes, ChunkCount: batch.ChunkCount,
 		ChunkStart: offer.ChunkStart, ChunkEnd: offer.ChunkEnd, SourceLease: *lane.SourceLease, Targets: targets})
 	if err != nil {
@@ -62,7 +63,8 @@ func (s *Service) workload(batch contracts.RoomTaskOfferBatch, offer contracts.R
 	return domain.Spec{WorkloadID: workID, AttemptID: attemptID,
 		Identity: domain.Identity{WorkerID: lane.WorkerID, NodeID: lane.NodeID}, Kind: domain.KindRoomTransfer,
 		Class: domain.ClassJob, Source: domain.Source{System: "beamcore.room", Reference: batch.TransferID},
-		RequiredCapabilities: []string{contracts.RoomTransferCapability}, Resources: s.resourcesFor(batch, offer),
+		RequiredCapabilities: []string{contracts.RoomTransferCapability, contracts.RoomTransferDirectCapability,
+			contracts.RoomTransferE2EECapability}, Resources: s.resourcesFor(batch, offer),
 		Lease:    domain.Lease{OfferExpiresAt: minTime(batch.OfferExpiresAt, expiresAt), AssignmentExpiresAt: expiresAt},
 		Evidence: domain.EvidencePolicy{ReceiptRequired: true, Commitments: []string{"target_receipts"}}, Payload: payload}, nil
 }
@@ -284,3 +286,4 @@ func fallback(value, other string) string {
 }
 
 var _ dispatch.ResultSink = (*Service)(nil)
+var _ dispatch.ProgressSink = (*Service)(nil)

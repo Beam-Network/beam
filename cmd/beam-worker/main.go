@@ -73,7 +73,7 @@ func serve(arguments []string) {
 	memory := flags.Int64("memory-bytes", 512<<20, "reservable memory")
 	scratch := flags.Int64("scratch-bytes", 10<<30, "reservable scratch bytes")
 	bandwidth := flags.Int64("bandwidth-mbps", 100, "reservable bandwidth")
-	capabilityList := flags.String("capabilities", "transfer.multipart,room.transfer", "comma-separated enabled capabilities")
+	capabilityList := flags.String("capabilities", "transfer.multipart,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v1", "comma-separated enabled capabilities")
 	statePath := flags.String("state", "data/worker/workloads.json", "durable workload journal")
 	actionRoot := flags.String("action-root", os.Getenv("BEAM_ACTION_ROOT"), "root of checksum-pinned Studio actions")
 	actionCache := flags.String("action-cache", "data/worker/action-cache", "content-addressed Studio action cache")
@@ -89,6 +89,8 @@ func serve(arguments []string) {
 	allowPublicNetwork := flags.Bool("allow-public-network-listeners", false, "allow assignment-token-protected public tunnel and room listeners")
 	mediaAddr := flags.String("media-addr", envOrDefault("BEAM_MEDIA_LISTEN_ADDR", "127.0.0.1:0"), "WHIP/WHEP signaling listen address for worker-hosted room media")
 	mediaAdvertiseURL := flags.String("media-advertise-url", os.Getenv("BEAM_MEDIA_ADVERTISE_URL"), "public base URL reaching the worker media listener")
+	roomTransferAddr := flags.String("room-transfer-addr", envOrDefault("BEAM_ROOM_TRANSFER_LISTEN_ADDR", "127.0.0.1:0"), "HTTP listen address for Worker-hosted room transfers")
+	roomTransferAdvertiseURL := flags.String("room-transfer-advertise-url", os.Getenv("BEAM_ROOM_TRANSFER_ADVERTISE_URL"), "public base URL reaching the Worker room-transfer listener")
 	mediaPublicIP := flags.String("media-public-ip", os.Getenv("BEAM_MEDIA_PUBLIC_IP"), "public IP announced in worker WebRTC ICE candidates")
 	mediaUDPPortMin := flags.Uint("media-udp-port-min", uint(envIntOrDefault("BEAM_MEDIA_UDP_PORT_MIN", 0)), "minimum worker WebRTC UDP port")
 	mediaUDPPortMax := flags.Uint("media-udp-port-max", uint(envIntOrDefault("BEAM_MEDIA_UDP_PORT_MAX", 0)), "maximum worker WebRTC UDP port")
@@ -228,8 +230,20 @@ func serve(arguments []string) {
 	if contains(capabilities, "room.stream") {
 		registerHandler(roomworkloadhandlers.NewStreamHandler(nil))
 	}
-	if contains(capabilities, "room.transfer") {
-		registerHandler(roomtransferhandler.NewHandler(nil))
+	directRoomTransfer := contains(capabilities, contracts.RoomTransferDirectCapability)
+	e2eeRoomTransfer := contains(capabilities, contracts.RoomTransferE2EECapability)
+	if directRoomTransfer != e2eeRoomTransfer {
+		log.Fatal("room.transfer.direct.v1 and room.transfer.e2ee.v1 must be enabled together")
+	}
+	if directRoomTransfer {
+		transferHandler := roomtransferhandler.NewHandler(roomtransferhandler.Config{ListenAddress: *roomTransferAddr,
+			AdvertiseURL: *roomTransferAdvertiseURL})
+		// Direct transfer sessions share one token-authenticated HTTP listener.
+		// Keep that listener in the Worker process so all active lanes are
+		// multiplexed on the advertised endpoint.
+		if registerErr := registry.Register(transferHandler); registerErr != nil {
+			log.Fatal(registerErr)
+		}
 	}
 	store, err := runtime.OpenFileStore(*statePath)
 	if err != nil {

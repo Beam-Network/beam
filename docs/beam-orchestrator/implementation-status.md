@@ -7,7 +7,7 @@ The public participant runtime includes Go orchestrators, Go workers, Room trans
 | Path | Command | Capabilities |
 | --- | --- | --- |
 | Go orchestrator | `./bin/beam-orchestrator serve` | Core NATS, WCP routing, `worker_task_offer_batch`, `room_task_offer_batch`, `capability_update` |
-| Go worker | `./bin/beam-worker serve` | `transfer.multipart`, `room.transfer` |
+| Go worker | `./bin/beam-worker serve` | `transfer.multipart`, `room.transfer`, `room.transfer.direct.v1`, `room.transfer.e2ee.v1` |
 | Validator | `python actors/validator/main.py` | BeamCore PRISM weight setting |
 
 ## Build
@@ -42,7 +42,7 @@ export NETUID=105
 ## Room Transfer Contracts
 
 - Schema: `room-transfer/v1`
-- Worker capability: `room.transfer`
+- Worker capabilities: `room.transfer`, `room.transfer.direct.v1`, and `room.transfer.e2ee.v1`
 - Transfer capability: `transfer.multipart`
 - Offer: `room_task_offer_batch`
 - Cancel: `room_task_cancel`

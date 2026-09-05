@@ -12,7 +12,6 @@ import (
 	distributionhandler "github.com/Beam-Network/beam/internal/workload/handlers/distribution"
 	roomhandler "github.com/Beam-Network/beam/internal/workload/handlers/room"
 	roommediahandler "github.com/Beam-Network/beam/internal/workload/handlers/roommedia"
-	roomtransferhandler "github.com/Beam-Network/beam/internal/workload/handlers/roomtransfer"
 	roomworkloadhandlers "github.com/Beam-Network/beam/internal/workload/handlers/roomworkloads"
 	"github.com/Beam-Network/beam/internal/workload/handlers/transfer"
 	tunnelhandler "github.com/Beam-Network/beam/internal/workload/handlers/tunnel"
@@ -57,7 +56,7 @@ func (c Config) ForKind(kind domain.Kind) Config {
 	switch kind {
 	case domain.KindTransferDistribute:
 		return Config{ControlAddress: c.ControlAddress, ControlToken: c.ControlToken}
-	case domain.KindTransferMultipart, domain.KindRoomTransfer, domain.KindRoomDatagram,
+	case domain.KindTransferMultipart, domain.KindRoomDatagram,
 		domain.KindRoomMessage, domain.KindRoomCommand, domain.KindRoomStream:
 		return Config{}
 	case domain.KindActionExecute:
@@ -143,8 +142,6 @@ func BuildHandler(kind domain.Kind, config Config) (runtime.Handler, error) {
 		return roomworkloadhandlers.NewCommandHandler(nil), nil
 	case domain.KindRoomStream:
 		return roomworkloadhandlers.NewStreamHandler(nil), nil
-	case domain.KindRoomTransfer:
-		return roomtransferhandler.NewHandler(nil), nil
 	default:
 		return nil, errors.New("workload kind has no isolated subsystem implementation")
 	}

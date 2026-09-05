@@ -24,21 +24,22 @@ const (
 )
 
 type LaneRecord struct {
-	LaneID                  string                           `json:"lane_id"`
-	WorkerID                string                           `json:"worker_id,omitempty"`
-	NodeID                  string                           `json:"node_id,omitempty"`
-	State                   LaneState                        `json:"state"`
-	SourceLease             *contracts.TunnelLease           `json:"source_lease,omitempty"`
-	TargetLeases            map[string]contracts.TunnelLease `json:"target_leases,omitempty"`
-	ProvisionFailures       map[string]contracts.RoomFailure `json:"provision_failures,omitempty"`
-	WorkloadKey             string                           `json:"workload_key,omitempty"`
-	SourceReceipts          []contracts.SourceRangeReceipt   `json:"source_receipts,omitempty"`
-	TargetReceipts          []contracts.TargetRangeReceipt   `json:"target_receipts,omitempty"`
-	FinalTargetReceipts     []contracts.FinalTargetReceipt   `json:"final_target_receipts,omitempty"`
-	WorkerAcknowledgedAt    *time.Time                       `json:"worker_acknowledged_at,omitempty"`
-	ExecutableLeaseIssuedAt *time.Time                       `json:"executable_lease_issued_at,omitempty"`
-	ReportedResultIDs       map[string]bool                  `json:"reported_result_ids,omitempty"`
-	Error                   string                           `json:"error,omitempty"`
+	LaneID                  string                               `json:"lane_id"`
+	WorkerID                string                               `json:"worker_id,omitempty"`
+	NodeID                  string                               `json:"node_id,omitempty"`
+	State                   LaneState                            `json:"state"`
+	SourceLease             *contracts.TunnelLease               `json:"source_lease,omitempty"`
+	TargetLeases            map[string]contracts.TunnelLease     `json:"target_leases,omitempty"`
+	ProvisionFailures       map[string]contracts.RoomFailure     `json:"provision_failures,omitempty"`
+	WorkloadKey             string                               `json:"workload_key,omitempty"`
+	SourceReceipts          []contracts.SourceRangeReceipt       `json:"source_receipts,omitempty"`
+	TargetReceipts          []contracts.TargetRangeReceipt       `json:"target_receipts,omitempty"`
+	FinalTargetReceipts     []contracts.FinalTargetReceipt       `json:"final_target_receipts,omitempty"`
+	WorkerAcknowledgedAt    *time.Time                           `json:"worker_acknowledged_at,omitempty"`
+	ExecutableLeaseIssuedAt *time.Time                           `json:"executable_lease_issued_at,omitempty"`
+	Runtime                 *contracts.DirectRoomTransferRuntime `json:"runtime,omitempty"`
+	ReportedResultIDs       map[string]bool                      `json:"reported_result_ids,omitempty"`
+	Error                   string                               `json:"error,omitempty"`
 }
 
 type Record struct {

@@ -147,7 +147,7 @@ func validateCoordinatorURL(raw string) error {
 	if endpoint.Scheme == "http" && isLoopbackHost(endpoint.Hostname()) {
 		return nil
 	}
-	return errors.New("room tunnel coordinator URL must use HTTPS outside loopback; use https://coordinator.dev.b1m.ai or https://coordinator.b1m.ai")
+	return errors.New("room tunnel coordinator URL must use HTTPS outside loopback; mainnet uses https://coordinator.b1m.ai")
 }
 
 func isLoopbackHost(host string) bool {

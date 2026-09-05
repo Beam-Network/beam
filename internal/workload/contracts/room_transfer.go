@@ -14,12 +14,24 @@ import (
 )
 
 const (
-	RoomTransferSchemaVersion   = "room-transfer/v1"
-	TransferMultipartCapability = "transfer.multipart"
-	RoomTransferCapability      = "room.transfer"
-	TunnelLeaseRoleSourceRead   = "source_read"
-	TunnelLeaseRoleTargetWrite  = "target_write"
+	RoomTransferSchemaVersion    = "room-transfer/v1"
+	TransferMultipartCapability  = "transfer.multipart"
+	RoomTransferCapability       = "room.transfer"
+	RoomTransferDirectCapability = "room.transfer.direct.v1"
+	RoomTransferE2EECapability   = "room.transfer.e2ee.v1"
+	RoomTransferProtectionScheme = "btr.object.chunk.aead.v1"
+	TunnelLeaseRoleSourceRead    = "source_read"
+	TunnelLeaseRoleTargetWrite   = "target_write"
 )
+
+type RoomTransferProtection struct {
+	Scheme   string `json:"scheme"`
+	KeyEpoch uint64 `json:"key_epoch"`
+}
+
+func (protection RoomTransferProtection) Valid() bool {
+	return protection.Scheme == RoomTransferProtectionScheme && protection.KeyEpoch > 0
+}
 
 type ProtocolRange struct {
 	Name string `json:"name"`
@@ -42,20 +54,21 @@ type CapabilityManifest struct {
 }
 
 type RoomTaskOfferBatch struct {
-	Type            string               `json:"type"`
-	SchemaVersion   string               `json:"schema_version"`
-	BatchID         string               `json:"batch_id"`
-	RoomID          string               `json:"room_id"`
-	ChannelID       string               `json:"channel_id"`
-	PublicationID   string               `json:"publication_id"`
-	TransferID      string               `json:"transfer_id"`
-	SnapshotVersion uint64               `json:"snapshot_version"`
-	FileSizeBytes   int64                `json:"file_size_bytes"`
-	ChunkSizeBytes  int64                `json:"chunk_size_bytes"`
-	ChunkCount      int64                `json:"chunk_count"`
-	Targets         []RoomTransferTarget `json:"targets"`
-	Lanes           []RoomSourceLane     `json:"lanes"`
-	OfferExpiresAt  time.Time            `json:"offer_expires_at"`
+	Type            string                 `json:"type"`
+	SchemaVersion   string                 `json:"schema_version"`
+	BatchID         string                 `json:"batch_id"`
+	RoomID          string                 `json:"room_id"`
+	ChannelID       string                 `json:"channel_id"`
+	PublicationID   string                 `json:"publication_id"`
+	TransferID      string                 `json:"transfer_id"`
+	SnapshotVersion uint64                 `json:"snapshot_version"`
+	Protection      RoomTransferProtection `json:"protection"`
+	FileSizeBytes   int64                  `json:"file_size_bytes"`
+	ChunkSizeBytes  int64                  `json:"chunk_size_bytes"`
+	ChunkCount      int64                  `json:"chunk_count"`
+	Targets         []RoomTransferTarget   `json:"targets"`
+	Lanes           []RoomSourceLane       `json:"lanes"`
+	OfferExpiresAt  time.Time              `json:"offer_expires_at"`
 }
 
 type RoomTaskCancel struct {
@@ -135,6 +148,7 @@ type RoomTransfer struct {
 	PublicationID   string                    `json:"publication_id"`
 	TransferID      string                    `json:"transfer_id"`
 	SnapshotVersion uint64                    `json:"snapshot_version"`
+	Protection      RoomTransferProtection    `json:"protection"`
 	LaneID          string                    `json:"lane_id"`
 	Attempt         int64                     `json:"attempt"`
 	FileSizeBytes   int64                     `json:"file_size_bytes"`
@@ -204,29 +218,52 @@ type RoomFailure struct {
 }
 
 type RoomTaskResult struct {
-	Type                    string               `json:"type"`
-	SchemaVersion           string               `json:"schema_version"`
-	ResultID                string               `json:"result_id"`
-	BatchID                 string               `json:"batch_id"`
-	RoomID                  string               `json:"room_id"`
-	TransferID              string               `json:"transfer_id"`
-	LaneID                  string               `json:"lane_id"`
-	Attempt                 int64                `json:"attempt"`
-	WorkerID                string               `json:"worker_id"`
-	WorkerAcknowledgedAt    *time.Time           `json:"worker_acknowledged_at,omitempty"`
-	ExecutableLeaseIssuedAt *time.Time           `json:"executable_lease_issued_at,omitempty"`
-	ExecutionStage          string               `json:"execution_stage"`
-	SourceReceipts          []SourceRangeReceipt `json:"source_receipts"`
-	TargetReceipts          []TargetRangeReceipt `json:"target_receipts"`
-	FinalTargetReceipts     []FinalTargetReceipt `json:"final_target_receipts"`
-	Missing                 []RoomMissingCells   `json:"missing"`
-	Failures                []RoomFailure        `json:"failures"`
-	ReportedAt              time.Time            `json:"reported_at"`
+	Type                    string                     `json:"type"`
+	SchemaVersion           string                     `json:"schema_version"`
+	ResultID                string                     `json:"result_id"`
+	BatchID                 string                     `json:"batch_id"`
+	RoomID                  string                     `json:"room_id"`
+	TransferID              string                     `json:"transfer_id"`
+	LaneID                  string                     `json:"lane_id"`
+	Attempt                 int64                      `json:"attempt"`
+	WorkerID                string                     `json:"worker_id"`
+	WorkerAcknowledgedAt    *time.Time                 `json:"worker_acknowledged_at,omitempty"`
+	ExecutableLeaseIssuedAt *time.Time                 `json:"executable_lease_issued_at,omitempty"`
+	ExecutionStage          string                     `json:"execution_stage"`
+	Runtime                 *DirectRoomTransferRuntime `json:"runtime,omitempty"`
+	SourceReceipts          []SourceRangeReceipt       `json:"source_receipts"`
+	TargetReceipts          []TargetRangeReceipt       `json:"target_receipts"`
+	FinalTargetReceipts     []FinalTargetReceipt       `json:"final_target_receipts"`
+	Missing                 []RoomMissingCells         `json:"missing"`
+	Failures                []RoomFailure              `json:"failures"`
+	ReportedAt              time.Time                  `json:"reported_at"`
+}
+
+type DirectRoomTransferRuntime struct {
+	LaneID      string    `json:"lane_id"`
+	Attempt     int64     `json:"attempt"`
+	WorkerID    string    `json:"worker_id"`
+	Capability  string    `json:"capability"`
+	Transport   string    `json:"transport"`
+	BaseURL     string    `json:"base_url"`
+	AccessToken string    `json:"access_token"`
+	ExpiresAt   time.Time `json:"expires_at"`
+}
+
+func (runtime DirectRoomTransferRuntime) Validate(workerID, laneID string, attempt int64, now time.Time) error {
+	parsed, err := url.Parse(runtime.BaseURL)
+	if runtime.WorkerID != workerID || runtime.LaneID != laneID || runtime.Attempt != attempt ||
+		runtime.Capability != RoomTransferDirectCapability || runtime.Transport != "worker_http" ||
+		runtime.AccessToken == "" || runtime.ExpiresAt.IsZero() || !now.Before(runtime.ExpiresAt) ||
+		err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return errors.New("invalid direct room transfer runtime")
+	}
+	return nil
 }
 
 func (b RoomTaskOfferBatch) Validate(now time.Time) error {
 	if b.Type != "room_task_offer_batch" || b.SchemaVersion != RoomTransferSchemaVersion || b.BatchID == "" || b.RoomID == "" ||
-		b.ChannelID == "" || b.PublicationID == "" || b.TransferID == "" || b.SnapshotVersion == 0 {
+		b.ChannelID == "" || b.PublicationID == "" || b.TransferID == "" || b.SnapshotVersion == 0 || !b.Protection.Valid() {
 		return errors.New("room batch identity or schema is invalid")
 	}
 	if b.FileSizeBytes <= 0 || b.ChunkSizeBytes <= 0 || b.ChunkCount != (b.FileSizeBytes+b.ChunkSizeBytes-1)/b.ChunkSizeBytes {
@@ -384,7 +421,7 @@ func (lane RoomSourceLane) Validate(chunkCount int64, targets map[string]RoomTra
 func (intent TunnelLeaseIntent) Validate(role, target string, lane RoomSourceLane, now time.Time) error {
 	if intent.IntentID == "" || intent.TransferID == "" || intent.Signature == "" || intent.Role != role ||
 		intent.LaneID != lane.LaneID || intent.Attempt != lane.Attempt || intent.ChunkStart != lane.ChunkStart ||
-		intent.ChunkEnd != lane.ChunkEnd || intent.OrchestratorID == "" || intent.RequiredWorkerCapability != RoomTransferCapability ||
+		intent.ChunkEnd != lane.ChunkEnd || intent.OrchestratorID == "" || intent.RequiredWorkerCapability != RoomTransferE2EECapability ||
 		intent.ExpiresAt.IsZero() || !now.Before(intent.ExpiresAt) || intent.TargetMemberID != target {
 		return errors.New("room tunnel lease intent is invalid")
 	}
@@ -392,7 +429,7 @@ func (intent TunnelLeaseIntent) Validate(role, target string, lane RoomSourceLan
 }
 
 func (lease TunnelLease) Validate(role, target string, now time.Time) error {
-	if lease.LeaseID == "" || lease.IntentID == "" || lease.Role != role || lease.Protocol != RoomTransferCapability ||
+	if lease.LeaseID == "" || lease.IntentID == "" || lease.Role != role || lease.Protocol != RoomTransferDirectCapability ||
 		lease.TargetMemberID != target || lease.ExpiresAt.IsZero() || !now.Before(lease.ExpiresAt) {
 		return errors.New("tunnel lease identity, role, protocol, or expiry is invalid")
 	}

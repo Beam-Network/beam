@@ -9,10 +9,10 @@ BeamCore provides the public HTTP API, Core NATS control gateway, transfer lifec
 | Component | Responsibility |
 | --- | --- |
 | Orchestrator | Connects to BeamCore over Core NATS, publishes capability updates, routes workload offers to workers over BeamLink/WCP, and relays results |
-| Worker | Connects to its orchestrator over BeamLink/WCP, advertises capabilities, executes `transfer.multipart` and `room.transfer`, and returns signed results |
+| Worker | Connects to its orchestrator over BeamLink/WCP, advertises capabilities, executes `transfer.multipart`, carries E2EE `room.transfer` ciphertext, and returns signed results |
 | Validator | Reads BeamCore epoch summaries, sets subnet weights, and posts weight proofs |
 
-Workers move object bytes directly between source and destination endpoints using task-scoped URLs and room-scoped leases.
+Workers move object-channel MLS ciphertext between agents using task-scoped URLs and room-scoped leases. They never receive room-transfer plaintext or keys.
 
 ## Requirements
 
@@ -57,14 +57,14 @@ Use the orchestrator API key as `BEAMCORE_NATS_PASSWORD` with `BEAMCORE_NATS_USE
 ## Run
 
 - [Orchestrator guide](docs/orchestrator.md): run a miner that receives `worker_task_offer_batch` and `room_task_offer_batch`.
-- [Worker guide](docs/worker.md): run a worker that advertises and executes `transfer.multipart` and `room.transfer`.
+- [Worker guide](docs/worker.md): run a worker that advertises and executes `transfer.multipart` and direct E2EE `room.transfer` workloads.
 - [Validator guide](docs/validator.md): run a validator that sets weights from BeamCore epoch summaries.
 
 ## Runtime Flow
 
 ```text
 Client -> BeamCore HTTP -> Transfer Runtime -> Core NATS -> orchestrator -> BeamLink/WCP -> worker
-Worker -> storage source/destination or Room transfer leases
+Worker -> storage source/destination or direct Room agent paths
 Worker -> BeamLink/WCP -> orchestrator -> Core NATS -> Transfer Runtime result
 Validator -> BeamCore epoch summary -> Bittensor set_weights -> BeamCore weight proof
 ```
