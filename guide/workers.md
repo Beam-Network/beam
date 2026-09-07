@@ -83,7 +83,7 @@ For normal transfers, the worker receives a `workload.offer`:
 		"parts": [
 			{
 				"index": 0,
-				"length": 8388608,
+				"length": 41943040,
 				"source": { "url": "https://presigned-source-url" },
 				"destination": { "url": "https://presigned-dest-url", "method": "PUT" }
 			}

@@ -67,7 +67,7 @@ BeamCore sends executable normal-transfer offers directly:
 		{
 			"task_id": "uuid",
 			"offer_id": "uuid",
-			"chunk_size": 8388608,
+			"chunk_size": 41943040,
 			"source_url": "https://source-presigned-url",
 			"dest_url": "https://dest-presigned-url",
 			"urls_expires_at": "2026-06-13T12:00:00.000Z",
@@ -100,7 +100,7 @@ Workers report task outcomes with canonical `task_result`:
 	"offer_id": "uuid",
 	"worker_id": "worker-uuid",
 	"success": true,
-	"bytes_transferred": 8388608,
+	"bytes_transferred": 41943040,
 	"duration_ms": 1234,
 	"etag": "\"abc123\"",
 	"error": null

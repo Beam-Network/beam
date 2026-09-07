@@ -37,6 +37,10 @@ final receipts over the ciphertext commitment. The Worker holds at most one
 ciphertext chunk per active lane, checkpoints completed cells, and returns the
 receipts through the orchestrator.
 
+Room object chunk layout follows Beam's standard transfer chunking policy as
+published by the source agent. Workers do not choose or override chunk size; they
+validate the assignment layout and move the assigned ciphertext ranges.
+
 The orchestrator sends `room_task_result` to BeamCore.
 
 Room transfers do not allocate a relay session or expose an agent listener.

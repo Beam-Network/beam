@@ -59,7 +59,7 @@ BeamCore pushes a batch of executable worker offers:
 		{
 			"task_id": "uuid",
 			"offer_id": "uuid",
-			"chunk_size": 8388608,
+			"chunk_size": 41943040,
 			"source_url": "https://source-presigned-url",
 			"dest_url": "https://dest-presigned-url",
 			"urls_expires_at": "2026-06-13T12:00:00.000Z",
@@ -125,7 +125,7 @@ Workers connect to their orchestrator over BeamLink/WCP using their BeamCore `wo
 			"parts": [
 				{
 					"index": 0,
-					"length": 8388608,
+					"length": 41943040,
 					"source": { "url": "https://source-presigned-url" },
 					"destination": { "url": "https://dest-presigned-url", "method": "PUT" }
 				}
