@@ -74,7 +74,7 @@ export BEAM_WCP_SERVER_NAME=orchestrator.example.com
 
 ./bin/beam-worker serve \
   --node-key data/worker/node.key \
-  --capabilities transfer.multipart,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v1 \
+  --capabilities transfer.multipart,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v2 \
   --room-transfer-addr 0.0.0.0:9470 \
   --room-transfer-advertise-url https://worker.example.com:9470
 ```
