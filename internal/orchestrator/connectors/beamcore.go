@@ -307,7 +307,7 @@ func (s *BeamCoreConnector) DeliverResult(ctx context.Context, record dispatch.R
 	}
 	payload, err := json.Marshal(BeamCoreResult{Type: "task_result", TaskID: record.Spec.WorkloadID,
 		OfferID: record.Spec.AttemptID, WorkerID: record.WorkerID, Success: result.State == domain.StateCompleted,
-		BytesTransferred: result.BytesProcessed, ChunkHash: result.Outputs["sha256"], ETag: result.Outputs["etag"],
+		BytesTransferred: result.BytesProcessed, ChunkHash: resultOutput(result.Outputs, "sha256"), ETag: resultOutput(result.Outputs, "etag"),
 		Error: result.ErrorMessage})
 	if err != nil {
 		return err

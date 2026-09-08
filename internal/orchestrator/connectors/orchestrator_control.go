@@ -295,8 +295,8 @@ func (control *roomControl) submitTaskResult(ctx context.Context, record dispatc
 		"task_id":    record.Spec.WorkloadID,
 		"offer_id":   record.Spec.AttemptID,
 		"success":    result.State == domain.StateCompleted || result.State == domain.StateReceiptCommitted,
-		"chunk_hash": result.Outputs["sha256"],
-		"etag":       result.Outputs["etag"],
+		"chunk_hash": resultOutput(result.Outputs, "sha256"),
+		"etag":       resultOutput(result.Outputs, "etag"),
 		"error":      result.ErrorMessage,
 	})
 }
