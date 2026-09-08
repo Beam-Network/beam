@@ -290,13 +290,17 @@ func (control *roomControl) submitResult(ctx context.Context, result contracts.R
 }
 
 func (control *roomControl) submitTaskResult(ctx context.Context, record dispatch.Record, result domain.Result) error {
+	evidence, err := resultEvidence(record, result)
+	if err != nil {
+		return err
+	}
 	return control.request(ctx, "task_result", map[string]any{
 		"worker_id":  record.WorkerID,
 		"task_id":    record.Spec.WorkloadID,
 		"offer_id":   record.Spec.AttemptID,
 		"success":    result.State == domain.StateCompleted || result.State == domain.StateReceiptCommitted,
-		"chunk_hash": resultOutput(result.Outputs, "sha256"),
-		"etag":       resultOutput(result.Outputs, "etag"),
+		"chunk_hash": evidence.chunkHash,
+		"etag":       evidence.etag,
 		"error":      result.ErrorMessage,
 	})
 }
@@ -464,27 +468,20 @@ func (control *roomControl) request(ctx context.Context, messageType string, pay
 		}
 		var acknowledgement struct {
 			Received bool   `json:"received"`
+			Status   string `json:"status"`
 			Reason   string `json:"reason"`
 		}
 		if err := json.Unmarshal(encodedPayload, &acknowledgement); err != nil {
 			return err
 		}
+		if messageType == "task_result" {
+			return taskResultDisposition(taskResultAcknowledgement(acknowledgement))
+		}
 		if !acknowledgement.Received {
-			// Ownership rejections are permanent for this attempt. Treating them
-			// like a transient delivery failure leaves the terminal result in the
-			// durable replay journal, which resubmits it every five seconds even
-			// after BeamCore has reassigned the task to another orchestrator.
-			if permanentResultRejection(messageType, acknowledgement.Reason) {
-				return nil
-			}
 			return fmt.Errorf("BeamCore rejected %s: %s", messageType, fallback(acknowledgement.Reason, "not received"))
 		}
 	}
 	return nil
-}
-
-func permanentResultRejection(messageType, reason string) bool {
-	return messageType == "task_result" && strings.TrimSpace(reason) == "task_not_owned_by_orchestrator"
 }
 
 func (control *roomControl) subject(direction, messageType string) string {

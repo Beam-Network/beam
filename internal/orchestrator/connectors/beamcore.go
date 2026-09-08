@@ -305,9 +305,14 @@ func (s *BeamCoreConnector) DeliverResult(ctx context.Context, record dispatch.R
 		}
 		return s.roomControl.submitTaskResult(ctx, record, result)
 	}
+	evidence, err := resultEvidence(record, result)
+	if err != nil {
+		return err
+	}
 	payload, err := json.Marshal(BeamCoreResult{Type: "task_result", TaskID: record.Spec.WorkloadID,
-		OfferID: record.Spec.AttemptID, WorkerID: record.WorkerID, Success: result.State == domain.StateCompleted,
-		BytesTransferred: result.BytesProcessed, ChunkHash: resultOutput(result.Outputs, "sha256"), ETag: resultOutput(result.Outputs, "etag"),
+		OfferID: record.Spec.AttemptID, WorkerID: record.WorkerID,
+		Success:          result.State == domain.StateCompleted || result.State == domain.StateReceiptCommitted,
+		BytesTransferred: result.BytesProcessed, ChunkHash: evidence.chunkHash, ETag: evidence.etag,
 		Error: result.ErrorMessage})
 	if err != nil {
 		return err
@@ -319,16 +324,9 @@ func (s *BeamCoreConnector) DeliverResult(ctx context.Context, record dispatch.R
 	if len(response) == 0 {
 		return errors.New("BeamCore returned an empty task result acknowledgement")
 	}
-	var ack struct {
-		Received  bool   `json:"received"`
-		Completed bool   `json:"completed"`
-		Reason    string `json:"reason"`
-	}
+	var ack taskResultAcknowledgement
 	if err := json.Unmarshal(response, &ack); err != nil {
 		return err
 	}
-	if !ack.Received {
-		return errors.New(fallback(ack.Reason, "BeamCore did not acknowledge task result"))
-	}
-	return nil
+	return taskResultDisposition(ack)
 }

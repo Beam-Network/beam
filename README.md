@@ -54,6 +54,12 @@ export NETUID=105
 
 Use the orchestrator API key as `BEAMCORE_NATS_PASSWORD` with `BEAMCORE_NATS_USER` set to the orchestrator hotkey. Credentials-file auth uses `BEAMCORE_NATS_CREDS`. Token auth uses `BEAMCORE_NATS_TOKEN`.
 
+For production, use the TLS-first control endpoint
+`tls://orch-gateway.b1m.ai:4222`. The official Go client uses NATS protocol 1;
+an `invalid client protocol` error indicates that the running binary should be
+checked and rebuilt from the official source. See the orchestrator guide for
+provenance commands and result-settlement semantics.
+
 ## Run
 
 - [Orchestrator guide](docs/orchestrator.md): run a miner that receives `worker_task_offer_batch` and `room_task_offer_batch`.
