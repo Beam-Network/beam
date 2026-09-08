@@ -18,7 +18,7 @@ const (
 	TransferMultipartCapability  = "transfer.multipart"
 	RoomTransferCapability       = "room.transfer"
 	RoomTransferDirectCapability = "room.transfer.direct.v1"
-	RoomTransferE2EECapability   = "room.transfer.e2ee.v1"
+	RoomTransferE2EECapability   = "room.transfer.e2ee.v2"
 	RoomTransferProtectionScheme = "btr.object.chunk.aead.v1"
 	TunnelLeaseRoleSourceRead    = "source_read"
 	TunnelLeaseRoleTargetWrite   = "target_write"

@@ -5,7 +5,7 @@ Room transfer lets BeamCore assign file delivery lanes to participant workers in
 ## Contracts
 
 - Schema: `room-transfer/v1`
-- Capabilities: `room.transfer`, `room.transfer.direct.v1`, and `room.transfer.e2ee.v1`
+- Capabilities: `room.transfer`, `room.transfer.direct.v1`, and `room.transfer.e2ee.v2`
 - Offer message: `room_task_offer_batch`
 - Cancel message: `room_task_cancel`
 - Result message: `room_task_result`
@@ -16,7 +16,7 @@ Room transfer lets BeamCore assign file delivery lanes to participant workers in
 2. Run the orchestrator with `BEAM_ENV=prod`, BeamCore NATS auth, WCP TLS, and the Room tunnel coordinator URL.
 3. Register each WCP worker membership through the orchestrator API.
 4. Give direct-capable workers a public HTTP port and run them with
-   `--capabilities transfer.multipart,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v1`,
+   `--capabilities transfer.multipart,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v2`,
    `--room-transfer-addr`, and `--room-transfer-advertise-url`.
 
 ## Flow
@@ -88,7 +88,7 @@ export BEAM_WCP_SERVER_NAME=orchestrator.example.com
 
 ./bin/beam-worker serve \
   --node-key data/worker/node.key \
-  --capabilities transfer.multipart,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v1 \
+  --capabilities transfer.multipart,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v2 \
   --room-transfer-addr 0.0.0.0:9470 \
   --room-transfer-advertise-url https://worker.example.com:9470
 ```

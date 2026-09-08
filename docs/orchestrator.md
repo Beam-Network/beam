@@ -94,7 +94,7 @@ curl -X POST http://127.0.0.1:8781/v1/orchestrator/memberships \
 `room.transfer` identifies Room data-transfer lanes from `room_task_offer_batch`.
 For current Room transfers, the orchestrator advertises eligibility only when
 connected workers also expose `room.transfer.direct.v1` and
-`room.transfer.e2ee.v1`.
+`room.transfer.e2ee.v2`.
 
 The orchestrator publishes `capability_update` after registration and whenever advertised capabilities or capacity change. BeamCore keeps the last accepted manifest until replacement. Heartbeat/session state determines liveness.
 
