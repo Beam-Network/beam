@@ -69,6 +69,10 @@ export BEAM_ROOM_TUNNEL_COORDINATOR_URL=https://coordinator.b1m.ai
 
 Credentials-file auth uses `BEAMCORE_NATS_CREDS`. Token auth uses `BEAMCORE_NATS_TOKEN`.
 
+Production uses `tls://orch-gateway.b1m.ai:4222`. The official client performs
+the TLS handshake before the NATS `INFO` exchange whenever the URL uses the
+`tls://` scheme.
+
 ## 4. Run
 
 ```bash
@@ -97,6 +101,44 @@ connected workers also expose `room.transfer.direct.v1` and
 `room.transfer.e2ee.v2`.
 
 The orchestrator publishes `capability_update` after registration and whenever advertised capabilities or capacity change. BeamCore keeps the last accepted manifest until replacement. Heartbeat/session state determines liveness.
+
+## Result Settlement
+
+Each BeamCore `task_result` describes exactly one transfer part. The
+orchestrator reads `sha256` and `etag` from that part's indexed execution
+outputs and treats missing or multi-part evidence as a visible terminal local
+failure.
+
+The NATS `task_result_ack` reply is the authoritative disposition. `completed`
+and `owned_processing` are accepted, `retry` is retried, and `failed`,
+`rejected`, `late_expired`, and `late_superseded` are terminal. Do not call a
+second HTTP acknowledgement endpoint; none is required for result settlement.
+
+## NATS Connectivity and Build Provenance
+
+The canonical Go runtime uses `github.com/nats-io/nats.go` and NATS protocol 1.
+The production gateway does not accept client protocol 2. An
+`-ERR invalid client protocol` response therefore indicates a non-canonical or
+stale binary, not a requirement to downgrade the gateway.
+
+Record the source revision and embedded Go module metadata before replacing a
+binary:
+
+```bash
+git rev-parse HEAD
+./bin/beam-orchestrator version
+go version -m ./bin/beam-orchestrator
+go list -m github.com/nats-io/nats.go
+```
+
+Rebuild the official source with the supported Go toolchain when provenance is
+missing or differs:
+
+```bash
+git pull --ff-only
+go clean -cache
+go build -trimpath -o bin/beam-orchestrator ./cmd/beam-orchestrator
+```
 
 ## Health
 
