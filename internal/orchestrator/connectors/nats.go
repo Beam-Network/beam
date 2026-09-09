@@ -71,6 +71,10 @@ func connectNATS(config NATSConfig) (*natsConnector, error) {
 		}
 		options = append(options, nats.UserInfo(config.User, config.Password))
 	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(config.URL)), "tls://") {
+		// Production gateways (orch-gateway.b1m.ai:4222) expect the TLS handshake before the INFO line.
+		options = append(options, nats.TLSHandshakeFirst())
+	}
 	connection, err := nats.Connect(config.URL, options...)
 	if err != nil {
 		return nil, fmt.Errorf("connect %s NATS: %w", config.Name, err)

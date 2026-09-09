@@ -30,6 +30,23 @@ type ResultSink interface {
 	DeliverResult(context.Context, Record, domain.Result) error
 }
 
+// TerminalDeliveryError records a final upstream disposition that must not be
+// replayed. The error text remains on the durable dispatch record for operator
+// visibility even though delivery has reached a terminal state.
+type TerminalDeliveryError struct {
+	cause error
+}
+
+func (e *TerminalDeliveryError) Error() string { return e.cause.Error() }
+func (e *TerminalDeliveryError) Unwrap() error { return e.cause }
+
+func TerminalDelivery(cause error) error {
+	if cause == nil {
+		return nil
+	}
+	return &TerminalDeliveryError{cause: cause}
+}
+
 // ProgressSink is optional. Existing dispatch sinks remain result-only, while
 // composite workloads may validate and persist workload-specific progress.
 type ProgressSink interface {
@@ -370,6 +387,11 @@ func (s *Service) deliver(ctx context.Context, record Record, result domain.Resu
 	if err := sink.DeliverResult(ctx, record, result); err != nil {
 		record.UpstreamError = err.Error()
 		record.UpdatedAt = s.config.Now().UTC()
+		var terminal *TerminalDeliveryError
+		if errors.As(err, &terminal) {
+			record.UpstreamDelivered = true
+			return s.save(record, "external authority returned a terminal result disposition; replay stopped")
+		}
 		_ = s.save(record, "external result delivery failed; replay scheduled")
 		return err
 	}
