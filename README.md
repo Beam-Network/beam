@@ -13,6 +13,11 @@ BeamCore provides the public HTTP API, Core NATS control gateway, transfer lifec
 | Validator | Reads BeamCore epoch summaries, sets subnet weights, and posts weight proofs |
 
 Workers move object-channel MLS ciphertext between agents using task-scoped URLs and room-scoped leases. They never receive room-transfer plaintext or keys.
+When a Room publication contains an object-storage member, BeamCore presents
+that bucket leg as an ordinary `transfer.multipart` workload with short-lived
+source and destination routes. The worker uses the same bounded streaming,
+checkpoint, cancellation, and signed-result path as every standard transfer;
+it receives neither the room's storage credential nor a reusable provider URL.
 
 ## Requirements
 
@@ -70,7 +75,7 @@ provenance commands and result-settlement semantics.
 
 ```text
 Client -> BeamCore HTTP -> Transfer Runtime -> Core NATS -> orchestrator -> BeamLink/WCP -> worker
-Worker -> storage source/destination or direct Room agent paths
+Worker -> short-lived storage routes or direct Room agent paths
 Worker -> BeamLink/WCP -> orchestrator -> Core NATS -> Transfer Runtime result
 Validator -> BeamCore epoch summary -> Bittensor set_weights -> BeamCore weight proof
 ```

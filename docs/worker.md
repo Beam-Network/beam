@@ -84,6 +84,13 @@ offer's room/channel key epoch. It buffers ciphertext and validates signed
 ciphertext hash receipts; encryption keys and plaintext remain in the room
 agents.
 
+Object-storage room legs do not use the direct `room.transfer` handler. They
+arrive through the existing `transfer.multipart` capability, exactly like a
+standard transfer. Each task contains short-lived provider routes and opaque
+multipart metadata. The worker never receives S3, R2, MinIO, Wasabi,
+Backblaze, Hippius, Hugging Face, or custom endpoint credentials, and must not
+persist or log task URLs or headers.
+
 Add `BEAM_ORCHESTRATOR_DELEGATION=<base64url-value>` when the membership response includes a delegation.
 
 ## Health
