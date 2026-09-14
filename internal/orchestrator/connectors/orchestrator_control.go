@@ -144,7 +144,9 @@ func (control *roomControl) bind(ctx context.Context) (_ *roomControlSession, er
 			return nil, err
 		}
 	}
-	if err = control.conn.flushWithContext(ctx); err != nil {
+	flushCtx, cancelFlush := context.WithTimeout(ctx, control.config.RequestTimeout)
+	defer cancelFlush()
+	if err = control.conn.flushWithContext(flushCtx); err != nil {
 		return nil, err
 	}
 	return session, nil

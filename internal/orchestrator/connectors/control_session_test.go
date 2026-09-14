@@ -27,8 +27,9 @@ func (subscription *fakeControlSubscription) Unsubscribe() error {
 }
 
 type fakeRoomControlConnection struct {
-	subscriptions []*fakeControlSubscription
-	flushErr      error
+	subscriptions    []*fakeControlSubscription
+	flushErr         error
+	flushHasDeadline bool
 }
 
 func (connection *fakeRoomControlConnection) chanSubscribe(_ string, _ chan *nats.Msg) (roomControlSubscription, error) {
@@ -37,7 +38,8 @@ func (connection *fakeRoomControlConnection) chanSubscribe(_ string, _ chan *nat
 	return subscription, nil
 }
 
-func (connection *fakeRoomControlConnection) flushWithContext(context.Context) error {
+func (connection *fakeRoomControlConnection) flushWithContext(ctx context.Context) error {
+	_, connection.flushHasDeadline = ctx.Deadline()
 	return connection.flushErr
 }
 
@@ -132,7 +134,7 @@ func TestRoomControlBindCleansPartialSubscriptionOnFlushFailure(t *testing.T) {
 	flushErr := errors.New("flush failed")
 	connection := &fakeRoomControlConnection{flushErr: flushErr}
 	control := &roomControl{
-		config: NATSConfig{Environment: "dev", Hotkey: "hotkey-1", GatewayURL: "http://gateway.test"},
+		config: NATSConfig{Environment: "dev", Hotkey: "hotkey-1", GatewayURL: "http://gateway.test", RequestTimeout: time.Second},
 		conn:   connection,
 		tasks:  tasks,
 	}
@@ -142,5 +144,8 @@ func TestRoomControlBindCleansPartialSubscriptionOnFlushFailure(t *testing.T) {
 	}
 	if len(connection.subscriptions) != 1 || !connection.subscriptions[0].unsubscribed {
 		t.Fatalf("partial subscriptions were not closed: %+v", connection.subscriptions)
+	}
+	if !connection.flushHasDeadline {
+		t.Fatal("control subscription flush did not receive a deadline")
 	}
 }
