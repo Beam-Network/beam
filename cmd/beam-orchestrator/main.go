@@ -68,6 +68,7 @@ func serve(arguments []string) {
 	flags.StringVar(&beamCoreNATS.Environment, "beamcore-environment", envOrDefault("BEAM_ENV", "prod"), "BeamCore control environment")
 	flags.StringVar(&beamCoreNATS.ControlPrefix, "beamcore-control-prefix", envOrDefault("BEAMCORE_CONTROL_PREFIX", "beam.orch.control"), "BeamCore orchestrator control subject prefix")
 	flags.StringVar(&beamCoreNATS.GatewayURL, "beamcore-gateway-url", os.Getenv("BEAMCORE_GATEWAY_URL"), "public orchestrator URL registered with BeamCore")
+	flags.StringVar(&beamCoreNATS.PublicAPIURL, "beamcore-public-api-url", os.Getenv("BEAM_PUBLIC_API_URL"), "BeamCore Public API URL used to classify duplicate control-session denials")
 	beamCoreNATS.SoftwareVersion = version
 	flags.StringVar(&beamCoreNATS.EvidenceSubject, "beamcore-nats-evidence-subject", "beam.workloads.beamcore.payment-evidence", "BeamCore payment evidence request/reply subject")
 	roomTunnelCoordinatorURL := flags.String("room-tunnel-coordinator-url", os.Getenv("BEAM_ROOM_TUNNEL_COORDINATOR_URL"), "room tunnel coordinator HTTPS URL")

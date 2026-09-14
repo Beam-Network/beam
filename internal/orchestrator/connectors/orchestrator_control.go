@@ -37,11 +37,43 @@ type orchestratorControlEnvelope struct {
 
 type roomControl struct {
 	config                    NATSConfig
-	conn                      *nats.Conn
+	conn                      roomControlNATS
 	rooms                     *roomtransfer.Service
 	workloads                 *roomworkloads.Manager
 	tasks                     *dispatch.Service
 	lastCapabilityFingerprint string
+}
+
+type roomControlSubscription interface {
+	Unsubscribe() error
+}
+
+type roomControlNATS interface {
+	chanSubscribe(string, chan *nats.Msg) (roomControlSubscription, error)
+	flushWithContext(context.Context) error
+	requestWithContext(context.Context, string, []byte) (*nats.Msg, error)
+}
+
+type natsRoomControlConnection struct {
+	conn *nats.Conn
+}
+
+func (connection natsRoomControlConnection) chanSubscribe(subject string, messages chan *nats.Msg) (roomControlSubscription, error) {
+	return connection.conn.ChanSubscribe(subject, messages)
+}
+
+func (connection natsRoomControlConnection) flushWithContext(ctx context.Context) error {
+	return connection.conn.FlushWithContext(ctx)
+}
+
+func (connection natsRoomControlConnection) requestWithContext(ctx context.Context, subject string, payload []byte) (*nats.Msg, error) {
+	return connection.conn.RequestWithContext(ctx, subject, payload)
+}
+
+type roomControlSession struct {
+	control       *roomControl
+	messages      chan *nats.Msg
+	subscriptions []roomControlSubscription
 }
 
 func newRoomControl(config NATSConfig, conn *nats.Conn, rooms *roomtransfer.Service,
@@ -56,53 +88,81 @@ func newRoomControl(config NATSConfig, conn *nats.Conn, rooms *roomtransfer.Serv
 		config.RequestTimeout = 10 * time.Second
 	}
 	config.Hotkey = strings.TrimSpace(config.Hotkey)
-	return &roomControl{config: config, conn: conn, rooms: rooms, workloads: workloads, tasks: tasks}
+	var controlConnection roomControlNATS
+	if conn != nil {
+		controlConnection = natsRoomControlConnection{conn: conn}
+	}
+	return &roomControl{config: config, conn: controlConnection, rooms: rooms, workloads: workloads, tasks: tasks}
 }
 
 func (control *roomControl) enabled() bool {
 	return control != nil && control.conn != nil && control.tasks != nil && control.config.Hotkey != "" && control.config.GatewayURL != ""
 }
 
-func (control *roomControl) run(ctx context.Context) error {
+func (control *roomControl) bind(ctx context.Context) (_ *roomControlSession, err error) {
 	if !control.enabled() {
-		return nil
+		return &roomControlSession{control: control}, nil
 	}
 	if err := control.request(ctx, "register", map[string]any{"gateway_url": control.config.GatewayURL, "ready": true}); err != nil {
-		return fmt.Errorf("register Orchestrator: %w", err)
+		return nil, fmt.Errorf("register Orchestrator: %w", err)
 	}
 	if err := control.publishCapability(ctx, true); err != nil {
-		return err
+		return nil, err
 	}
-	messages := make(chan *nats.Msg, 256)
-	normalOfferSubscription, err := control.conn.ChanSubscribe(control.subject("runtime", "worker_task_offer_batch"), messages)
-	if err != nil {
-		return err
+	session := &roomControlSession{control: control, messages: make(chan *nats.Msg, 256)}
+	defer func() {
+		if err != nil {
+			session.close()
+		}
+	}()
+	subscribe := func(messageType string) error {
+		subscription, subscribeErr := control.conn.chanSubscribe(
+			control.subject("runtime", messageType), session.messages,
+		)
+		if subscribeErr != nil {
+			return subscribeErr
+		}
+		session.subscriptions = append(session.subscriptions, subscription)
+		return nil
 	}
-	defer normalOfferSubscription.Unsubscribe()
-	var offerSubscription, cancelSubscription, workloadOfferSubscription, workloadCancelSubscription *nats.Subscription
+	if err = subscribe("worker_task_offer_batch"); err != nil {
+		return nil, err
+	}
 	if control.rooms != nil {
-		offerSubscription, err = control.conn.ChanSubscribe(control.subject("runtime", "room_task_offer_batch"), messages)
-		if err != nil {
-			return err
+		if err = subscribe("room_task_offer_batch"); err != nil {
+			return nil, err
 		}
-		defer offerSubscription.Unsubscribe()
-		cancelSubscription, err = control.conn.ChanSubscribe(control.subject("runtime", "room_task_cancel"), messages)
-		if err != nil {
-			return err
+		if err = subscribe("room_task_cancel"); err != nil {
+			return nil, err
 		}
-		defer cancelSubscription.Unsubscribe()
 	}
 	if control.workloads != nil {
-		workloadOfferSubscription, err = control.conn.ChanSubscribe(control.subject("runtime", "room_workload_offer"), messages)
-		if err != nil {
-			return err
+		if err = subscribe("room_workload_offer"); err != nil {
+			return nil, err
 		}
-		defer workloadOfferSubscription.Unsubscribe()
-		workloadCancelSubscription, err = control.conn.ChanSubscribe(control.subject("runtime", "room_workload_cancel"), messages)
-		if err != nil {
-			return err
+		if err = subscribe("room_workload_cancel"); err != nil {
+			return nil, err
 		}
-		defer workloadCancelSubscription.Unsubscribe()
+	}
+	flushCtx, cancelFlush := context.WithTimeout(ctx, control.config.RequestTimeout)
+	defer cancelFlush()
+	if err = control.conn.flushWithContext(flushCtx); err != nil {
+		return nil, err
+	}
+	return session, nil
+}
+
+func (session *roomControlSession) close() {
+	for index := len(session.subscriptions) - 1; index >= 0; index-- {
+		_ = session.subscriptions[index].Unsubscribe()
+	}
+	session.subscriptions = nil
+}
+
+func (session *roomControlSession) run(ctx context.Context) error {
+	control := session.control
+	if control == nil || !control.enabled() {
+		return nil
 	}
 	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
 	defer stopHeartbeat()
@@ -114,7 +174,7 @@ func (control *roomControl) run(ctx context.Context) error {
 			return nil
 		case err := <-heartbeatErrors:
 			return err
-		case message := <-messages:
+		case message := <-session.messages:
 			if message == nil {
 				return nil
 			}
@@ -433,7 +493,7 @@ func (control *roomControl) request(ctx context.Context, messageType string, pay
 	}
 	requestContext, cancel := context.WithTimeout(ctx, control.config.RequestTimeout)
 	defer cancel()
-	message, err := control.conn.RequestWithContext(requestContext, control.subject("orch", messageType), encoded)
+	message, err := control.conn.requestWithContext(requestContext, control.subject("orch", messageType), encoded)
 	if err != nil {
 		return err
 	}
