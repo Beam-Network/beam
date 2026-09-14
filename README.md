@@ -57,7 +57,7 @@ export SUBTENSOR_NETWORK=finney
 export NETUID=105
 ```
 
-Use the orchestrator API key as `BEAMCORE_NATS_PASSWORD` with `BEAMCORE_NATS_USER` set to the orchestrator hotkey. Credentials-file auth uses `BEAMCORE_NATS_CREDS`. Token auth uses `BEAMCORE_NATS_TOKEN`.
+Use the orchestrator API key as `BEAMCORE_NATS_PASSWORD` with `BEAMCORE_NATS_USER` set to the orchestrator hotkey. Keep `BEAM_PUBLIC_API_URL` configured so the client can translate NATS' generic authentication-callout denial into the terminal `duplicate_control_session` message after validating the key and confirming an active owner. Credentials-file auth uses `BEAMCORE_NATS_CREDS`. Token auth uses `BEAMCORE_NATS_TOKEN`.
 
 For production, use the TLS-first control endpoint
 `tls://orch-gateway.b1m.ai:4222`. The official Go client uses NATS protocol 1;
