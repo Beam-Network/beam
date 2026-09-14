@@ -121,6 +121,14 @@ The production gateway does not accept client protocol 2. An
 `-ERR invalid client protocol` response therefore indicates a non-canonical or
 stale binary, not a requirement to downgrade the gateway.
 
+One `BeamCoreConnector.Run` invocation owns the complete control session. The
+connector registers, publishes capabilities, and binds every control
+subscription before exposing the session to result replay. A partial startup
+unsubscribes and drains its candidate, and a concurrent `Run` call fails with
+`BeamCore control session is already running`. BeamCore also keeps the first
+authenticated control process for a hotkey; a second process receives
+`duplicate_control_session` and must be stopped or assigned another identity.
+
 Record the source revision and embedded Go module metadata before replacing a
 binary:
 

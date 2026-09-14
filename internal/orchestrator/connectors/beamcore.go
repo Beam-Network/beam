@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync/atomic"
 	"time"
 
 	"github.com/Beam-Network/beam/internal/orchestrator/dispatch"
@@ -44,6 +45,7 @@ type BeamCoreConnector struct {
 	rooms         *roomtransfer.Service
 	roomWorkloads *roomworkloads.Manager
 	roomControl   *roomControl
+	running       atomic.Bool
 }
 
 func NewBeamCoreConnector(config NATSConfig, orchestrator *dispatch.Service, payments ...*payment.Service) (*BeamCoreConnector, error) {
@@ -72,11 +74,27 @@ func (s *BeamCoreConnector) AttachRoomWorkloads(service *roomworkloads.Manager) 
 }
 
 func (s *BeamCoreConnector) Run(ctx context.Context) error {
+	if !s.running.CompareAndSwap(false, true) {
+		return errors.New("BeamCore control session is already running")
+	}
+	defer s.running.Store(false)
+
 	session, err := connectNATS(s.config)
 	if err != nil {
 		return err
 	}
+	control := newRoomControl(s.config, session.conn, s.rooms, s.roomWorkloads, s.orchestrator)
+	var controlSession *roomControlSession
+	if control.enabled() {
+		controlSession, err = control.bind(ctx)
+		if err != nil {
+			session.close()
+			return err
+		}
+	}
+
 	s.nats = session
+	s.roomControl = control
 	s.orchestrator.RegisterSink(dispatch.SourceBeamCore, s)
 	if s.payments != nil && s.config.TaskSubject != "" {
 		s.payments.RegisterSink(s)
@@ -84,7 +102,6 @@ func (s *BeamCoreConnector) Run(ctx context.Context) error {
 	if s.rooms != nil {
 		s.rooms.RegisterSink(s)
 	}
-	s.roomControl = newRoomControl(s.config, session.conn, s.rooms, s.roomWorkloads, s.orchestrator)
 	if s.roomWorkloads != nil {
 		s.roomWorkloads.RegisterSink(s.roomControl)
 	}
@@ -99,6 +116,11 @@ func (s *BeamCoreConnector) Run(ctx context.Context) error {
 		if s.roomWorkloads != nil {
 			s.roomWorkloads.RegisterSink(nil)
 		}
+		if controlSession != nil {
+			controlSession.close()
+		}
+		s.nats = nil
+		s.roomControl = nil
 		session.close()
 	}()
 	go s.orchestrator.ReplayResults(ctx)
@@ -108,12 +130,12 @@ func (s *BeamCoreConnector) Run(ctx context.Context) error {
 	if s.rooms != nil {
 		go s.rooms.Replay(ctx)
 	}
-	if s.roomControl != nil && s.roomControl.enabled() {
+	if controlSession != nil {
 		if s.config.TaskSubject == "" {
-			return s.roomControl.run(ctx)
+			return controlSession.run(ctx)
 		}
 		errors := make(chan error, 1)
-		go func() { errors <- s.roomControl.run(ctx) }()
+		go func() { errors <- controlSession.run(ctx) }()
 		go func() { errors <- session.consume(ctx, s.handle) }()
 		return <-errors
 	}
