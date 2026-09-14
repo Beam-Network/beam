@@ -2,8 +2,10 @@ package connectors
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -31,8 +33,11 @@ type NATSConfig struct {
 	ControlPrefix    string
 	Hotkey           string
 	GatewayURL       string
+	PublicAPIURL     string
 	SoftwareVersion  string
 }
+
+const duplicateControlSessionError = "duplicate_control_session: an offer-bearing NATS connection is already active for this hotkey"
 
 func (c NATSConfig) Enabled() bool { return c.URL != "" }
 
@@ -77,6 +82,12 @@ func connectNATS(config NATSConfig) (*natsConnector, error) {
 	}
 	connection, err := nats.Connect(config.URL, options...)
 	if err != nil {
+		if isNATSAuthorizationError(err) {
+			duplicate, diagnosticErr := hasActiveDuplicateControlSession(config)
+			if diagnosticErr == nil && duplicate {
+				return nil, errors.New(duplicateControlSessionError)
+			}
+		}
 		return nil, fmt.Errorf("connect %s NATS: %w", config.Name, err)
 	}
 	var jetstream nats.JetStreamContext
@@ -95,6 +106,77 @@ func connectNATS(config NATSConfig) (*natsConnector, error) {
 		}
 	}
 	return session, nil
+}
+
+func isNATSAuthorizationError(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "authorization violation") ||
+		strings.Contains(message, "permission violation") ||
+		strings.Contains(message, "permissions violation")
+}
+
+func hasActiveDuplicateControlSession(config NATSConfig) (bool, error) {
+	if config.PublicAPIURL == "" || config.Hotkey == "" || config.User != config.Hotkey || config.Password == "" {
+		return false, nil
+	}
+	timeout := config.RequestTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	client := &http.Client{Timeout: timeout}
+	publicAPIURL := strings.TrimRight(config.PublicAPIURL, "/")
+
+	var identity struct {
+		Hotkey         string `json:"hotkey"`
+		CurrentKeyRole string `json:"current_key_role"`
+	}
+	if err := getBeamCoreJSON(client, publicAPIURL+"/auth/me", config.Password, &identity); err != nil {
+		return false, err
+	}
+	if !strings.EqualFold(identity.Hotkey, config.Hotkey) || identity.CurrentKeyRole != "orchestrator" {
+		return false, nil
+	}
+
+	var listing struct {
+		Orchestrators []struct {
+			Hotkey string `json:"hotkey"`
+			Status string `json:"status"`
+		} `json:"orchestrators"`
+	}
+	if err := getBeamCoreJSON(
+		client,
+		publicAPIURL+"/validators/orchestrators?active_only=false&limit=512",
+		config.Password,
+		&listing,
+	); err != nil {
+		return false, err
+	}
+	for _, orchestrator := range listing.Orchestrators {
+		if strings.EqualFold(orchestrator.Hotkey, config.Hotkey) && orchestrator.Status == "active" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func getBeamCoreJSON(client *http.Client, endpoint, apiKey string, target any) error {
+	request, err := http.NewRequest(http.MethodGet, strings.TrimRight(endpoint, "/"), nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("X-Api-Key", apiKey)
+	response, err := client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("BeamCore duplicate-session diagnostic returned HTTP %d", response.StatusCode)
+	}
+	if err := json.NewDecoder(response.Body).Decode(target); err != nil {
+		return fmt.Errorf("decode BeamCore duplicate-session diagnostic: %w", err)
+	}
+	return nil
 }
 
 func (s *natsConnector) ensureStream() error {
