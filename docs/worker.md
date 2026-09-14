@@ -1,6 +1,6 @@
 # BEAM Worker Guide
 
-Run a Go worker on BEAM mainnet for `transfer.multipart` and direct E2EE `room.transfer` workloads.
+Run a Go worker on BEAM mainnet for `transfer.multipart` and room transfer workloads.
 
 ## Requirements
 
@@ -84,12 +84,27 @@ offer's room/channel key epoch. It buffers ciphertext and validates signed
 ciphertext hash receipts; encryption keys and plaintext remain in the room
 agents.
 
-Object-storage room legs do not use the direct `room.transfer` handler. They
-arrive through the existing `transfer.multipart` capability, exactly like a
-standard transfer. Each task contains short-lived provider routes and opaque
-multipart metadata. The worker never receives S3, R2, MinIO, Wasabi,
-Backblaze, Hippius, Hugging Face, or custom endpoint credentials, and must not
-persist or log task URLs or headers.
+Bucket-only publications use the standard transfer lifecycle. Publications
+combining agents and object storage require `room.transfer.storage.v2`. Their
+workers use signed provider routes and coordinator-authorized agent sessions,
+retain one source chunk buffer across every destination, and report real
+per-destination evidence. All legs of a storage publication use TLS with
+worker-visible plaintext; entirely agent-only publications retain MLS E2EE.
+No worker receives storage credentials or room keys.
+
+Hybrid workers require explicit HTTPS listener configuration before advertising
+support:
+
+```bash
+export BEAM_ROOM_STORAGE_LISTEN_ADDR=0.0.0.0:9443
+export BEAM_ROOM_STORAGE_ADVERTISE_URL=https://worker.example.com:9443
+```
+
+Include `room.transfer.storage.v2` and `room.transfer` in the worker capabilities.
+The listener binds before registration. Agents authenticate its TLS 1.3
+certificate through the coordinator-authorized assignment; agents remain
+outbound clients. See [hybrid room execution](room-storage-hybrid.md) for the
+wire contract, route restrictions, recovery, and rollout requirements.
 
 Add `BEAM_ORCHESTRATOR_DELEGATION=<base64url-value>` when the membership response includes a delegation.
 

@@ -30,42 +30,48 @@ import (
 const (
 	maxReceiptBytes        = 64 << 10
 	maxTargets             = 10_000
-	maxChunkBytes          = 64 << 20
+	maxChunkBytes          = 128 << 20
 	protectedChunkOverhead = 1 + 8 + 16
 )
 
 type Config struct {
-	ListenAddress string
-	AdvertiseURL  string
+	ListenAddress        string
+	AdvertiseURL         string
+	StorageListenAddress string
+	StorageAdvertiseURL  string
 }
 
 type Handler struct {
-	config   Config
-	now      func() time.Time
-	serverMu sync.Mutex
-	server   *sharedServer
+	config        Config
+	storageClient *http.Client
+	now           func() time.Time
+	serverMu      sync.Mutex
+	server        *sharedServer
+	storageServer *sharedServer
 }
 
 type sharedServer struct {
-	listener net.Listener
-	http     *http.Server
-	baseURL  string
-	mu       sync.RWMutex
-	sessions map[string]*session
-	done     chan struct{}
-	err      error
+	listener     net.Listener
+	http         *http.Server
+	baseURL      string
+	certificates *workerCertificates
+	mu           sync.RWMutex
+	sessions     map[string]*session
+	done         chan struct{}
+	err          error
 }
 
 type session struct {
-	transfer  contracts.RoomTransfer
-	token     string
-	now       func() time.Time
-	mu        sync.Mutex
-	chunks    map[int64]*chunk
-	completed map[int64]*completedChunk
-	expected  int64
-	failure   *contracts.SourceFailureReceipt
-	changed   chan struct{}
+	transfer      contracts.RoomTransfer
+	token         string
+	now           func() time.Time
+	mu            sync.Mutex
+	chunks        map[int64]*chunk
+	completed     map[int64]*completedChunk
+	expected      int64
+	readingSource bool
+	failure       *contracts.SourceFailureReceipt
+	changed       chan struct{}
 }
 
 type chunk struct {
@@ -82,12 +88,14 @@ type completedChunk struct {
 }
 
 type checkpointValue struct {
+	SourceReads    map[int64]contracts.SourceReadEvidence  `json:"source_reads,omitempty"`
 	BatchID        string                                  `json:"batch_id"`
 	TransferID     string                                  `json:"transfer_id"`
 	LaneID         string                                  `json:"lane_id"`
 	SourceReceipts map[int64]contracts.SourceRangeReceipt  `json:"source_receipts"`
 	TargetReceipts map[string]contracts.TargetRangeReceipt `json:"target_receipts"`
 	FinalReceipts  map[string]contracts.FinalTargetReceipt `json:"final_receipts"`
+	StorageResults map[string]contracts.StorageRangeResult `json:"storage_results,omitempty"`
 }
 
 type targetResponse struct {
@@ -99,7 +107,7 @@ func NewHandler(config Config) *Handler {
 	if strings.TrimSpace(config.ListenAddress) == "" {
 		config.ListenAddress = "127.0.0.1:0"
 	}
-	return &Handler{config: config, now: time.Now}
+	return &Handler{config: config, now: time.Now, storageClient: storageHTTPClient()}
 }
 
 func (*Handler) Kind() domain.Kind { return domain.KindRoomTransfer }
@@ -118,6 +126,17 @@ func (h *Handler) Validate(spec domain.Spec) error {
 			return errors.New("room transfer advertise URL must be absolute")
 		}
 	}
+	if transfer.Protection.Storage() {
+		parsed, err := url.Parse(strings.ReplaceAll(h.config.StorageAdvertiseURL, "{port}", "1"))
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return errors.New("hybrid room transfers require an HTTPS worker listener")
+		}
+		if h.config.StorageListenAddress != "" {
+			if _, _, err := net.SplitHostPort(h.config.StorageListenAddress); err != nil {
+				return errors.New("hybrid worker listen address must be host:port")
+			}
+		}
+	}
 	return validateTransfer(transfer, h.now().UTC())
 }
 
@@ -132,7 +151,7 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 	resume := checkpointValue{BatchID: transfer.BatchID, TransferID: transfer.TransferID, LaneID: transfer.LaneID,
 		SourceReceipts: map[int64]contracts.SourceRangeReceipt{}, TargetReceipts: map[string]contracts.TargetRangeReceipt{},
 		FinalReceipts: map[string]contracts.FinalTargetReceipt{}}
-	if _, ok, checkpointErr := workloadcheckpoint.Current(ctx, contracts.RoomTransferSchemaVersion, &resume); checkpointErr != nil {
+	if _, ok, checkpointErr := workloadcheckpoint.Current(ctx, transfer.SchemaVersion, &resume); checkpointErr != nil {
 		return domain.Result{}, checkpointErr
 	} else if ok && (resume.BatchID != transfer.BatchID || resume.TransferID != transfer.TransferID || resume.LaneID != transfer.LaneID) {
 		return domain.Result{}, errors.New("room transfer checkpoint belongs to another assignment")
@@ -142,7 +161,7 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 		return domain.Result{}, err
 	}
 
-	shared, err := h.sharedServer()
+	shared, err := h.sharedServer(transfer.Protection.Storage())
 	if err != nil {
 		return domain.Result{}, err
 	}
@@ -154,6 +173,7 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 	active := &session{transfer: transfer, token: runtimeToken, now: h.now,
 		chunks: make(map[int64]*chunk), completed: make(map[int64]*completedChunk),
 		expected: transfer.ChunkStart, changed: make(chan struct{}, 1)}
+	active.restoreCompleted(resume)
 	if err := shared.add(sessionID, active); err != nil {
 		return domain.Result{}, err
 	}
@@ -168,63 +188,127 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 		WorkerID: spec.Identity.WorkerID, Capability: contracts.RoomTransferDirectCapability,
 		Transport: "worker_http", BaseURL: strings.TrimRight(shared.baseURL, "/") + "/v1/room-transfers/" + url.PathEscape(sessionID),
 		AccessToken: runtimeToken, ExpiresAt: expiresAt}
+	if transfer.Protection.Storage() {
+		if shared.certificates == nil {
+			return domain.Result{}, errors.New("hybrid room assignment requires TLS")
+		}
+		fingerprint, err := shared.certificates.forLease(expiresAt)
+		if err != nil {
+			return domain.Result{}, err
+		}
+		directRuntime.Capability = contracts.RoomStorageCapability
+		directRuntime.Transport = "worker_https"
+		directRuntime.TLSCertificateSHA256 = fingerprint
+	}
 	reportRuntime(ctx, directRuntime)
 
 	var bytesProcessed int64
 	for chunkIndex := transfer.ChunkStart; chunkIndex <= transfer.ChunkEnd; chunkIndex++ {
+		if allTargetsDelivered(resume, transfer.Targets, chunkIndex) {
+			continue
+		}
+		if transfer.SourceLease.Storage != nil {
+			payload, evidence, err := readStorageChunk(ctx, h.storageClient, transfer, spec.Identity.WorkerID, chunkIndex, h.now)
+			if err != nil {
+				return result(transfer, resume, []contracts.RoomFailure{{Origin: "storage_provider", Code: storageFailureCode(err), Retryable: storageFailureCode(err) != "room_storage_source_mutated", ChunkIndices: []int64{chunkIndex}}}, bytesProcessed)
+			}
+			resume.StorageResults[storageResultKey(evidence)] = evidence
+			active.mu.Lock()
+			active.chunks[chunkIndex] = &chunk{payload: payload,
+				source: contracts.SourceRangeReceipt{TransferID: transfer.TransferID, LaneID: transfer.LaneID, ChunkIndex: chunkIndex,
+					Offset: evidence.Offset, Length: evidence.Length, RangeSHA256: evidence.RangeSHA256},
+				targets: make(map[string]contracts.TargetRangeReceipt), finals: make(map[string]contracts.FinalTargetReceipt)}
+			active.signalLocked()
+			active.mu.Unlock()
+		}
 		current, waitErr := active.waitForSource(ctx, chunkIndex)
 		if waitErr != nil {
 			return result(transfer, resume, sourceFailure(waitErr, chunkIndex), bytesProcessed)
 		}
-		resume.SourceReceipts[chunkIndex] = current.source
+		if transfer.SourceLease.Storage == nil {
+			resume.SourceReceipts[chunkIndex] = current.source
+		}
 		bytesProcessed += current.source.Length
-		for _, target := range transfer.Targets {
-			response, waitErr := active.waitForTarget(ctx, chunkIndex, target.MemberID)
-			if waitErr != nil {
-				failure := contracts.RoomFailure{Origin: "target_agent", Code: "target_write_failed", Retryable: true,
-					TargetMemberID: target.MemberID, ChunkIndices: []int64{chunkIndex}, Detail: waitErr.Error()}
-				return result(transfer, resume, []contracts.RoomFailure{failure}, bytesProcessed)
-			}
-			key := receiptKey(target.MemberID, chunkIndex)
-			resume.TargetReceipts[key] = response.RangeReceipt
-			if response.FinalReceipt != nil {
-				resume.FinalReceipts[target.MemberID] = *response.FinalReceipt
-			}
-			if err := saveCheckpoint(ctx, resume, key); err != nil {
-				return domain.Result{}, err
-			}
-			workloadprogress.Report(ctx, map[string]string{"phase": "delivered", "lane_id": transfer.LaneID,
-				"target_member_id": target.MemberID, "chunk_index": strconv.FormatInt(chunkIndex, 10)})
+		read := resume.SourceReads[chunkIndex]
+		read.ChunkIndex = chunkIndex
+		read.ReadCount++
+		read.PayloadBytes += current.source.Length
+		read.WireBytes += int64(len(current.payload))
+		resume.SourceReads[chunkIndex] = read
+		failures, deliveryErr := h.deliverChunk(ctx, spec.Identity.WorkerID, active, current, chunkIndex, &resume)
+		if deliveryErr != nil {
+			return domain.Result{}, deliveryErr
+		}
+		if len(failures) != 0 {
+			return result(transfer, resume, failures, bytesProcessed)
 		}
 		active.release(chunkIndex)
 	}
 	return result(transfer, resume, nil, bytesProcessed)
 }
 
-func (h *Handler) sharedServer() (*sharedServer, error) {
+// PrepareStorageListener binds the TLS endpoint before the worker advertises
+// hybrid capability. Configuration or port conflicts fail startup closed.
+func (h *Handler) PrepareStorageListener() error {
+	parsed, err := url.Parse(strings.ReplaceAll(h.config.StorageAdvertiseURL, "{port}", "1"))
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("hybrid room transfers require an HTTPS worker listener")
+	}
+	_, err = h.sharedServer(true)
+	return err
+}
+
+func (h *Handler) Close() error {
 	h.serverMu.Lock()
 	defer h.serverMu.Unlock()
-	if h.server != nil {
-		select {
-		case <-h.server.done:
-			return nil, h.server.failure()
-		default:
-			return h.server, nil
+	var failures []error
+	for _, server := range []*sharedServer{h.server, h.storageServer} {
+		if server != nil {
+			failures = append(failures, server.http.Close())
 		}
 	}
-	listener, err := net.Listen("tcp", h.config.ListenAddress)
+	return errors.Join(failures...)
+}
+
+func (h *Handler) sharedServer(storage bool) (*sharedServer, error) {
+	h.serverMu.Lock()
+	defer h.serverMu.Unlock()
+	server := h.server
+	listen, advertise := h.config.ListenAddress, h.config.AdvertiseURL
+	if storage {
+		server, listen, advertise = h.storageServer, h.config.StorageListenAddress, h.config.StorageAdvertiseURL
+	}
+	if server != nil {
+		select {
+		case <-server.done:
+			return nil, server.failure()
+		default:
+			return server, nil
+		}
+	}
+	if listen == "" {
+		listen = "127.0.0.1:0"
+	}
+	listener, err := net.Listen("tcp", listen)
 	if err != nil {
 		return nil, err
 	}
-	baseURL, err := advertisedURL(h.config.AdvertiseURL, listener.Addr())
+	baseURL, err := advertisedURL(advertise, listener.Addr())
 	if err != nil {
 		_ = listener.Close()
 		return nil, err
 	}
 	shared := &sharedServer{listener: listener, baseURL: baseURL, sessions: make(map[string]*session), done: make(chan struct{})}
+	if storage {
+		shared.listener, shared.certificates = secureWorkerListener(listener, h.now)
+	}
 	shared.http = &http.Server{Handler: shared, ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout: 30 * time.Minute, WriteTimeout: 30 * time.Minute, IdleTimeout: time.Minute}
-	h.server = shared
+	if storage {
+		h.storageServer = shared
+	} else {
+		h.server = shared
+	}
 	go shared.serve()
 	return shared, nil
 }
@@ -309,23 +393,35 @@ func (s *session) ServeHTTP(response http.ResponseWriter, request *http.Request,
 }
 
 func (s *session) acceptSource(response http.ResponseWriter, request *http.Request, rawIndex string) {
+	// An early final response must close HTTP/1 transport; otherwise Go clients
+	// may send the pending body to preserve the connection after a final status.
+	response.Header().Set("Connection", "close")
 	index, err := s.authorizeSource(request, rawIndex)
 	if err != nil {
 		http.Error(response, err.Error(), http.StatusForbidden)
 		return
 	}
 	offset, length := contracts.ChunkRange(s.transfer.FileSizeBytes, s.transfer.ChunkSizeBytes, index)
-	payload, err := io.ReadAll(io.LimitReader(request.Body, length+protectedChunkOverhead+1))
-	if err != nil || !validProtectedChunk(payload, s.transfer.Protection, length) {
-		http.Error(response, "invalid protected source chunk", http.StatusBadRequest)
-		return
-	}
 	receipt, err := decodeHeader[contracts.SourceRangeReceipt](request.Header.Get("X-Beam-Source-Receipt"))
-	digest := sha256.Sum256(payload)
-	if err != nil || receipt.TransferID != s.transfer.TransferID || receipt.LaneID != s.transfer.LaneID ||
-		receipt.ChunkIndex != index || receipt.Offset != offset || receipt.Length != length ||
-		receipt.LeaseID != s.transfer.SourceLease.LeaseID || receipt.RangeSHA256 != hex.EncodeToString(digest[:]) ||
-		receipt.Verify(s.transfer.SourceLease.AgentPublicKey, s.now().UTC()) != nil {
+	reason := ""
+	if err != nil {
+		reason = "decode"
+	} else if receipt.TransferID != s.transfer.TransferID {
+		reason = "transfer_id"
+	} else if receipt.LaneID != s.transfer.LaneID {
+		reason = "lane_id"
+	} else if receipt.ChunkIndex != index {
+		reason = "chunk_index"
+	} else if receipt.Offset != offset {
+		reason = "offset"
+	} else if receipt.Length != length {
+		reason = "length"
+	} else if receipt.LeaseID != s.transfer.SourceLease.LeaseID {
+		reason = "lease_id"
+	} else if verifyErr := receipt.Verify(s.transfer.SourceLease.AgentPublicKey, s.now().UTC()); verifyErr != nil {
+		reason = "signature_or_public_key"
+	}
+	if reason != "" {
 		http.Error(response, "invalid signed source receipt", http.StatusBadRequest)
 		return
 	}
@@ -351,10 +447,31 @@ func (s *session) acceptSource(response http.ResponseWriter, request *http.Reque
 			http.Error(response, "source retry hash mismatch", http.StatusConflict)
 			return
 		}
-	} else {
-		s.chunks[index] = &chunk{payload: payload, source: receipt,
-			targets: make(map[string]contracts.TargetRangeReceipt), finals: make(map[string]contracts.FinalTargetReceipt)}
+		s.mu.Unlock()
+		response.WriteHeader(http.StatusNoContent)
+		return
 	}
+	if s.readingSource {
+		s.mu.Unlock()
+		http.Error(response, "source chunk is being accepted", http.StatusTooEarly)
+		return
+	}
+	// Admit before reading: Expect: 100-continue keeps backpressure and retries
+	// from retransmitting a chunk that is not needed by this worker.
+	s.readingSource = true
+	s.mu.Unlock()
+	response.Header().Del("Connection")
+	payload, readErr := io.ReadAll(io.LimitReader(request.Body, length+protectedChunkOverhead+1))
+	digest := sha256.Sum256(payload)
+	s.mu.Lock()
+	s.readingSource = false
+	if readErr != nil || !validProtectedChunk(payload, s.transfer.Protection, length) || receipt.RangeSHA256 != hex.EncodeToString(digest[:]) {
+		s.mu.Unlock()
+		http.Error(response, "invalid protected source chunk", http.StatusBadRequest)
+		return
+	}
+	s.chunks[index] = &chunk{payload: payload, source: receipt,
+		targets: make(map[string]contracts.TargetRangeReceipt), finals: make(map[string]contracts.FinalTargetReceipt)}
 	s.signalLocked()
 	s.mu.Unlock()
 	response.WriteHeader(http.StatusNoContent)
@@ -389,7 +506,8 @@ func (s *session) sendTargetChunk(response http.ResponseWriter, request *http.Re
 	s.mu.Lock()
 	current := s.chunks[index]
 	if current != nil {
-		payload := append([]byte(nil), current.payload...)
+		// The immutable chunk remains alive while Write holds this slice.
+		payload := current.payload
 		digest := current.source.RangeSHA256
 		s.mu.Unlock()
 		response.Header().Set("Content-Type", "application/octet-stream")
@@ -489,30 +607,6 @@ func (s *session) waitForSource(ctx context.Context, index int64) (*chunk, error
 	}
 }
 
-func (s *session) waitForTarget(ctx context.Context, index int64, memberID string) (targetResponse, error) {
-	for {
-		s.mu.Lock()
-		current := s.chunks[index]
-		if current != nil {
-			if receipt, ok := current.targets[memberID]; ok {
-				value := targetResponse{RangeReceipt: receipt}
-				if final, ok := current.finals[memberID]; ok {
-					copy := final
-					value.FinalReceipt = &copy
-				}
-				s.mu.Unlock()
-				return value, nil
-			}
-		}
-		s.mu.Unlock()
-		select {
-		case <-ctx.Done():
-			return targetResponse{}, context.Cause(ctx)
-		case <-s.changed:
-		}
-	}
-}
-
 func (s *session) release(index int64) {
 	s.mu.Lock()
 	if current := s.chunks[index]; current != nil {
@@ -520,6 +614,9 @@ func (s *session) release(index int64) {
 		delete(s.chunks, index)
 		if index == s.expected {
 			s.expected++
+			for s.completed[s.expected] != nil {
+				s.expected++
+			}
 		}
 		s.signalLocked()
 	}
@@ -562,9 +659,13 @@ func sourceFailure(err error, index int64) []contracts.RoomFailure {
 }
 
 func validateTransfer(transfer contracts.RoomTransfer, now time.Time) error {
-	if transfer.SchemaVersion != contracts.RoomTransferSchemaVersion || transfer.BatchID == "" || transfer.RoomID == "" ||
+	validProtection := transfer.SchemaVersion == contracts.RoomTransferSchemaVersion && transfer.Protection.Valid()
+	if transfer.SchemaVersion == contracts.RoomStorageSchemaVersion {
+		validProtection = transfer.Protection.Storage()
+	}
+	if !validProtection || transfer.BatchID == "" || transfer.RoomID == "" ||
 		transfer.ChannelID == "" || transfer.PublicationID == "" || transfer.TransferID == "" || transfer.LaneID == "" ||
-		transfer.SnapshotVersion == 0 || transfer.Attempt <= 0 || !transfer.Protection.Valid() {
+		transfer.SnapshotVersion == 0 || transfer.Attempt <= 0 {
 		return errors.New("room transfer identity or schema is invalid")
 	}
 	if transfer.FileSizeBytes <= 0 || transfer.ChunkSizeBytes <= 0 || transfer.ChunkSizeBytes > maxChunkBytes ||
@@ -579,7 +680,9 @@ func validateTransfer(transfer contracts.RoomTransfer, now time.Time) error {
 		return fmt.Errorf("source lease: %w", err)
 	}
 	seen := make(map[string]bool, len(transfer.Targets))
+	hasStorage := transfer.SourceLease.Storage != nil
 	for _, target := range transfer.Targets {
+		hasStorage = hasStorage || target.Lease.Storage != nil
 		if target.MemberID == "" || seen[target.MemberID] {
 			return errors.New("room transfer target identity is invalid")
 		}
@@ -588,15 +691,35 @@ func validateTransfer(transfer contracts.RoomTransfer, now time.Time) error {
 			return fmt.Errorf("target %s lease: %w", target.MemberID, err)
 		}
 	}
+	if hasStorage != transfer.Protection.Storage() {
+		return errors.New("room protection does not match its endpoint snapshot")
+	}
+	for _, lease := range append([]contracts.TunnelLease{transfer.SourceLease}, targetLeases(transfer.Targets)...) {
+		expected := contracts.RoomTransferDirectCapability
+		if transfer.Protection.Storage() {
+			expected = contracts.RoomStorageCapability
+		}
+		if lease.Protocol != expected {
+			return errors.New("hybrid assignment contains a non-hybrid lease")
+		}
+	}
 	return nil
 }
 
 func validProtectedChunk(payload []byte, protection contracts.RoomTransferProtection, plaintextLength int64) bool {
+	if protection.Storage() {
+		return int64(len(payload)) == plaintextLength
+	}
 	return protection.Valid() && int64(len(payload)) == plaintextLength+protectedChunkOverhead && payload[0] == 1 &&
 		binary.BigEndian.Uint64(payload[1:9]) == protection.KeyEpoch
 }
 
 func verifyCheckpoint(transfer contracts.RoomTransfer, resume checkpointValue, now time.Time) error {
+	for index, read := range resume.SourceReads {
+		if read.ChunkIndex != index || read.Validate(transfer.FileSizeBytes, transfer.ChunkSizeBytes, transfer.ChunkStart, transfer.ChunkEnd, transfer.Protection) != nil {
+			return errors.New("source read checkpoint does not match assignment")
+		}
+	}
 	targets := make(map[string]contracts.RoomTransferDestination, len(transfer.Targets))
 	for _, target := range transfer.Targets {
 		targets[target.MemberID] = target
@@ -605,6 +728,24 @@ func verifyCheckpoint(transfer contracts.RoomTransfer, resume checkpointValue, n
 		target, ok := targets[receipt.TargetMemberID]
 		if !ok || key != receiptKey(receipt.TargetMemberID, receipt.ChunkIndex) || receipt.Verify(target.Lease.AgentPublicKey, now) != nil {
 			return errors.New("room transfer checkpoint contains invalid target evidence")
+		}
+	}
+	for key, evidence := range resume.StorageResults {
+		lease := transfer.SourceLease
+		if evidence.Role == contracts.TunnelLeaseRoleTargetWrite {
+			target, ok := targets[evidence.MemberID]
+			if !ok {
+				return errors.New("storage checkpoint target is outside the assignment")
+			}
+			lease = target.Lease
+		}
+		offset, length := storageRange(transfer, evidence.ChunkIndex)
+		if lease.Storage == nil || evidence.Role != lease.Role || evidence.MemberID != lease.Storage.MemberID ||
+			key != storageResultKey(evidence) || evidence.LeaseID != lease.LeaseID || evidence.ChunkIndex < transfer.ChunkStart ||
+			evidence.ChunkIndex > transfer.ChunkEnd || evidence.Offset != offset || evidence.Length != length ||
+			evidence.CompletedAt.IsZero() || evidence.CompletedAt.After(now.Add(time.Minute)) || len(evidence.RangeSHA256) != 64 ||
+			(evidence.Role == contracts.TunnelLeaseRoleTargetWrite && (evidence.UploadID == "" || evidence.ETag == "" || evidence.PartNumber != contracts.MultipartAttemptPartNumber(evidence.ChunkIndex, transfer.Attempt))) {
+			return errors.New("storage checkpoint evidence does not match the assignment")
 		}
 	}
 	return nil
@@ -634,7 +775,7 @@ func result(transfer contracts.RoomTransfer, resume checkpointValue, failures []
 		}
 		entry := contracts.RoomMissingCells{TargetMemberID: target.MemberID}
 		for index := transfer.ChunkStart; index <= transfer.ChunkEnd; index++ {
-			if _, ok := resume.TargetReceipts[receiptKey(target.MemberID, index)]; !ok {
+			if !targetDelivered(resume, target, index) {
 				entry.ChunkIndices = append(entry.ChunkIndices, index)
 			}
 		}
@@ -643,8 +784,18 @@ func result(transfer contracts.RoomTransfer, resume checkpointValue, failures []
 		}
 	}
 	outputs := map[string]string{}
-	for key, value := range map[string]any{"source_receipts": sources, "target_receipts": targets,
-		"final_target_receipts": finals, "missing": missing, "room_failures": failures} {
+	sourceReads := make([]contracts.SourceReadEvidence, 0, len(resume.SourceReads))
+	for _, read := range resume.SourceReads {
+		sourceReads = append(sourceReads, read)
+	}
+	sort.Slice(sourceReads, func(i, j int) bool { return sourceReads[i].ChunkIndex < sourceReads[j].ChunkIndex })
+	storageResults := make([]contracts.StorageRangeResult, 0, len(resume.StorageResults))
+	for _, evidence := range resume.StorageResults {
+		storageResults = append(storageResults, evidence)
+	}
+	sort.Slice(storageResults, func(i, j int) bool { return storageResultKey(storageResults[i]) < storageResultKey(storageResults[j]) })
+	for key, value := range map[string]any{"source_reads": sourceReads, "source_receipts": sources, "target_receipts": targets,
+		"final_target_receipts": finals, "missing": missing, "room_failures": failures, "storage_results": storageResults} {
 		encoded, err := json.Marshal(value)
 		if err != nil {
 			return domain.Result{}, err
@@ -655,6 +806,12 @@ func result(transfer contracts.RoomTransfer, resume checkpointValue, failures []
 }
 
 func initializeCheckpoint(value *checkpointValue) {
+	if value.SourceReads == nil {
+		value.SourceReads = map[int64]contracts.SourceReadEvidence{}
+	}
+	if value.StorageResults == nil {
+		value.StorageResults = map[string]contracts.StorageRangeResult{}
+	}
 	if value.SourceReceipts == nil {
 		value.SourceReceipts = map[int64]contracts.SourceRangeReceipt{}
 	}
@@ -666,8 +823,8 @@ func initializeCheckpoint(value *checkpointValue) {
 	}
 }
 
-func saveCheckpoint(ctx context.Context, value checkpointValue, lastRange string) error {
-	err := workloadcheckpoint.Save(ctx, contracts.RoomTransferSchemaVersion, map[string]string{
+func saveCheckpoint(ctx context.Context, schema string, value checkpointValue, lastRange string) error {
+	err := workloadcheckpoint.Save(ctx, schema, map[string]string{
 		"batch_id": value.BatchID, "transfer_id": value.TransferID, "lane_id": value.LaneID,
 		"last_range": lastRange, "delivered_ranges": strconv.Itoa(len(value.TargetReceipts)),
 	}, value)

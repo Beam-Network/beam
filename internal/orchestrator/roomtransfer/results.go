@@ -19,14 +19,18 @@ import (
 
 func (s *Service) resourcesFor(batch contracts.RoomTaskOfferBatch, lane contracts.RoomSourceLane) domain.Resources {
 	resources := s.config.Resources
-	resources.MemoryBytes = max(resources.MemoryBytes, min(batch.ChunkSizeBytes, 64<<20)+(32<<20))
-	resources.Connections = max(resources.Connections, int64(len(lane.TargetMemberIDs)+1))
+	resources.MemoryBytes = max(resources.MemoryBytes, batch.ChunkSizeBytes+(32<<20))
+	connections := len(lane.TargetMemberIDs) + 1
+	if batch.SchemaVersion == contracts.RoomStorageSchemaVersion {
+		connections = min(8, len(lane.TargetMemberIDs)) + 1
+	}
+	resources.Connections = max(resources.Connections, int64(connections))
 	return resources
 }
 
 func (s *Service) redeemRequest(batch contracts.RoomTaskOfferBatch, laneID string, lane LaneRecord,
 	intent contracts.TunnelLeaseIntent) RedeemRequest {
-	return RedeemRequest{SchemaVersion: contracts.RoomTransferSchemaVersion, Type: "room_tunnel_lease_redeem",
+	return RedeemRequest{SchemaVersion: batch.SchemaVersion, Type: "room_tunnel_lease_redeem",
 		BatchID: batch.BatchID, RoomID: batch.RoomID, TransferID: batch.TransferID, LaneID: laneID,
 		WorkerID: lane.WorkerID, NodeID: lane.NodeID, Intent: intent}
 }
@@ -50,7 +54,7 @@ func (s *Service) workload(batch contracts.RoomTaskOfferBatch, offer contracts.R
 	if offer.TimingBudgetSeconds > 0 {
 		expiresAt = minTime(expiresAt, s.config.Now().UTC().Add(time.Duration(offer.TimingBudgetSeconds)*time.Second))
 	}
-	payload, err := json.Marshal(contracts.RoomTransfer{SchemaVersion: contracts.RoomTransferSchemaVersion,
+	payload, err := json.Marshal(contracts.RoomTransfer{SchemaVersion: batch.SchemaVersion,
 		BatchID: batch.BatchID, RoomID: batch.RoomID, ChannelID: batch.ChannelID, PublicationID: batch.PublicationID,
 		TransferID: batch.TransferID, SnapshotVersion: batch.SnapshotVersion, Protection: batch.Protection,
 		LaneID: offer.LaneID, Attempt: offer.Attempt,
@@ -63,8 +67,7 @@ func (s *Service) workload(batch contracts.RoomTaskOfferBatch, offer contracts.R
 	return domain.Spec{WorkloadID: workID, AttemptID: attemptID,
 		Identity: domain.Identity{WorkerID: lane.WorkerID, NodeID: lane.NodeID}, Kind: domain.KindRoomTransfer,
 		Class: domain.ClassJob, Source: domain.Source{System: "beamcore.room", Reference: batch.TransferID},
-		RequiredCapabilities: []string{contracts.RoomTransferCapability, contracts.RoomTransferDirectCapability,
-			contracts.RoomTransferE2EECapability}, Resources: s.resourcesFor(batch, offer),
+		RequiredCapabilities: batchCapabilities(batch), Resources: s.resourcesFor(batch, offer),
 		Lease:    domain.Lease{OfferExpiresAt: minTime(batch.OfferExpiresAt, expiresAt), AssignmentExpiresAt: expiresAt},
 		Evidence: domain.EvidencePolicy{ReceiptRequired: true, Commitments: []string{"target_receipts"}}, Payload: payload}, nil
 }
@@ -81,7 +84,7 @@ func (s *Service) provisioningResult(batch contracts.RoomTaskOfferBatch, offer c
 	if lane.SourceLease == nil || len(lane.TargetLeases) == 0 {
 		stage = "terminal"
 	}
-	return contracts.RoomTaskResult{Type: "room_task_result", SchemaVersion: contracts.RoomTransferSchemaVersion,
+	return contracts.RoomTaskResult{Type: "room_task_result", SchemaVersion: batch.SchemaVersion,
 		ResultID: resultID(batch.TransferID, offer.LaneID, offer.Attempt, "provisioning:"+fmt.Sprint(failedTargets)),
 		BatchID:  batch.BatchID, RoomID: batch.RoomID, TransferID: batch.TransferID, LaneID: offer.LaneID, Attempt: offer.Attempt,
 		WorkerID: lane.WorkerID, ExecutionStage: stage, Missing: missingForTargets(offer, failedTargets),
@@ -90,7 +93,7 @@ func (s *Service) provisioningResult(batch contracts.RoomTaskOfferBatch, offer c
 
 func (s *Service) dispatchFailureResult(batch contracts.RoomTaskOfferBatch, offer contracts.RoomSourceLane, lane LaneRecord,
 	dispatchErr error) contracts.RoomTaskResult {
-	return contracts.RoomTaskResult{Type: "room_task_result", SchemaVersion: contracts.RoomTransferSchemaVersion,
+	return contracts.RoomTaskResult{Type: "room_task_result", SchemaVersion: batch.SchemaVersion,
 		ResultID: resultID(batch.TransferID, offer.LaneID, offer.Attempt, "dispatch_failed"), BatchID: batch.BatchID,
 		RoomID: batch.RoomID, TransferID: batch.TransferID, LaneID: offer.LaneID, Attempt: offer.Attempt,
 		WorkerID: lane.WorkerID, WorkerAcknowledgedAt: lane.WorkerAcknowledgedAt,
@@ -137,6 +140,19 @@ func (s *Service) submitResult(ctx context.Context, lane *LaneRecord, result con
 func (s *Service) verifyReceipts(batch contracts.RoomTaskOfferBatch, offer contracts.RoomSourceLane, lane LaneRecord,
 	result contracts.RoomTaskResult) error {
 	now := s.config.Now().UTC()
+	if result.SchemaVersion != batch.SchemaVersion {
+		return errors.New("room result schema differs from its assignment")
+	}
+	seenReads := make(map[int64]bool)
+	for _, read := range result.SourceReads {
+		if seenReads[read.ChunkIndex] || read.Validate(batch.FileSizeBytes, batch.ChunkSizeBytes, offer.ChunkStart, offer.ChunkEnd, batch.Protection) != nil {
+			return errors.New("invalid source read evidence")
+		}
+		seenReads[read.ChunkIndex] = true
+	}
+	if err := verifyStorageEvidence(batch, offer, lane, result, now); err != nil {
+		return err
+	}
 	for _, failure := range result.Failures {
 		receipt := failure.SourceFailureReceipt
 		terminalSourceClaim := failure.Origin == "source_agent" &&
@@ -188,6 +204,65 @@ func (s *Service) verifyReceipts(batch contracts.RoomTaskOfferBatch, offer contr
 	return nil
 }
 
+func batchCapabilities(batch contracts.RoomTaskOfferBatch) []string {
+	if batch.SchemaVersion == contracts.RoomStorageSchemaVersion {
+		return []string{contracts.RoomTransferCapability, contracts.RoomStorageCapability}
+	}
+	return []string{contracts.RoomTransferCapability, contracts.RoomTransferDirectCapability, contracts.RoomTransferE2EECapability}
+}
+
+func verifyStorageEvidence(batch contracts.RoomTaskOfferBatch, offer contracts.RoomSourceLane, lane LaneRecord,
+	result contracts.RoomTaskResult, now time.Time) error {
+	if len(result.StorageResults) == 0 {
+		return nil
+	}
+	if batch.SchemaVersion != contracts.RoomStorageSchemaVersion {
+		return errors.New("agent-only result contains storage evidence")
+	}
+	seen := make(map[string]bool)
+	hashes := make(map[int64]string)
+	for _, receipt := range result.SourceReceipts {
+		hashes[receipt.ChunkIndex] = receipt.RangeSHA256
+	}
+	for _, evidence := range result.StorageResults {
+		lease := lane.SourceLease
+		if evidence.Role == contracts.TunnelLeaseRoleTargetWrite {
+			target, ok := lane.TargetLeases[evidence.MemberID]
+			if !ok {
+				return errors.New("storage result is outside the destination snapshot")
+			}
+			lease = &target
+		}
+		offset, length := contracts.ChunkRange(batch.FileSizeBytes, batch.ChunkSizeBytes, evidence.ChunkIndex)
+		key := fmt.Sprintf("%s:%s:%d", evidence.Role, evidence.MemberID, evidence.ChunkIndex)
+		digest, hashErr := hex.DecodeString(evidence.RangeSHA256)
+		if lease == nil || lease.Storage == nil || lease.LeaseID != evidence.LeaseID || lease.Role != evidence.Role ||
+			lease.Storage.MemberID != evidence.MemberID || evidence.ChunkIndex < offer.ChunkStart || evidence.ChunkIndex > offer.ChunkEnd ||
+			evidence.Offset != offset || evidence.Length != length || seen[key] || hashErr != nil || len(digest) != sha256.Size ||
+			evidence.CompletedAt.IsZero() || evidence.CompletedAt.After(now.Add(time.Minute)) || evidence.CompletedAt.After(lease.ExpiresAt) {
+			return errors.New("storage result does not match its worker assignment")
+		}
+		if evidence.Role == contracts.TunnelLeaseRoleTargetWrite && (evidence.ETag == "" || evidence.UploadID == "" || evidence.PartNumber != contracts.MultipartAttemptPartNumber(evidence.ChunkIndex, offer.Attempt)) {
+			return errors.New("storage result lacks multipart evidence")
+		}
+		if evidence.Role == contracts.TunnelLeaseRoleSourceRead {
+			hashes[evidence.ChunkIndex] = evidence.RangeSHA256
+		}
+		seen[key] = true
+	}
+	for _, evidence := range result.StorageResults {
+		if evidence.Role == contracts.TunnelLeaseRoleTargetWrite && hashes[evidence.ChunkIndex] != evidence.RangeSHA256 {
+			return errors.New("storage delivery differs from its source range")
+		}
+	}
+	for _, receipt := range result.TargetReceipts {
+		if hashes[receipt.ChunkIndex] != receipt.RangeSHA256 {
+			return errors.New("agent delivery differs from its hybrid source range")
+		}
+	}
+	return nil
+}
+
 func (s *Service) findByWorkload(key string) (Record, string, bool) {
 	for _, record := range s.store.List() {
 		for laneID, lane := range record.Lanes {
@@ -210,7 +285,11 @@ func newLaneRecord(laneID string) LaneRecord {
 }
 
 func verifyRedeemedLease(intent contracts.TunnelLeaseIntent, lease contracts.TunnelLease, now time.Time) error {
-	if lease.IntentID != intent.IntentID {
+	expectedProtocol := contracts.RoomTransferDirectCapability
+	if intent.RequiredWorkerCapability == contracts.RoomStorageCapability {
+		expectedProtocol = contracts.RoomStorageCapability
+	}
+	if lease.IntentID != intent.IntentID || lease.ExpiresAt.After(intent.ExpiresAt) || lease.Protocol != expectedProtocol {
 		return errors.New("Tunnel coordinator redeemed another intent")
 	}
 	return lease.Validate(intent.Role, intent.TargetMemberID, now)
