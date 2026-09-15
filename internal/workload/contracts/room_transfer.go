@@ -14,14 +14,18 @@ import (
 )
 
 const (
-	RoomTransferSchemaVersion    = "room-transfer/v1"
-	TransferMultipartCapability  = "transfer.multipart"
-	RoomTransferCapability       = "room.transfer"
-	RoomTransferDirectCapability = "room.transfer.direct.v1"
-	RoomTransferE2EECapability   = "room.transfer.e2ee.v2"
-	RoomTransferProtectionScheme = "btr.object.chunk.aead.v1"
-	TunnelLeaseRoleSourceRead    = "source_read"
-	TunnelLeaseRoleTargetWrite   = "target_write"
+	RoomTransferSchemaVersion         = "room-transfer/v1"
+	TransferMultipartCapability       = "transfer.multipart"
+	TransferMultipartFanoutCapability = "transfer.multipart.fanout.v1"
+	RoomTransferCapability            = "room.transfer"
+	RoomTransferDirectCapability      = "room.transfer.direct.v1"
+	RoomTransferE2EECapability        = "room.transfer.e2ee.v2"
+	RoomTransferProtectionScheme      = "btr.object.chunk.aead.v1"
+	RoomStorageSchemaVersion          = "room-storage-transfer/v2"
+	RoomStorageCapability             = "room.transfer.storage.v2"
+	RoomStorageProtectionScheme       = "btr.object.transport.tls.v1"
+	TunnelLeaseRoleSourceRead         = "source_read"
+	TunnelLeaseRoleTargetWrite        = "target_write"
 )
 
 type RoomTransferProtection struct {
@@ -31,6 +35,10 @@ type RoomTransferProtection struct {
 
 func (protection RoomTransferProtection) Valid() bool {
 	return protection.Scheme == RoomTransferProtectionScheme && protection.KeyEpoch > 0
+}
+
+func (protection RoomTransferProtection) Storage() bool {
+	return protection.Scheme == RoomStorageProtectionScheme && protection.KeyEpoch == 0
 }
 
 type ProtocolRange struct {
@@ -72,6 +80,8 @@ type RoomTaskOfferBatch struct {
 }
 
 type RoomTaskCancel struct {
+	LaneID        string    `json:"lane_id,omitempty"`
+	Attempt       int64     `json:"attempt,omitempty"`
 	Type          string    `json:"type"`
 	SchemaVersion string    `json:"schema_version"`
 	TransferID    string    `json:"transfer_id"`
@@ -80,7 +90,11 @@ type RoomTaskCancel struct {
 }
 
 func (cancel RoomTaskCancel) Validate() error {
-	if cancel.Type != "room_task_cancel" || cancel.SchemaVersion != RoomTransferSchemaVersion ||
+	if (cancel.LaneID == "") != (cancel.Attempt == 0) || cancel.Attempt < 0 ||
+		(cancel.LaneID != "" && cancel.SchemaVersion != RoomStorageSchemaVersion) {
+		return errors.New("invalid scoped room cancellation")
+	}
+	if cancel.Type != "room_task_cancel" || (cancel.SchemaVersion != RoomTransferSchemaVersion && cancel.SchemaVersion != RoomStorageSchemaVersion) ||
 		strings.TrimSpace(cancel.TransferID) == "" || strings.TrimSpace(cancel.Reason) == "" || cancel.CancelledAt.IsZero() {
 		return errors.New("invalid room transfer cancellation")
 	}
@@ -88,6 +102,7 @@ func (cancel RoomTaskCancel) Validate() error {
 }
 
 type RoomTransferTarget struct {
+	Kind             string `json:"kind,omitempty"`
 	MemberID         string `json:"member_id"`
 	ReceiptPublicKey string `json:"receipt_public_key"`
 }
@@ -133,6 +148,7 @@ type TunnelLease struct {
 	Endpoints      []TunnelLeaseEndpoint `json:"endpoints"`
 	AgentPublicKey string                `json:"agent_public_key,omitempty"`
 	ExpiresAt      time.Time             `json:"expires_at"`
+	Storage        *StorageLease         `json:"storage,omitempty"`
 }
 
 type RoomTransferDestination struct {
@@ -218,6 +234,7 @@ type RoomFailure struct {
 }
 
 type RoomTaskResult struct {
+	SourceReads             []SourceReadEvidence       `json:"source_reads,omitempty"`
 	Type                    string                     `json:"type"`
 	SchemaVersion           string                     `json:"schema_version"`
 	ResultID                string                     `json:"result_id"`
@@ -237,33 +254,40 @@ type RoomTaskResult struct {
 	Missing                 []RoomMissingCells         `json:"missing"`
 	Failures                []RoomFailure              `json:"failures"`
 	ReportedAt              time.Time                  `json:"reported_at"`
+	StorageResults          []StorageRangeResult       `json:"storage_results,omitempty"`
 }
 
 type DirectRoomTransferRuntime struct {
-	LaneID      string    `json:"lane_id"`
-	Attempt     int64     `json:"attempt"`
-	WorkerID    string    `json:"worker_id"`
-	Capability  string    `json:"capability"`
-	Transport   string    `json:"transport"`
-	BaseURL     string    `json:"base_url"`
-	AccessToken string    `json:"access_token"`
-	ExpiresAt   time.Time `json:"expires_at"`
+	LaneID               string    `json:"lane_id"`
+	Attempt              int64     `json:"attempt"`
+	WorkerID             string    `json:"worker_id"`
+	Capability           string    `json:"capability"`
+	Transport            string    `json:"transport"`
+	BaseURL              string    `json:"base_url"`
+	AccessToken          string    `json:"access_token"`
+	ExpiresAt            time.Time `json:"expires_at"`
+	TLSCertificateSHA256 string    `json:"tls_certificate_sha256,omitempty"`
 }
 
 func (runtime DirectRoomTransferRuntime) Validate(workerID, laneID string, attempt int64, now time.Time) error {
 	parsed, err := url.Parse(runtime.BaseURL)
+	validTransport := runtime.Capability == RoomTransferDirectCapability && runtime.Transport == "worker_http"
+	if runtime.Capability == RoomStorageCapability {
+		validTransport = err == nil && parsed.Scheme == "https" && runtime.Transport == "worker_https" && validSHA256(runtime.TLSCertificateSHA256)
+	}
 	if runtime.WorkerID != workerID || runtime.LaneID != laneID || runtime.Attempt != attempt ||
-		runtime.Capability != RoomTransferDirectCapability || runtime.Transport != "worker_http" ||
+		!validTransport ||
 		runtime.AccessToken == "" || runtime.ExpiresAt.IsZero() || !now.Before(runtime.ExpiresAt) ||
-		err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return errors.New("invalid direct room transfer runtime")
 	}
 	return nil
 }
 
 func (b RoomTaskOfferBatch) Validate(now time.Time) error {
-	if b.Type != "room_task_offer_batch" || b.SchemaVersion != RoomTransferSchemaVersion || b.BatchID == "" || b.RoomID == "" ||
-		b.ChannelID == "" || b.PublicationID == "" || b.TransferID == "" || b.SnapshotVersion == 0 || !b.Protection.Valid() {
+	validProtection := b.SchemaVersion == RoomTransferSchemaVersion && b.Protection.Valid() || b.SchemaVersion == RoomStorageSchemaVersion && b.Protection.Storage()
+	if b.Type != "room_task_offer_batch" || !validProtection || b.BatchID == "" || b.RoomID == "" ||
+		b.ChannelID == "" || b.PublicationID == "" || b.TransferID == "" || b.SnapshotVersion == 0 {
 		return errors.New("room batch identity or schema is invalid")
 	}
 	if b.FileSizeBytes <= 0 || b.ChunkSizeBytes <= 0 || b.ChunkCount != (b.FileSizeBytes+b.ChunkSizeBytes-1)/b.ChunkSizeBytes {
@@ -277,7 +301,11 @@ func (b RoomTaskOfferBatch) Validate(now time.Time) error {
 	}
 	targets := make(map[string]RoomTransferTarget, len(b.Targets))
 	for _, target := range b.Targets {
-		if target.MemberID == "" || !validEd25519Key(target.ReceiptPublicKey) {
+		validTarget := (target.Kind == "" || target.Kind == "agent") && validEd25519Key(target.ReceiptPublicKey)
+		if b.SchemaVersion == RoomStorageSchemaVersion && target.Kind == "object_storage" {
+			validTarget = target.ReceiptPublicKey == ""
+		}
+		if target.MemberID == "" || !validTarget {
 			return errors.New("room batch target identity or receipt key is invalid")
 		}
 		if _, duplicate := targets[target.MemberID]; duplicate {
@@ -287,6 +315,18 @@ func (b RoomTaskOfferBatch) Validate(now time.Time) error {
 	}
 	lanes := make(map[string]struct{}, len(b.Lanes))
 	for _, lane := range b.Lanes {
+		for _, intent := range append([]TunnelLeaseIntent{lane.SourceIntent}, lane.TargetIntents...) {
+			if intent.TransferID != b.TransferID {
+				return errors.New("room intent belongs to another publication")
+			}
+			expected := RoomTransferE2EECapability
+			if b.SchemaVersion == RoomStorageSchemaVersion {
+				expected = RoomStorageCapability
+			}
+			if intent.RequiredWorkerCapability != expected {
+				return errors.New("room intent protection capability mismatch")
+			}
+		}
 		if err := lane.Validate(b.ChunkCount, targets, now); err != nil {
 			return err
 		}
@@ -421,7 +461,7 @@ func (lane RoomSourceLane) Validate(chunkCount int64, targets map[string]RoomTra
 func (intent TunnelLeaseIntent) Validate(role, target string, lane RoomSourceLane, now time.Time) error {
 	if intent.IntentID == "" || intent.TransferID == "" || intent.Signature == "" || intent.Role != role ||
 		intent.LaneID != lane.LaneID || intent.Attempt != lane.Attempt || intent.ChunkStart != lane.ChunkStart ||
-		intent.ChunkEnd != lane.ChunkEnd || intent.OrchestratorID == "" || intent.RequiredWorkerCapability != RoomTransferE2EECapability ||
+		intent.ChunkEnd != lane.ChunkEnd || intent.OrchestratorID == "" || (intent.RequiredWorkerCapability != RoomTransferE2EECapability && intent.RequiredWorkerCapability != RoomStorageCapability) ||
 		intent.ExpiresAt.IsZero() || !now.Before(intent.ExpiresAt) || intent.TargetMemberID != target {
 		return errors.New("room tunnel lease intent is invalid")
 	}
@@ -429,7 +469,7 @@ func (intent TunnelLeaseIntent) Validate(role, target string, lane RoomSourceLan
 }
 
 func (lease TunnelLease) Validate(role, target string, now time.Time) error {
-	if lease.LeaseID == "" || lease.IntentID == "" || lease.Role != role || lease.Protocol != RoomTransferDirectCapability ||
+	if lease.LeaseID == "" || lease.IntentID == "" || lease.Role != role || (lease.Protocol != RoomTransferDirectCapability && lease.Protocol != RoomStorageCapability) ||
 		lease.TargetMemberID != target || lease.ExpiresAt.IsZero() || !now.Before(lease.ExpiresAt) {
 		return errors.New("tunnel lease identity, role, protocol, or expiry is invalid")
 	}
@@ -441,6 +481,16 @@ func (lease TunnelLease) Validate(role, target string, now time.Time) error {
 		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
 			return errors.New("tunnel lease endpoint must be an absolute HTTP(S) URL")
 		}
+	}
+	if lease.Storage != nil {
+		if lease.Protocol != RoomStorageCapability || lease.AgentPublicKey != "" || len(lease.Endpoints) != 1 {
+			return errors.New("storage lease must have one scoped route endpoint and no agent key")
+		}
+		endpoint, _ := url.Parse(lease.Endpoints[0].URL)
+		if endpoint.Scheme != "https" || endpoint.User != nil || endpoint.Fragment != "" || lease.Endpoints[0].Method != "POST" {
+			return errors.New("storage route control requires HTTPS POST")
+		}
+		return lease.Storage.Validate(role)
 	}
 	if !validEd25519Key(lease.AgentPublicKey) {
 		return errors.New("tunnel lease requires an Ed25519 agent public key")

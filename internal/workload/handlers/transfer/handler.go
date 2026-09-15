@@ -58,6 +58,11 @@ func (h *Handler) Validate(spec domain.Spec) error {
 	if len(transfer.Parts) == 0 {
 		return errors.New("at least one transfer part is required")
 	}
+	if transfer.SourceGroupID != "" {
+		if err := validateSourceGroup(transfer, spec); err != nil {
+			return err
+		}
+	}
 	seen := make(map[int]struct{}, len(transfer.Parts))
 	for _, part := range transfer.Parts {
 		if _, exists := seen[part.Index]; exists {
@@ -87,6 +92,9 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 	var transfer contracts.MultipartTransfer
 	if err := json.Unmarshal(spec.Payload, &transfer); err != nil {
 		return domain.Result{}, err
+	}
+	if transfer.SourceGroupID != "" {
+		return h.executeSourceGroup(ctx, spec, transfer)
 	}
 	resume := multipartCheckpoint{TransferID: transfer.TransferID, Parts: make(map[string]partCheckpoint)}
 	if _, ok, err := workloadcheckpoint.Current(ctx, multipartCheckpointSchema, &resume); err != nil {

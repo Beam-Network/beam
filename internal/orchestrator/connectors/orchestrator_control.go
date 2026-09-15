@@ -79,7 +79,7 @@ type roomControlSession struct {
 func newRoomControl(config NATSConfig, conn *nats.Conn, rooms *roomtransfer.Service,
 	workloads *roomworkloads.Manager, tasks *dispatch.Service) *roomControl {
 	if config.Environment == "" {
-		config.Environment = "prod"
+		config.Environment = "dev"
 	}
 	if config.ControlPrefix == "" {
 		config.ControlPrefix = "beam.orch.control"
@@ -126,6 +126,9 @@ func (control *roomControl) bind(ctx context.Context) (_ *roomControlSession, er
 		return nil
 	}
 	if err = subscribe("worker_task_offer_batch"); err != nil {
+		return nil, err
+	}
+	if err = subscribe("worker_transfer_cancel"); err != nil {
 		return nil, err
 	}
 	if control.rooms != nil {
@@ -181,6 +184,10 @@ func (session *roomControlSession) run(ctx context.Context) error {
 			if strings.HasSuffix(message.Subject, ".worker_task_offer_batch") {
 				if err := control.handleTaskOfferBatch(ctx, message.Data); err != nil {
 					log.Printf("ignore invalid BeamCore task offer: %v", err)
+				}
+			} else if strings.HasSuffix(message.Subject, ".worker_transfer_cancel") {
+				if err := control.handleWorkerTransferCancel(ctx, message.Data); err != nil {
+					log.Printf("ignore invalid BeamCore transfer cancellation: %v", err)
 				}
 			} else if strings.HasSuffix(message.Subject, ".room_workload_offer") {
 				if err := control.handleRoomWorkloadOffer(ctx, message.Data); err != nil {
@@ -289,13 +296,13 @@ func (control *roomControl) handleTaskOfferBatch(ctx context.Context, encoded []
 	if batch.BatchID == "" || len(batch.Offers) == 0 {
 		return errors.New("BeamCore task offer batch is empty")
 	}
-	for _, offer := range batch.Offers {
-		spec, err := beamcoreadapter.ToWorkload(offer, domain.Identity{}, time.Now())
-		if err != nil {
-			return err
-		}
+	specs, err := beamcoreadapter.GroupWorkloads(batch.Offers, time.Now())
+	if err != nil {
+		return err
+	}
+	for _, spec := range specs {
 		if _, err := control.tasks.Dispatch(ctx, dispatch.DispatchRequest{
-			Source: dispatch.SourceBeamCore, ExternalID: offer.OfferID, Spec: spec,
+			Source: dispatch.SourceBeamCore, ExternalID: spec.AttemptID, Spec: spec,
 		}); err != nil {
 			return err
 		}
@@ -345,11 +352,44 @@ func (control *roomControl) handleOffer(ctx context.Context, encoded []byte) err
 	return control.rooms.Submit(ctx, batch)
 }
 
+func (control *roomControl) handleWorkerTransferCancel(ctx context.Context, encoded []byte) error {
+	var envelope orchestratorControlEnvelope
+	if err := msgpack.Unmarshal(encoded, &envelope); err != nil {
+		return err
+	}
+	if envelope.SchemaVersion != orchestratorControlSchema || envelope.Environment != control.config.Environment ||
+		strings.TrimSpace(envelope.Hotkey) != control.config.Hotkey || envelope.MessageType != "worker_transfer_cancel" || envelope.Producer != "transfer-runtime" {
+		return errors.New("invalid transfer cancellation authority")
+	}
+	encoded, err := json.Marshal(envelope.Payload)
+	if err != nil {
+		return err
+	}
+	var payload struct {
+		TransferID string `json:"transfer_id"`
+		Reason     string `json:"reason"`
+	}
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		return err
+	}
+	if strings.TrimSpace(payload.TransferID) == "" || control.tasks == nil {
+		return errors.New("invalid transfer cancellation")
+	}
+	return control.tasks.CancelTransfer(ctx, payload.TransferID, payload.Reason)
+}
+
 func (control *roomControl) submitResult(ctx context.Context, result contracts.RoomTaskResult) error {
 	return control.request(ctx, "room_task_result", result)
 }
 
 func (control *roomControl) submitTaskResult(ctx context.Context, record dispatch.Record, result domain.Result) error {
+	var transfer contracts.MultipartTransfer
+	if err := json.Unmarshal(record.Spec.Payload, &transfer); err != nil {
+		return err
+	}
+	if transfer.SourceGroupID != "" {
+		return control.submitSourceGroupResult(ctx, record, result, transfer)
+	}
 	evidence, err := resultEvidence(record, result)
 	if err != nil {
 		return err
@@ -421,9 +461,20 @@ func (control *roomControl) capabilityManifest(now time.Time) contracts.Capabili
 	if control.tasks.CapabilityAvailable(contracts.TransferMultipartCapability, beamcoreadapter.MultipartTransferResources()) {
 		capabilities = append(capabilities, contracts.TransferMultipartCapability)
 	}
-	if control.rooms != nil && control.rooms.CapabilityAvailable() {
-		capabilities = append(capabilities, contracts.RoomTransferCapability, contracts.RoomTransferDirectCapability,
-			contracts.RoomTransferE2EECapability)
+	if control.tasks.CapabilityAvailable(contracts.TransferMultipartFanoutCapability, domain.Resources{MemoryBytes: 96 << 20, Connections: 9, Streams: 9}) {
+		capabilities = append(capabilities, contracts.TransferMultipartFanoutCapability)
+	}
+	if control.rooms != nil {
+		e2ee, storage := control.rooms.CapabilityAvailable(), control.rooms.StorageCapabilityAvailable()
+		if e2ee || storage {
+			capabilities = append(capabilities, contracts.RoomTransferCapability)
+		}
+		if e2ee {
+			capabilities = append(capabilities, contracts.RoomTransferDirectCapability, contracts.RoomTransferE2EECapability)
+		}
+		if storage {
+			capabilities = append(capabilities, contracts.RoomStorageCapability)
+		}
 	}
 	for _, kind := range []domain.Kind{domain.KindRoomDatagram, domain.KindRoomMessage, domain.KindRoomCommand,
 		domain.KindRoomStream, domain.KindRoomMedia} {

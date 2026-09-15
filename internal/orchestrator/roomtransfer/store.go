@@ -24,6 +24,8 @@ const (
 )
 
 type LaneRecord struct {
+	SourceReads             []contracts.SourceReadEvidence       `json:"source_reads,omitempty"`
+	StorageResults          []contracts.StorageRangeResult       `json:"storage_results,omitempty"`
 	LaneID                  string                               `json:"lane_id"`
 	WorkerID                string                               `json:"worker_id,omitempty"`
 	NodeID                  string                               `json:"node_id,omitempty"`

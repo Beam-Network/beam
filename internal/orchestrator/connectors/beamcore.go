@@ -352,3 +352,24 @@ func (s *BeamCoreConnector) DeliverResult(ctx context.Context, record dispatch.R
 	}
 	return taskResultDisposition(ack)
 }
+
+func (s *BeamCoreConnector) DeliverCheckpoint(ctx context.Context, record dispatch.Record, checkpoint domain.Checkpoint) error {
+	if checkpoint.Schema != contracts.SourceGroupCheckpointSchema {
+		return nil
+	}
+	if s.roomControl == nil || !s.roomControl.enabled() {
+		return errors.New("BeamCore orchestrator control is not configured")
+	}
+	var transfer contracts.MultipartTransfer
+	var evidence contracts.SourceGroupCheckpoint
+	if err := json.Unmarshal(record.Spec.Payload, &transfer); err != nil {
+		return err
+	}
+	if err := json.Unmarshal(checkpoint.Payload, &evidence); err != nil {
+		return err
+	}
+	if transfer.SourceGroupID == "" || evidence.SourceGroupID != transfer.SourceGroupID || evidence.TransferID != transfer.TransferID {
+		return dispatch.TerminalDelivery(errors.New("source group checkpoint identity mismatch"))
+	}
+	return s.roomControl.submitSourceGroupResult(ctx, record, domain.Result{State: domain.StateRunning, BytesProcessed: evidence.Bytes, Outputs: evidence.Outputs}, transfer)
+}

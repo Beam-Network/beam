@@ -26,6 +26,7 @@ import (
 	orchestratorserver "github.com/Beam-Network/beam/internal/orchestrator/server"
 	platformbittensor "github.com/Beam-Network/beam/internal/platform/bittensor"
 	versioninfo "github.com/Beam-Network/beam/internal/version"
+	"github.com/Beam-Network/beam/internal/workload/contracts"
 )
 
 var version = versioninfo.Version
@@ -225,12 +226,17 @@ func serve(arguments []string) {
 						log.Printf("persist Worker progress: %v", err)
 					}
 				}
-				log.Printf("Worker progress worker_id=%s workload_id=%s state=%s outputs=%v", event.WorkerID,
-					event.Progress.WorkloadID, event.Progress.State, event.Progress.Outputs)
+				log.Printf("Worker progress worker_id=%s workload_id=%s state=%s", event.WorkerID,
+					event.Progress.WorkloadID, event.Progress.State)
 			}
 		}()
 		go func() {
 			for event := range wcpServer.Checkpoints() {
+				if tasks != nil && event.Checkpoint.Schema == contracts.SourceGroupCheckpointSchema {
+					if err := tasks.HandleCheckpoint(ctx, event.WorkerID, event.Checkpoint); err != nil {
+						log.Printf("persist/deliver transfer checkpoint: %v", err)
+					}
+				}
 				if rooms != nil {
 					if err := rooms.DeliverCheckpoint(ctx, event.Checkpoint); err != nil {
 						log.Printf("persist/deliver room transfer checkpoint: %v", err)
