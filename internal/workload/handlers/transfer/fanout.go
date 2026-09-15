@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	workloadcheckpoint "github.com/Beam-Network/beam/internal/workload/checkpoint"
 	"github.com/Beam-Network/beam/internal/workload/contracts"
 	"github.com/Beam-Network/beam/internal/workload/domain"
 )
@@ -55,6 +56,25 @@ func (h *Handler) executeSourceGroup(ctx context.Context, spec domain.Spec, tran
 	if err := validateSourceGroup(transfer, spec); err != nil {
 		return domain.Result{}, err
 	}
+	var resumed contracts.SourceGroupCheckpoint
+	if _, ok, err := workloadcheckpoint.Current(ctx, contracts.SourceGroupCheckpointSchema, &resumed); err != nil {
+		return domain.Result{}, err
+	} else if ok {
+		if resumed.SourceGroupID != transfer.SourceGroupID || resumed.TransferID != transfer.TransferID {
+			return domain.Result{}, errors.New("source group checkpoint identity mismatch")
+		}
+		result := domain.Result{BytesProcessed: resumed.Bytes, Outputs: resumed.Outputs}
+		for _, part := range transfer.Parts {
+			if resumed.Outputs[fmt.Sprintf("part.%d.state", part.Index)] != "completed" {
+				// The old buffer is gone. Return proven deliveries and let Runtime
+				// assign only missing cells under a new fenced attempt.
+				return result, errors.New("source_group_worker_restarted")
+			}
+		}
+		return result, nil
+	}
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
 	client := *h.client
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	first := transfer.Parts[0]
@@ -106,11 +126,23 @@ func (h *Handler) executeSourceGroup(ctx context.Context, spec domain.Spec, tran
 	if first.ExpectedSHA256 != "" && !strings.EqualFold(first.ExpectedSHA256, checksum) {
 		return domain.Result{Outputs: outputs}, errors.New("room_source_changed")
 	}
+	checkpoint := func(total int64) error {
+		err := workloadcheckpoint.Save(ctx, contracts.SourceGroupCheckpointSchema, map[string]string{"source_group_id": transfer.SourceGroupID},
+			contracts.SourceGroupCheckpoint{TransferID: transfer.TransferID, SourceGroupID: transfer.SourceGroupID, Bytes: total, Outputs: outputs})
+		if errors.Is(err, workloadcheckpoint.ErrUnavailable) {
+			return nil
+		}
+		return err
+	}
+	if err := checkpoint(0); err != nil {
+		return domain.Result{Outputs: outputs}, err
+	}
 	queue := make(chan contracts.TransferPart)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var total int64
 	failed := false
+	var checkpointErr error
 	for slot := 0; slot < transfer.DestinationConcurrency; slot++ {
 		wg.Add(1)
 		go func() {
@@ -122,10 +154,17 @@ func (h *Handler) executeSourceGroup(ctx context.Context, spec domain.Spec, tran
 				if writeErr != nil {
 					failed = true
 					outputs[prefix+"error"] = writeErr.Error()
+					outputs[prefix+"state"] = "failed"
 				} else {
 					total += part.Length
 					outputs[prefix+"sha256"], outputs[prefix+"etag"] = checksum, etag
 					outputs[prefix+"bytes"], outputs[prefix+"state"] = strconv.FormatInt(part.Length, 10), "completed"
+				}
+				if checkpointErr == nil {
+					if err := checkpoint(total); err != nil {
+						checkpointErr = err
+						stop()
+					}
 				}
 				mu.Unlock()
 			}
@@ -137,6 +176,9 @@ func (h *Handler) executeSourceGroup(ctx context.Context, spec domain.Spec, tran
 	close(queue)
 	wg.Wait()
 	result := domain.Result{BytesProcessed: total, Outputs: outputs}
+	if checkpointErr != nil {
+		return result, checkpointErr
+	}
 	if failed {
 		return result, errors.New("source_group_delivery_failed")
 	}

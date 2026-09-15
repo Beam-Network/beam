@@ -2,6 +2,7 @@ package connectors
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -17,8 +18,25 @@ func sourceGroupResults(record dispatch.Record, result domain.Result, transfer c
 		return nil, dispatch.TerminalDelivery(errors.New("empty source group result"))
 	}
 	payloads := make([]map[string]any, 0, len(transfer.Parts))
+	var acknowledged contracts.SourceGroupCheckpoint
+	if result.State == domain.StateRunning && record.UpstreamCheckpoint != nil {
+		if err := json.Unmarshal(record.UpstreamCheckpoint.Payload, &acknowledged); err != nil {
+			return nil, err
+		}
+	}
 	for _, part := range transfer.Parts {
 		prefix := fmt.Sprintf("part.%d.", part.Index)
+		if result.State == domain.StateRunning && result.Outputs[prefix+"state"] == "" {
+			continue
+		}
+		if result.State == domain.StateRunning && acknowledged.Outputs[prefix+"state"] != "" {
+			for _, field := range []string{"state", "bytes", "sha256", "etag", "error"} {
+				if result.Outputs[prefix+field] != acknowledged.Outputs[prefix+field] {
+					return nil, dispatch.TerminalDelivery(errors.New("checkpoint changed acknowledged destination evidence"))
+				}
+			}
+			continue
+		}
 		completed := result.Outputs[prefix+"state"] == "completed"
 		length, _ := strconv.ParseInt(result.Outputs[prefix+"bytes"], 10, 64)
 		hash, etag := result.Outputs[prefix+"sha256"], result.Outputs[prefix+"etag"]

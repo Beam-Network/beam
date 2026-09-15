@@ -26,6 +26,16 @@ type MultipartTransfer struct {
 	DestinationConcurrency int            `json:"destination_concurrency,omitempty"`
 }
 
+const SourceGroupCheckpointSchema = "beam.transfer.source-group/1"
+
+// Delivery evidence only. Source buffers, endpoints and credentials are never checkpointed.
+type SourceGroupCheckpoint struct {
+	TransferID    string            `json:"transfer_id"`
+	SourceGroupID string            `json:"source_group_id"`
+	Bytes         int64             `json:"bytes"`
+	Outputs       map[string]string `json:"outputs"`
+}
+
 const DistributionProtocol = "beam.transfer.range/1"
 
 type DistributionChild struct {

@@ -59,6 +59,8 @@ Source HTTP admission validates the signed receipt and readiness before reading 
 
 Workers persist per-chunk source read counts, payload bytes, and wire bytes in checkpoints and results. Completed destination coverage restored from a checkpoint skips the corresponding source read; HTTP measurements in the fanout test are compared with the emitted counters.
 
+Standard source groups checkpoint each destination result as it completes. The orchestrator retains and forwards that evidence independently of the final group result and replays unacknowledged checkpoints after reconnect. A worker process restart returns the retained successes and fails the unfinished cells to Runtime; it does not reread a lost buffer under the old attempt. Runtime creates the new attempt for missing coverage only.
+
 Runtime cancellation may fence a single v2 lane attempt. Orchestrators cancel only that matching workload; another lane or its replacement attempt continues. Whole-publication cancellation remains supported.
 
 The worker hashes each chunk once for provider Content-MD5 and reuses the existing source SHA-256 receipt across destinations. Route resolution must return the exact signed Content-MD5 header; a missing or changed checksum binding fails closed. Destination retries reuse both the payload and its checksums.

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	workloadcheckpoint "github.com/Beam-Network/beam/internal/workload/checkpoint"
 	"github.com/Beam-Network/beam/internal/workload/contracts"
 	"github.com/Beam-Network/beam/internal/workload/domain"
 )
@@ -81,6 +82,56 @@ func TestSourceGroupReadsOnceAcrossDestinationBatchesAndRetry(t *testing.T) {
 		if i != 99 && result.Outputs[fmt.Sprintf("part.%d.state", i)] != "completed" {
 			t.Errorf("lost successful destination %d", i)
 		}
+	}
+}
+
+func TestSourceGroupCheckpointsCompletedDestinationsBeforeTheGroupFinishes(t *testing.T) {
+	var reads atomic.Int64
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			reads.Add(1)
+			_, _ = w.Write([]byte("12345678"))
+			return
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+		if r.URL.Path == "/slow" {
+			<-r.Context().Done()
+			return
+		}
+		w.Header().Set("ETag", "verified")
+		w.WriteHeader(200)
+	}))
+	defer server.Close()
+	group := contracts.MultipartTransfer{TransferID: "transfer", SourceGroupID: "range", DestinationConcurrency: 2}
+	for index, path := range []string{"/fast", "/slow"} {
+		group.Parts = append(group.Parts, contracts.TransferPart{Index: index, TaskID: fmt.Sprint(index), OfferID: fmt.Sprint(index), Length: 8, ETagRequired: true, Source: contracts.HTTPEndpoint{URL: server.URL}, Destination: contracts.HTTPEndpoint{URL: server.URL + path}})
+	}
+	encoded, _ := json.Marshal(group)
+	spec := domain.Spec{Resources: domain.Resources{MemoryBytes: (4 << 20) + 8}, Payload: encoded}
+	var durable *domain.Checkpoint
+	observed := false
+	ctx = workloadcheckpoint.WithManager(ctx, nil, func(value domain.Checkpoint) error {
+		durable = &value
+		var evidence contracts.SourceGroupCheckpoint
+		if err := json.Unmarshal(value.Payload, &evidence); err != nil {
+			return err
+		}
+		if evidence.Outputs["part.0.state"] == "completed" && evidence.Outputs["part.1.state"] == "" {
+			observed = true
+			cancel()
+		}
+		return nil
+	})
+	result, err := NewHandler(nil).Execute(ctx, spec)
+	if err == nil || !observed || result.Outputs["part.0.state"] != "completed" {
+		t.Fatalf("checkpoint=%v result=%+v err=%v", observed, result, err)
+	}
+	restarted := workloadcheckpoint.WithManager(context.Background(), durable, func(domain.Checkpoint) error { return nil })
+	result, err = NewHandler(nil).Execute(restarted, spec)
+	if err == nil || err.Error() != "source_group_worker_restarted" || result.Outputs["part.0.state"] != "completed" || reads.Load() != 1 {
+		t.Fatalf("restart reread or lost coverage: reads=%d result=%+v err=%v", reads.Load(), result, err)
 	}
 }
 

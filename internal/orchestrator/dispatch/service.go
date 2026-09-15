@@ -53,6 +53,10 @@ type ProgressSink interface {
 	DeliverProgress(context.Context, Record, domain.Progress) error
 }
 
+type CheckpointSink interface {
+	DeliverCheckpoint(context.Context, Record, domain.Checkpoint) error
+}
+
 type Config struct {
 	OrchestratorID    string
 	AssignmentTTL     time.Duration
@@ -277,6 +281,9 @@ func (s *Service) HandleResult(ctx context.Context, result domain.Result) error 
 
 func (s *Service) ReplayResults(ctx context.Context) {
 	for _, record := range s.store.List() {
+		if record.Checkpoint != nil && record.Checkpoint.Sequence > record.UpstreamCheckpointSequence && !record.UpstreamDelivered {
+			_ = s.HandleCheckpoint(ctx, record.WorkerID, *record.Checkpoint)
+		}
 		if record.Result != nil && !record.UpstreamDelivered {
 			lock := s.recordLock(record.WorkloadKey)
 			lock.Lock()
@@ -287,6 +294,44 @@ func (s *Service) ReplayResults(ctx context.Context) {
 			lock.Unlock()
 		}
 	}
+}
+
+// Persist evidence before upstream delivery so a control reconnect cannot lose
+// destinations completed while other members of the source group are running.
+func (s *Service) HandleCheckpoint(ctx context.Context, workerID string, checkpoint domain.Checkpoint) error {
+	key := checkpoint.WorkloadID + "/" + checkpoint.AttemptID
+	lock := s.recordLock(key)
+	lock.Lock()
+	defer lock.Unlock()
+	record, ok := s.store.Get(key)
+	if !ok || record.WorkerID != workerID || checkpoint.Kind != record.Spec.Kind || checkpoint.Sequence == 0 {
+		return errors.New("checkpoint does not match the assigned worker and workload")
+	}
+	if record.UpstreamDelivered || checkpoint.Sequence <= record.UpstreamCheckpointSequence {
+		return nil
+	}
+	if record.Checkpoint == nil || checkpoint.Sequence > record.Checkpoint.Sequence {
+		record.Checkpoint = &checkpoint
+		record.UpdatedAt = s.config.Now().UTC()
+		if err := s.save(record, "Worker checkpoint retained for upstream delivery"); err != nil {
+			return err
+		}
+	}
+	s.mu.RLock()
+	sink, available := s.sinks[record.Source].(CheckpointSink)
+	s.mu.RUnlock()
+	if !available {
+		return errors.New("checkpoint upstream is unavailable")
+	}
+	err := sink.DeliverCheckpoint(ctx, record, *record.Checkpoint)
+	var terminal *TerminalDeliveryError
+	if err != nil && !errors.As(err, &terminal) {
+		return err
+	}
+	record.UpstreamCheckpointSequence = record.Checkpoint.Sequence
+	record.UpstreamCheckpoint = record.Checkpoint
+	record.UpdatedAt = s.config.Now().UTC()
+	return s.save(record, "external authority acknowledged checkpoint")
 }
 
 func (s *Service) Records() []Record { return s.store.List() }

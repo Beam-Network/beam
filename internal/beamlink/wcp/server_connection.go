@@ -213,11 +213,11 @@ func (s *Server) handleCheckpoint(session *Session, envelope Envelope) error {
 		return errors.New("invalid workload checkpoint")
 	}
 	eventID := fmt.Sprintf("checkpoint:%s:%s:%s:%d", session.workerID, checkpoint.WorkloadID, checkpoint.AttemptID, checkpoint.Sequence)
-	appended, err := s.journal.Append(JournalEvent{
+	_, err = s.journal.Append(JournalEvent{
 		EventID: eventID, WorkerID: session.workerID, Type: TypeCheckpoint,
 		WorkloadID: checkpoint.WorkloadID, AttemptID: checkpoint.AttemptID, Checkpoint: &checkpoint,
 	})
-	if err != nil || !appended {
+	if err != nil {
 		return err
 	}
 	select {
