@@ -15,6 +15,7 @@ import (
 )
 
 type TaskOffer struct {
+	SourceGroup              *SourceGroup      `json:"source_group,omitempty"`
 	TaskID                   string            `json:"task_id"`
 	OfferID                  string            `json:"offer_id"`
 	DeadlineUS               int64             `json:"deadline_us"`
@@ -31,6 +32,15 @@ type TaskOffer struct {
 	URLsExpireAt             string            `json:"urls_expires_at,omitempty"`
 	ETagRequired             bool              `json:"etag_required,omitempty"`
 	ExecutionContext         ExecutionContext  `json:"execution_context"`
+}
+
+// A source group is indivisible at worker dispatch. Results retain each original
+// task/offer identity so successful destinations survive unrelated failures.
+type SourceGroup struct {
+	ID          string `json:"id"`
+	Index       int    `json:"index"`
+	Count       int    `json:"count"`
+	Concurrency int    `json:"concurrency"`
 }
 
 type ExecutionContext struct {
@@ -53,6 +63,9 @@ func MultipartTransferResources() domain.Resources {
 }
 
 func ToWorkload(offer TaskOffer, identity domain.Identity, receivedAt time.Time) (domain.Spec, error) {
+	if offer.SourceGroup != nil {
+		return domain.Spec{}, errors.New("source groups require atomic grouped dispatch")
+	}
 	if offer.TaskID == "" {
 		return domain.Spec{}, errors.New("BeamCore task_id is required")
 	}

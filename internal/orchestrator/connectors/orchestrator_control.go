@@ -289,13 +289,13 @@ func (control *roomControl) handleTaskOfferBatch(ctx context.Context, encoded []
 	if batch.BatchID == "" || len(batch.Offers) == 0 {
 		return errors.New("BeamCore task offer batch is empty")
 	}
-	for _, offer := range batch.Offers {
-		spec, err := beamcoreadapter.ToWorkload(offer, domain.Identity{}, time.Now())
-		if err != nil {
-			return err
-		}
+	specs, err := beamcoreadapter.GroupWorkloads(batch.Offers, time.Now())
+	if err != nil {
+		return err
+	}
+	for _, spec := range specs {
 		if _, err := control.tasks.Dispatch(ctx, dispatch.DispatchRequest{
-			Source: dispatch.SourceBeamCore, ExternalID: offer.OfferID, Spec: spec,
+			Source: dispatch.SourceBeamCore, ExternalID: spec.AttemptID, Spec: spec,
 		}); err != nil {
 			return err
 		}
@@ -350,6 +350,13 @@ func (control *roomControl) submitResult(ctx context.Context, result contracts.R
 }
 
 func (control *roomControl) submitTaskResult(ctx context.Context, record dispatch.Record, result domain.Result) error {
+	var transfer contracts.MultipartTransfer
+	if err := json.Unmarshal(record.Spec.Payload, &transfer); err != nil {
+		return err
+	}
+	if transfer.SourceGroupID != "" {
+		return control.submitSourceGroupResult(ctx, record, result, transfer)
+	}
 	evidence, err := resultEvidence(record, result)
 	if err != nil {
 		return err
@@ -420,6 +427,9 @@ func (control *roomControl) capabilityManifest(now time.Time) contracts.Capabili
 	capabilities := make([]string, 0, 8)
 	if control.tasks.CapabilityAvailable(contracts.TransferMultipartCapability, beamcoreadapter.MultipartTransferResources()) {
 		capabilities = append(capabilities, contracts.TransferMultipartCapability)
+	}
+	if control.tasks.CapabilityAvailable(contracts.TransferMultipartFanoutCapability, domain.Resources{MemoryBytes: 96 << 20, Connections: 9, Streams: 9}) {
+		capabilities = append(capabilities, contracts.TransferMultipartFanoutCapability)
 	}
 	if control.rooms != nil {
 		e2ee, storage := control.rooms.CapabilityAvailable(), control.rooms.StorageCapabilityAvailable()

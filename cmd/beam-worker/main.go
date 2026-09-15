@@ -73,7 +73,7 @@ func serve(arguments []string) {
 	memory := flags.Int64("memory-bytes", 512<<20, "reservable memory")
 	scratch := flags.Int64("scratch-bytes", 10<<30, "reservable scratch bytes")
 	bandwidth := flags.Int64("bandwidth-mbps", 100, "reservable bandwidth")
-	capabilityList := flags.String("capabilities", "transfer.multipart,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v2", "comma-separated enabled capabilities")
+	capabilityList := flags.String("capabilities", "transfer.multipart,transfer.multipart.fanout.v1,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v2", "comma-separated enabled capabilities")
 	statePath := flags.String("state", "data/worker/workloads.json", "durable workload journal")
 	actionRoot := flags.String("action-root", os.Getenv("BEAM_ACTION_ROOT"), "root of checksum-pinned Studio actions")
 	actionCache := flags.String("action-cache", "data/worker/action-cache", "content-addressed Studio action cache")

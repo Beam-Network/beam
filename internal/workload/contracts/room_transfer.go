@@ -14,17 +14,18 @@ import (
 )
 
 const (
-	RoomTransferSchemaVersion    = "room-transfer/v1"
-	TransferMultipartCapability  = "transfer.multipart"
-	RoomTransferCapability       = "room.transfer"
-	RoomTransferDirectCapability = "room.transfer.direct.v1"
-	RoomTransferE2EECapability   = "room.transfer.e2ee.v2"
-	RoomTransferProtectionScheme = "btr.object.chunk.aead.v1"
-	RoomStorageSchemaVersion     = "room-storage-transfer/v2"
-	RoomStorageCapability        = "room.transfer.storage.v2"
-	RoomStorageProtectionScheme  = "btr.object.transport.tls.v1"
-	TunnelLeaseRoleSourceRead    = "source_read"
-	TunnelLeaseRoleTargetWrite   = "target_write"
+	RoomTransferSchemaVersion         = "room-transfer/v1"
+	TransferMultipartCapability       = "transfer.multipart"
+	TransferMultipartFanoutCapability = "transfer.multipart.fanout.v1"
+	RoomTransferCapability            = "room.transfer"
+	RoomTransferDirectCapability      = "room.transfer.direct.v1"
+	RoomTransferE2EECapability        = "room.transfer.e2ee.v2"
+	RoomTransferProtectionScheme      = "btr.object.chunk.aead.v1"
+	RoomStorageSchemaVersion          = "room-storage-transfer/v2"
+	RoomStorageCapability             = "room.transfer.storage.v2"
+	RoomStorageProtectionScheme       = "btr.object.transport.tls.v1"
+	TunnelLeaseRoleSourceRead         = "source_read"
+	TunnelLeaseRoleTargetWrite        = "target_write"
 )
 
 type RoomTransferProtection struct {

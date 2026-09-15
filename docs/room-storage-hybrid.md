@@ -34,6 +34,15 @@ outbound clients with no public ingress port.
 
 ## Capability readiness
 
+Standard signed multipart fanout uses `transfer.multipart.fanout.v1`. A complete
+logical source group is dispatched to one capable worker, with the original
+task and offer identities retained for every destination. The worker reserves
+memory for one source chunk, reads it once, and reuses it across bounded
+destination batches and retries. Remote routes require HTTPS. Source conditions,
+range length, and hashes are checked before uploading. Successful destination
+results remain independently valid when another destination fails. This
+composition retains standard multipart finalization and missing-delivery recovery.
+
 Enable this capability only with a coordinator, transfer runtime, credential
 adapter, and orchestrator that support the complete v2 contract. A worker
 listener alone does not establish end-to-end capability readiness. Do not

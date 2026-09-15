@@ -7,6 +7,9 @@ type HTTPEndpoint struct {
 }
 
 type TransferPart struct {
+	TaskID         string       `json:"task_id,omitempty"`
+	OfferID        string       `json:"offer_id,omitempty"`
+	ETagRequired   bool         `json:"etag_required,omitempty"`
 	Index          int          `json:"index"`
 	Source         HTTPEndpoint `json:"source"`
 	Destination    HTTPEndpoint `json:"destination"`
@@ -17,8 +20,10 @@ type TransferPart struct {
 }
 
 type MultipartTransfer struct {
-	TransferID string         `json:"transfer_id"`
-	Parts      []TransferPart `json:"parts"`
+	TransferID             string         `json:"transfer_id"`
+	Parts                  []TransferPart `json:"parts"`
+	SourceGroupID          string         `json:"source_group_id,omitempty"`
+	DestinationConcurrency int            `json:"destination_concurrency,omitempty"`
 }
 
 const DistributionProtocol = "beam.transfer.range/1"
