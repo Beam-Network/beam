@@ -226,8 +226,8 @@ func serve(arguments []string) {
 						log.Printf("persist Worker progress: %v", err)
 					}
 				}
-				log.Printf("Worker progress worker_id=%s workload_id=%s state=%s outputs=%v", event.WorkerID,
-					event.Progress.WorkloadID, event.Progress.State, event.Progress.Outputs)
+				log.Printf("Worker progress worker_id=%s workload_id=%s state=%s", event.WorkerID,
+					event.Progress.WorkloadID, event.Progress.State)
 			}
 		}()
 		go func() {

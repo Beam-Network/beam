@@ -16,6 +16,8 @@ source allocation and missing-coverage recovery; this adds no scheduler.
 Storage leases identify the resource and frozen source ETag/version. They
 resolve transient HTTPS provider routes through a scoped adapter endpoint.
 Provider URLs, headers, and tokens are excluded from result/checkpoint data.
+Progress logs contain only worker, workload, and state identifiers; transient
+worker connection details remain confined to the authenticated control path.
 Conditional range reads reject changed source identities before delivery.
 Provider responses produce part identity and hash evidence; they do not become
 synthetic agent receipts or prove multipart finalization.
