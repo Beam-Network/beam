@@ -115,7 +115,7 @@ func TestStorageFanoutReadsEachRangeOnceAndRetainsBufferAcrossDestinationRetry(t
 	payload, _ := json.Marshal(transfer)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	result, err := handler.Execute(ctx, domain.Spec{Payload: payload, Identity: domain.Identity{WorkerID: "worker-1"}})
+	result, err := handler.Execute(ctx, domain.Spec{Payload: payload, Identity: domain.Identity{WorkerID: "worker-1"}, Resources: domain.Resources{MemoryBytes: 96 << 20}})
 	if err != nil {
 		t.Fatal(err)
 	}

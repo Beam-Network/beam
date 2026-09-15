@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -30,7 +31,6 @@ import (
 const (
 	maxReceiptBytes        = 64 << 10
 	maxTargets             = 10_000
-	maxChunkBytes          = 128 << 20
 	protectedChunkOverhead = 1 + 8 + 16
 )
 
@@ -116,6 +116,10 @@ func (h *Handler) Validate(spec domain.Spec) error {
 	transfer, err := decodeTransfer(spec)
 	if err != nil {
 		return err
+	}
+	needed := contracts.RoomBufferMemoryBytes(transfer.FileSizeBytes, transfer.ChunkSizeBytes)
+	if needed == 0 || spec.Resources.MemoryBytes < needed {
+		return errors.New("room source buffer exceeds reserved worker memory")
 	}
 	if _, _, err := net.SplitHostPort(h.config.ListenAddress); err != nil {
 		return errors.New("room transfer listen address must be host:port")
@@ -422,6 +426,8 @@ func (s *session) acceptSource(response http.ResponseWriter, request *http.Reque
 		reason = "signature_or_public_key"
 	}
 	if reason != "" {
+		log.Printf("room transfer rejected source receipt: reason=%s transfer_id=%s lane_id=%s chunk=%d expected_key=%s receipt_key=%s",
+			reason, s.transfer.TransferID, s.transfer.LaneID, index, publicKeyFingerprint(s.transfer.SourceLease.AgentPublicKey), publicKeyFingerprint(receipt.AgentPublicKey))
 		http.Error(response, "invalid signed source receipt", http.StatusBadRequest)
 		return
 	}
@@ -461,7 +467,11 @@ func (s *session) acceptSource(response http.ResponseWriter, request *http.Reque
 	s.readingSource = true
 	s.mu.Unlock()
 	response.Header().Del("Connection")
-	payload, readErr := io.ReadAll(io.LimitReader(request.Body, length+protectedChunkOverhead+1))
+	wireLength := length
+	if s.transfer.Protection.Valid() {
+		wireLength += protectedChunkOverhead
+	}
+	payload, readErr := readExactPayload(request.Body, wireLength)
 	digest := sha256.Sum256(payload)
 	s.mu.Lock()
 	s.readingSource = false
@@ -477,6 +487,13 @@ func (s *session) acceptSource(response http.ResponseWriter, request *http.Reque
 	response.WriteHeader(http.StatusNoContent)
 }
 
+func publicKeyFingerprint(value string) string {
+	if value == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(digest[:6])
+}
 func (s *session) acceptSourceFailure(response http.ResponseWriter, request *http.Request, rawIndex string) {
 	index, err := s.authorizeSource(request, rawIndex)
 	if err != nil {
@@ -668,7 +685,7 @@ func validateTransfer(transfer contracts.RoomTransfer, now time.Time) error {
 		transfer.SnapshotVersion == 0 || transfer.Attempt <= 0 {
 		return errors.New("room transfer identity or schema is invalid")
 	}
-	if transfer.FileSizeBytes <= 0 || transfer.ChunkSizeBytes <= 0 || transfer.ChunkSizeBytes > maxChunkBytes ||
+	if transfer.FileSizeBytes <= 0 || transfer.ChunkSizeBytes <= 0 ||
 		transfer.ChunkCount != (transfer.FileSizeBytes+transfer.ChunkSizeBytes-1)/transfer.ChunkSizeBytes ||
 		transfer.ChunkStart < 0 || transfer.ChunkEnd < transfer.ChunkStart || transfer.ChunkEnd >= transfer.ChunkCount {
 		return errors.New("room transfer file or lane range is invalid")

@@ -80,3 +80,5 @@ provider cleanup is verified by the transfer owner separately.
 Orchestrator hybrid capability follows available, connected workers with both the
 base room protocol and the hybrid capability. MLS-only workers and exhausted
 capacity do not enable hybrid routing. Selection uses the existing worker catalog.
+
+Worker admission reserves the actual maximum source payload plus transport overhead. Standard provider minimums and jitter are accepted without a separate room chunk ceiling; worker memory capacity bounds execution.

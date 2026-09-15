@@ -6,6 +6,17 @@ import (
 	"time"
 )
 
+// RoomBufferMemoryBytes reserves one source chunk plus transport overhead.
+// Chunk policy belongs to Core; worker memory admission bounds buffering.
+func RoomBufferMemoryBytes(fileSize, chunkSize int64) int64 {
+	payload := min(fileSize, chunkSize)
+	const overhead = int64(32 << 20)
+	if payload <= 0 || payload > math.MaxInt64-overhead {
+		return 0
+	}
+	return payload + overhead
+}
+
 // These counters measure admitted source payloads, independently of fanout.
 // Wire bytes include the MLS envelope when present; payload bytes do not.
 type SourceReadEvidence struct {

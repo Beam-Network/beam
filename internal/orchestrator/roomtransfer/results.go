@@ -19,7 +19,7 @@ import (
 
 func (s *Service) resourcesFor(batch contracts.RoomTaskOfferBatch, lane contracts.RoomSourceLane) domain.Resources {
 	resources := s.config.Resources
-	resources.MemoryBytes = max(resources.MemoryBytes, batch.ChunkSizeBytes+(32<<20))
+	resources.MemoryBytes = max(resources.MemoryBytes, contracts.RoomBufferMemoryBytes(batch.FileSizeBytes, batch.ChunkSizeBytes))
 	connections := len(lane.TargetMemberIDs) + 1
 	if batch.SchemaVersion == contracts.RoomStorageSchemaVersion {
 		connections = min(8, len(lane.TargetMemberIDs)) + 1

@@ -96,6 +96,22 @@ func storageRange(transfer contracts.RoomTransfer, index int64) (int64, int64) {
 	return offset, min(transfer.ChunkSizeBytes, transfer.FileSizeBytes-offset)
 }
 
+// Allocate exactly the admitted payload rather than growing and copying it.
+func readExactPayload(reader io.Reader, length int64) ([]byte, error) {
+	if length <= 0 {
+		return nil, errors.New("invalid source payload length")
+	}
+	payload := make([]byte, length)
+	if _, err := io.ReadFull(reader, payload); err != nil {
+		return nil, err
+	}
+	var extra [1]byte
+	if _, err := io.ReadFull(reader, extra[:]); err != io.EOF {
+		return nil, errors.New("source payload exceeds admitted length")
+	}
+	return payload, nil
+}
+
 func readStorageChunk(ctx context.Context, client *http.Client, transfer contracts.RoomTransfer,
 	workerID string, index int64, now func() time.Time) ([]byte, contracts.StorageRangeResult, error) {
 	lease := transfer.SourceLease
@@ -137,7 +153,7 @@ func readStorageChunk(ctx context.Context, client *http.Client, transfer contrac
 		(lease.Storage.VersionID != "" && version != lease.Storage.VersionID) {
 		return nil, contracts.StorageRangeResult{}, errors.New("room_storage_source_mutated")
 	}
-	payload, err := io.ReadAll(io.LimitReader(response.Body, route.Length+1))
+	payload, err := readExactPayload(response.Body, route.Length)
 	if err != nil || int64(len(payload)) != route.Length {
 		return nil, contracts.StorageRangeResult{}, errors.New("storage source range length mismatch")
 	}

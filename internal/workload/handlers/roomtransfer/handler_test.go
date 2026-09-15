@@ -35,12 +35,21 @@ func TestValidateDirectRoomTransfer(t *testing.T) {
 			Lease: directLease("target-lease", contracts.TunnelLeaseRoleTargetWrite, "member-b", targetKey.Public().(ed25519.PublicKey), now)}}}
 	payload, _ := json.Marshal(transfer)
 	handler := NewHandler(Config{ListenAddress: "127.0.0.1:0", AdvertiseURL: "http://worker.example:9470"})
-	if err := handler.Validate(domain.Spec{Payload: payload}); err != nil {
+	if err := handler.Validate(domain.Spec{Payload: payload, Resources: domain.Resources{MemoryBytes: 96 << 20}}); err != nil {
 		t.Fatal(err)
+	}
+	transfer.FileSizeBytes, transfer.ChunkSizeBytes = 100<<20, (128<<20)+(1<<20)
+	transfer.ChunkCount, transfer.ChunkEnd = 1, 0
+	payload, _ = json.Marshal(transfer)
+	if err := handler.Validate(domain.Spec{Payload: payload, Resources: domain.Resources{MemoryBytes: 132 << 20}}); err != nil {
+		t.Fatalf("provider floor plus jitter rejected: %v", err)
+	}
+	if err := handler.Validate(domain.Spec{Payload: payload, Resources: domain.Resources{MemoryBytes: 131 << 20}}); err == nil {
+		t.Fatal("undersized source buffer reservation accepted")
 	}
 	transfer.SourceLease.Protocol = contracts.RoomTransferCapability
 	payload, _ = json.Marshal(transfer)
-	if err := handler.Validate(domain.Spec{Payload: payload}); err == nil {
+	if err := handler.Validate(domain.Spec{Payload: payload, Resources: domain.Resources{MemoryBytes: 132 << 20}}); err == nil {
 		t.Fatal("legacy room transfer protocol was accepted")
 	}
 }
