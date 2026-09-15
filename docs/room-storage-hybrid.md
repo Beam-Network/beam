@@ -57,3 +57,7 @@ The worker hashes each chunk once for provider Content-MD5 and reuses the existi
 Workers enable hybrid execution with `room.transfer.storage.v2` and `room.transfer`, `BEAM_ROOM_STORAGE_LISTEN_ADDR`, and an HTTPS `BEAM_ROOM_STORAGE_ADVERTISE_URL`. The TLS listener binds before worker registration; invalid configuration or a port conflict stops startup. The coordinator-bound certificate authenticates this endpoint to agents. Orchestrators advertise hybrid support only when a live worker with that capability can be placed. Storage routes and results must use the standard three attempt slots per logical chunk.
 
 Agent receipt waiting does not occupy provider upload slots. One session watcher collects agent acknowledgements, including bursts represented by a single notification. Bucket writes retain their bounded concurrency even when agents are unavailable. Outbound agent responses reference the immutable source buffer without creating a per-recipient payload copy.
+
+Orchestrator hybrid capability follows available, connected workers with both the
+base room protocol and the hybrid capability. MLS-only workers and exhausted
+capacity do not enable hybrid routing. Selection uses the existing worker catalog.

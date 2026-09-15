@@ -421,9 +421,17 @@ func (control *roomControl) capabilityManifest(now time.Time) contracts.Capabili
 	if control.tasks.CapabilityAvailable(contracts.TransferMultipartCapability, beamcoreadapter.MultipartTransferResources()) {
 		capabilities = append(capabilities, contracts.TransferMultipartCapability)
 	}
-	if control.rooms != nil && control.rooms.CapabilityAvailable() {
-		capabilities = append(capabilities, contracts.RoomTransferCapability, contracts.RoomTransferDirectCapability,
-			contracts.RoomTransferE2EECapability)
+	if control.rooms != nil {
+		e2ee, storage := control.rooms.CapabilityAvailable(), control.rooms.StorageCapabilityAvailable()
+		if e2ee || storage {
+			capabilities = append(capabilities, contracts.RoomTransferCapability)
+		}
+		if e2ee {
+			capabilities = append(capabilities, contracts.RoomTransferDirectCapability, contracts.RoomTransferE2EECapability)
+		}
+		if storage {
+			capabilities = append(capabilities, contracts.RoomStorageCapability)
+		}
 	}
 	for _, kind := range []domain.Kind{domain.KindRoomDatagram, domain.KindRoomMessage, domain.KindRoomCommand,
 		domain.KindRoomStream, domain.KindRoomMedia} {
