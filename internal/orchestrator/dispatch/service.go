@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -72,11 +73,12 @@ type Service struct {
 	store       Store
 	recordLocks [64]sync.Mutex
 
-	mu          sync.RWMutex
-	sinks       map[Source]ResultSink
-	subscribers map[uint64]chan Event
-	nextSub     uint64
-	sequence    atomic.Uint64
+	mu                 sync.RWMutex
+	cancelledTransfers map[string]time.Time
+	sinks              map[Source]ResultSink
+	subscribers        map[uint64]chan Event
+	nextSub            uint64
+	sequence           atomic.Uint64
 }
 
 func NewService(config Config, orchestratorRegistry *registry.Registry, control Control, store Store) (*Service, error) {
@@ -107,6 +109,22 @@ func (s *Service) RegisterSink(source Source, sink ResultSink) {
 }
 
 func (s *Service) Dispatch(ctx context.Context, request DispatchRequest) (Record, error) {
+	var beamTransferID string
+	if request.Source == SourceBeamCore {
+		var payload struct {
+			TransferID string `json:"transfer_id"`
+		}
+		if err := json.Unmarshal(request.Spec.Payload, &payload); err != nil {
+			return Record{}, err
+		}
+		beamTransferID = payload.TransferID
+		s.mu.RLock()
+		cancelledUntil := s.cancelledTransfers[payload.TransferID]
+		s.mu.RUnlock()
+		if cancelledUntil.After(s.config.Now()) {
+			return Record{}, errors.New("transfer_cancelled")
+		}
+	}
 	if request.ExternalID == "" || request.Spec.WorkloadID == "" || request.Spec.AttemptID == "" {
 		return Record{}, errors.New("external id and workload identity are required")
 	}
@@ -190,6 +208,15 @@ func (s *Service) Dispatch(ctx context.Context, request DispatchRequest) (Record
 			return s.terminal(record, StateCancelled, "external authority refused commit: "+err.Error(), err)
 		}
 	}
+	if request.Source == SourceBeamCore {
+		s.mu.RLock()
+		cancelledUntil := s.cancelledTransfers[beamTransferID]
+		s.mu.RUnlock()
+		if cancelledUntil.After(s.config.Now()) {
+			_ = s.control.Cancel(ctx, record.WorkerID, record.Spec.WorkloadID, record.Spec.AttemptID)
+			return s.terminal(record, StateCancelled, "transfer_cancelled", errors.New("transfer_cancelled"))
+		}
+	}
 	token, err := randomToken(24)
 	if err != nil {
 		return record, err
@@ -236,16 +263,15 @@ func (s *Service) HandleProgressContext(ctx context.Context, progress domain.Pro
 	record.State = StateRunning
 	record.Progress = &progress
 	record.UpdatedAt = s.config.Now().UTC()
-	if err := s.save(record, "Worker reported progress"); err != nil {
-		return err
-	}
 	s.mu.RLock()
 	sink, ok := s.sinks[record.Source].(ProgressSink)
 	s.mu.RUnlock()
 	if ok {
-		return sink.DeliverProgress(ctx, record, progress)
+		if err := sink.DeliverProgress(ctx, record, progress); err != nil {
+			return err
+		}
 	}
-	return nil
+	return s.save(record, "Worker reported progress")
 }
 
 func (s *Service) HandleResult(ctx context.Context, result domain.Result) error {
@@ -335,6 +361,36 @@ func (s *Service) HandleCheckpoint(ctx context.Context, workerID string, checkpo
 }
 
 func (s *Service) Records() []Record { return s.store.List() }
+
+func (s *Service) CancelTransfer(ctx context.Context, transferID, reason string) error {
+	s.mu.Lock()
+	if s.cancelledTransfers == nil {
+		s.cancelledTransfers = make(map[string]time.Time)
+	}
+	for id, until := range s.cancelledTransfers {
+		if !until.After(s.config.Now()) {
+			delete(s.cancelledTransfers, id)
+		}
+	}
+	s.cancelledTransfers[transferID] = s.config.Now().Add(24 * time.Hour)
+	s.mu.Unlock()
+	var failures []error
+	for _, record := range s.store.List() {
+		if record.Source != SourceBeamCore {
+			continue
+		}
+		var payload struct {
+			TransferID string `json:"transfer_id"`
+		}
+		if json.Unmarshal(record.Spec.Payload, &payload) != nil || payload.TransferID != transferID {
+			continue
+		}
+		if err := s.CancelWorkload(ctx, record.WorkloadKey, reason); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
+}
 
 func (s *Service) CancelWorkload(ctx context.Context, workloadKey, reason string) error {
 	lock := s.recordLock(workloadKey)

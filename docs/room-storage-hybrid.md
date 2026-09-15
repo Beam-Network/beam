@@ -69,6 +69,12 @@ Workers enable hybrid execution with `room.transfer.storage.v2` and `room.transf
 
 Agent receipt waiting does not occupy provider upload slots. One session watcher collects agent acknowledgements, including bursts represented by a single notification. Bucket writes retain their bounded concurrency even when agents are unavailable. Outbound agent responses reference the immutable source buffer without creating a per-recipient payload copy.
 
+Standard `worker_transfer_cancel` messages are authenticated against the Runtime
+control envelope and scoped to one transfer. The orchestrator cancels its matching
+WCP workloads, retains their cancelled records, and rejects late offers. Other
+transfers continue. Disconnected workers remain bounded by assignment expiry;
+provider cleanup is verified by the transfer owner separately.
+
 Orchestrator hybrid capability follows available, connected workers with both the
 base room protocol and the hybrid capability. MLS-only workers and exhausted
 capacity do not enable hybrid routing. Selection uses the existing worker catalog.

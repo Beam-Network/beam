@@ -79,7 +79,7 @@ type roomControlSession struct {
 func newRoomControl(config NATSConfig, conn *nats.Conn, rooms *roomtransfer.Service,
 	workloads *roomworkloads.Manager, tasks *dispatch.Service) *roomControl {
 	if config.Environment == "" {
-		config.Environment = "prod"
+		config.Environment = "dev"
 	}
 	if config.ControlPrefix == "" {
 		config.ControlPrefix = "beam.orch.control"
@@ -126,6 +126,9 @@ func (control *roomControl) bind(ctx context.Context) (_ *roomControlSession, er
 		return nil
 	}
 	if err = subscribe("worker_task_offer_batch"); err != nil {
+		return nil, err
+	}
+	if err = subscribe("worker_transfer_cancel"); err != nil {
 		return nil, err
 	}
 	if control.rooms != nil {
@@ -181,6 +184,10 @@ func (session *roomControlSession) run(ctx context.Context) error {
 			if strings.HasSuffix(message.Subject, ".worker_task_offer_batch") {
 				if err := control.handleTaskOfferBatch(ctx, message.Data); err != nil {
 					log.Printf("ignore invalid BeamCore task offer: %v", err)
+				}
+			} else if strings.HasSuffix(message.Subject, ".worker_transfer_cancel") {
+				if err := control.handleWorkerTransferCancel(ctx, message.Data); err != nil {
+					log.Printf("ignore invalid BeamCore transfer cancellation: %v", err)
 				}
 			} else if strings.HasSuffix(message.Subject, ".room_workload_offer") {
 				if err := control.handleRoomWorkloadOffer(ctx, message.Data); err != nil {
@@ -343,6 +350,32 @@ func (control *roomControl) handleOffer(ctx context.Context, encoded []byte) err
 		return err
 	}
 	return control.rooms.Submit(ctx, batch)
+}
+
+func (control *roomControl) handleWorkerTransferCancel(ctx context.Context, encoded []byte) error {
+	var envelope orchestratorControlEnvelope
+	if err := msgpack.Unmarshal(encoded, &envelope); err != nil {
+		return err
+	}
+	if envelope.SchemaVersion != orchestratorControlSchema || envelope.Environment != control.config.Environment ||
+		strings.TrimSpace(envelope.Hotkey) != control.config.Hotkey || envelope.MessageType != "worker_transfer_cancel" || envelope.Producer != "transfer-runtime" {
+		return errors.New("invalid transfer cancellation authority")
+	}
+	encoded, err := json.Marshal(envelope.Payload)
+	if err != nil {
+		return err
+	}
+	var payload struct {
+		TransferID string `json:"transfer_id"`
+		Reason     string `json:"reason"`
+	}
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		return err
+	}
+	if strings.TrimSpace(payload.TransferID) == "" || control.tasks == nil {
+		return errors.New("invalid transfer cancellation")
+	}
+	return control.tasks.CancelTransfer(ctx, payload.TransferID, payload.Reason)
 }
 
 func (control *roomControl) submitResult(ctx context.Context, result contracts.RoomTaskResult) error {
