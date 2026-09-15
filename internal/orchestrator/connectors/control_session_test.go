@@ -142,8 +142,13 @@ func TestRoomControlBindCleansPartialSubscriptionOnFlushFailure(t *testing.T) {
 	if _, err := control.bind(context.Background()); !errors.Is(err, flushErr) {
 		t.Fatalf("bind error=%v", err)
 	}
-	if len(connection.subscriptions) != 1 || !connection.subscriptions[0].unsubscribed {
-		t.Fatalf("partial subscriptions were not closed: %+v", connection.subscriptions)
+	if len(connection.subscriptions) != 2 {
+		t.Fatalf("expected offer and cancellation subscriptions, got %d", len(connection.subscriptions))
+	}
+	for index, subscription := range connection.subscriptions {
+		if !subscription.unsubscribed {
+			t.Fatalf("partial subscription %d was not closed", index)
+		}
 	}
 	if !connection.flushHasDeadline {
 		t.Fatal("control subscription flush did not receive a deadline")

@@ -83,5 +83,12 @@ capacity do not enable hybrid routing. Selection uses the existing worker catalo
 
 Worker admission reserves the actual maximum source payload plus transport overhead. Standard provider minimums and jitter are accepted without a separate room chunk ceiling; worker memory capacity bounds execution.
 
+R2 has a known range-read limitation for some completed multipart objects with
+gaps between part numbers. A partial request crossing such a boundary can return
+a short body, including when an output is reused as a later source. Independent
+range clients can encounter the same behavior. Workers reject truncated source
+responses; the multipart attempt-slot protocol is unchanged. No object-copy or
+read-splitting workaround is enabled.
+
 
 Dispatch serializes upstream progress, checkpoint, and result delivery separately from record mutation. It releases record locks before calling room lifecycle handlers, so concurrent room replay or cancellation cannot invert the room/dispatch lock order. Acknowledgements update the latest durable record and preserve intervening cancellation; duplicate results remain acknowledged once and failed deliveries remain replayable.
