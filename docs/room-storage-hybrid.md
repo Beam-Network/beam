@@ -82,3 +82,6 @@ base room protocol and the hybrid capability. MLS-only workers and exhausted
 capacity do not enable hybrid routing. Selection uses the existing worker catalog.
 
 Worker admission reserves the actual maximum source payload plus transport overhead. Standard provider minimums and jitter are accepted without a separate room chunk ceiling; worker memory capacity bounds execution.
+
+
+Dispatch serializes upstream progress, checkpoint, and result delivery separately from record mutation. It releases record locks before calling room lifecycle handlers, so concurrent room replay or cancellation cannot invert the room/dispatch lock order. Acknowledgements update the latest durable record and preserve intervening cancellation; duplicate results remain acknowledged once and failed deliveries remain replayable.

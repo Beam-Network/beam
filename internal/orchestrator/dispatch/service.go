@@ -72,6 +72,9 @@ type Service struct {
 	control     Control
 	store       Store
 	recordLocks [64]sync.Mutex
+	// Serialize upstream events separately. A callback may enter room state
+	// whose lock is held by a concurrent Dispatch or CancelWorkload call.
+	deliveryLocks [64]sync.Mutex
 
 	mu                 sync.RWMutex
 	cancelledTransfers map[string]time.Time
@@ -250,6 +253,9 @@ func (s *Service) HandleProgress(progress domain.Progress) error {
 
 func (s *Service) HandleProgressContext(ctx context.Context, progress domain.Progress) error {
 	key := progress.WorkloadID + "/" + progress.AttemptID
+	delivery := &s.deliveryLocks[lockIndex(key)]
+	delivery.Lock()
+	defer delivery.Unlock()
 	lock := s.recordLock(key)
 	lock.Lock()
 	defer lock.Unlock()
@@ -267,15 +273,27 @@ func (s *Service) HandleProgressContext(ctx context.Context, progress domain.Pro
 	sink, ok := s.sinks[record.Source].(ProgressSink)
 	s.mu.RUnlock()
 	if ok {
-		if err := sink.DeliverProgress(ctx, record, progress); err != nil {
+		lock.Unlock()
+		err := sink.DeliverProgress(ctx, record, progress)
+		lock.Lock()
+		if err != nil {
 			return err
 		}
 	}
-	return s.save(record, "Worker reported progress")
+	// Cancellation can advance the record while the external callback runs.
+	current, _ := s.store.Get(key)
+	if current.State == StateCompleted || current.State == StateFailed || current.State == StateCancelled || current.State == StateRejected {
+		return nil
+	}
+	current.State, current.Progress, current.UpdatedAt = record.State, record.Progress, record.UpdatedAt
+	return s.save(current, "Worker reported progress")
 }
 
 func (s *Service) HandleResult(ctx context.Context, result domain.Result) error {
 	key := result.WorkloadID + "/" + result.AttemptID
+	delivery := &s.deliveryLocks[lockIndex(key)]
+	delivery.Lock()
+	defer delivery.Unlock()
 	lock := s.recordLock(key)
 	lock.Lock()
 	defer lock.Unlock()
@@ -287,7 +305,10 @@ func (s *Service) HandleResult(ctx context.Context, result domain.Result) error 
 		if record.UpstreamDelivered {
 			return nil
 		}
-		return s.deliver(ctx, record, *record.Result)
+		lock.Unlock()
+		err := s.deliver(ctx, record, *record.Result)
+		lock.Lock()
+		return err
 	}
 	record.Result = &result
 	record.UpdatedAt = s.config.Now().UTC()
@@ -302,7 +323,10 @@ func (s *Service) HandleResult(ctx context.Context, result domain.Result) error 
 	if err := s.save(record, "Worker produced terminal result"); err != nil {
 		return err
 	}
-	return s.deliver(ctx, record, result)
+	lock.Unlock()
+	err := s.deliver(ctx, record, result)
+	lock.Lock()
+	return err
 }
 
 func (s *Service) ReplayResults(ctx context.Context) {
@@ -311,13 +335,7 @@ func (s *Service) ReplayResults(ctx context.Context) {
 			_ = s.HandleCheckpoint(ctx, record.WorkerID, *record.Checkpoint)
 		}
 		if record.Result != nil && !record.UpstreamDelivered {
-			lock := s.recordLock(record.WorkloadKey)
-			lock.Lock()
-			current, ok := s.store.Get(record.WorkloadKey)
-			if ok && current.Result != nil && !current.UpstreamDelivered {
-				_ = s.deliver(ctx, current, *current.Result)
-			}
-			lock.Unlock()
+			_ = s.HandleResult(ctx, *record.Result)
 		}
 	}
 }
@@ -326,6 +344,9 @@ func (s *Service) ReplayResults(ctx context.Context) {
 // destinations completed while other members of the source group are running.
 func (s *Service) HandleCheckpoint(ctx context.Context, workerID string, checkpoint domain.Checkpoint) error {
 	key := checkpoint.WorkloadID + "/" + checkpoint.AttemptID
+	delivery := &s.deliveryLocks[lockIndex(key)]
+	delivery.Lock()
+	defer delivery.Unlock()
 	lock := s.recordLock(key)
 	lock.Lock()
 	defer lock.Unlock()
@@ -349,13 +370,17 @@ func (s *Service) HandleCheckpoint(ctx context.Context, workerID string, checkpo
 	if !available {
 		return errors.New("checkpoint upstream is unavailable")
 	}
-	err := sink.DeliverCheckpoint(ctx, record, *record.Checkpoint)
+	retainedCheckpoint := record.Checkpoint
+	lock.Unlock()
+	err := sink.DeliverCheckpoint(ctx, record, *retainedCheckpoint)
+	lock.Lock()
 	var terminal *TerminalDeliveryError
 	if err != nil && !errors.As(err, &terminal) {
 		return err
 	}
-	record.UpstreamCheckpointSequence = record.Checkpoint.Sequence
-	record.UpstreamCheckpoint = record.Checkpoint
+	record, _ = s.store.Get(key)
+	record.UpstreamCheckpointSequence = retainedCheckpoint.Sequence
+	record.UpstreamCheckpoint = retainedCheckpoint
 	record.UpdatedAt = s.config.Now().UTC()
 	return s.save(record, "external authority acknowledged checkpoint")
 }
@@ -479,13 +504,23 @@ func (s *Service) deliver(ctx context.Context, record Record, result domain.Resu
 	s.mu.RLock()
 	sink := s.sinks[record.Source]
 	s.mu.RUnlock()
+	var deliveryErr error
+	if sink == nil {
+		deliveryErr = errors.New("external session is not connected")
+	} else {
+		deliveryErr = sink.DeliverResult(ctx, record, result)
+	}
+	lock := s.recordLock(record.WorkloadKey)
+	lock.Lock()
+	defer lock.Unlock()
+	record, _ = s.store.Get(record.WorkloadKey)
 	if sink == nil {
 		record.UpstreamError = "external session is not connected"
 		record.UpdatedAt = s.config.Now().UTC()
 		_ = s.save(record, "terminal result waiting for external session")
 		return errors.New(record.UpstreamError)
 	}
-	if err := sink.DeliverResult(ctx, record, result); err != nil {
+	if err := deliveryErr; err != nil {
 		record.UpstreamError = err.Error()
 		record.UpdatedAt = s.config.Now().UTC()
 		var terminal *TerminalDeliveryError
@@ -529,10 +564,14 @@ func randomToken(size int) (string, error) {
 }
 
 func (s *Service) recordLock(key string) *sync.Mutex {
+	return &s.recordLocks[lockIndex(key)]
+}
+
+func lockIndex(key string) uint32 {
 	var hash uint32 = 2166136261
 	for index := 0; index < len(key); index++ {
 		hash ^= uint32(key[index])
 		hash *= 16777619
 	}
-	return &s.recordLocks[hash%uint32(len(s.recordLocks))]
+	return hash % 64
 }
