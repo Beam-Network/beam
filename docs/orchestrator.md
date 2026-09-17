@@ -1,6 +1,6 @@
 # BEAM Orchestrator Guide
 
-Run a Go orchestrator on BEAM mainnet for `worker_task_offer_batch` and `room_task_offer_batch`.
+Run a Go orchestrator on BEAM mainnet for transfer and room workloads.
 
 ## Requirements
 
@@ -93,26 +93,12 @@ curl -X POST http://127.0.0.1:8781/v1/orchestrator/memberships \
 
 ## Capabilities
 
-`transfer.multipart` handles normal transfer chunks from `worker_task_offer_batch`.
+`transfer.multipart` handles normal transfer chunks.
 
-`room.transfer` identifies Room data-transfer lanes from `room_task_offer_batch`.
+`room.transfer` identifies Room data-transfer lanes.
 For current Room transfers, the orchestrator advertises eligibility only when
 connected workers also expose `room.transfer.direct.v1` and
 `room.transfer.e2ee.v2`.
-
-The orchestrator publishes `capability_update` after registration and whenever advertised capabilities or capacity change. BeamCore keeps the last accepted manifest until replacement. Heartbeat/session state determines liveness.
-
-## Result Settlement
-
-Each BeamCore `task_result` describes exactly one transfer part. The
-orchestrator reads `sha256` and `etag` from that part's indexed execution
-outputs and treats missing or multi-part evidence as a visible terminal local
-failure.
-
-The NATS `task_result_ack` reply is the authoritative disposition. `completed`
-and `owned_processing` are accepted, `retry` is retried, and `failed`,
-`rejected`, `late_expired`, and `late_superseded` are terminal. Do not call a
-second HTTP acknowledgement endpoint; none is required for result settlement.
 
 ## NATS Connectivity and Build Provenance
 
@@ -121,13 +107,8 @@ The production gateway does not accept client protocol 2. An
 `-ERR invalid client protocol` response therefore indicates a non-canonical or
 stale binary, not a requirement to downgrade the gateway.
 
-One `BeamCoreConnector.Run` invocation owns the complete control session. The
-connector registers, publishes capabilities, and binds every control
-subscription before exposing the session to result replay. A partial startup
-unsubscribes and drains its candidate, and a concurrent `Run` call fails with
-`BeamCore control session is already running`. BeamCore also keeps the first
-authenticated control process for a hotkey; a second process receives
-`duplicate_control_session` and must be stopped or assigned another identity.
+Run only one orchestrator process per hotkey. If a process receives
+`duplicate_control_session`, stop the duplicate or assign it another identity.
 
 Record the source revision and embedded Go module metadata before replacing a
 binary:

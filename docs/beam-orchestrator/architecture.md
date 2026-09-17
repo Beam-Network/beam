@@ -40,8 +40,6 @@ direct runtime. The base capability alone is not eligible for these lanes.
 `room.transfer.e2ee.v2` requires `btr.object.chunk.aead.v1` ciphertext from
 source agents. Room/channel keys and plaintext remain outside Workers.
 
-Workers publish WCP capability manifests. The orchestrator sends `capability_update` after registration and whenever aggregated capabilities or capacity change. BeamCore keeps the last accepted manifest until replacement. Heartbeat/session state determines liveness.
-
 ## Setup Guides
 
 - [Orchestrator guide](../orchestrator.md)

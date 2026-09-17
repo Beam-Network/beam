@@ -20,6 +20,7 @@ import (
 	workloadcheckpoint "github.com/Beam-Network/beam/internal/workload/checkpoint"
 	"github.com/Beam-Network/beam/internal/workload/contracts"
 	"github.com/Beam-Network/beam/internal/workload/domain"
+	"github.com/Beam-Network/beam/internal/workload/storagehttp"
 )
 
 func validateSourceGroup(transfer contracts.MultipartTransfer, spec domain.Spec) error {
@@ -86,7 +87,7 @@ func (h *Handler) executeSourceGroup(ctx context.Context, spec domain.Spec, tran
 	if first.SourceRange {
 		request.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", first.Offset, first.Offset+first.Length-1))
 	}
-	response, err := client.Do(request)
+	response, err := storagehttp.Get(&client, request)
 	if err != nil {
 		return domain.Result{}, errors.New("source_read_failed")
 	}

@@ -39,15 +39,10 @@ export SUBTENSOR_NETWORK=finney
 export NETUID=105
 ```
 
-## Room Transfer Contracts
+## Room Transfer Capabilities
 
-- Schema: `room-transfer/v1`
 - Worker capabilities: `room.transfer`, `room.transfer.direct.v1`, and `room.transfer.e2ee.v2`
 - Transfer capability: `transfer.multipart`
-- Offer: `room_task_offer_batch`
-- Cancel: `room_task_cancel`
-- Result: `room_task_result`
-- Manifest update: `capability_update`, sent after registration and on capability/capacity changes
 
 ## Guides
 

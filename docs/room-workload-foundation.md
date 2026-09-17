@@ -2,13 +2,9 @@
 
 Room transfer lets BeamCore assign file delivery lanes to participant workers inside a Room.
 
-## Contracts
+## Capabilities
 
-- Schema: `room-transfer/v1`
 - Capabilities: `room.transfer`, `room.transfer.direct.v1`, and `room.transfer.e2ee.v2`
-- Offer message: `room_task_offer_batch`
-- Cancel message: `room_task_cancel`
-- Result message: `room_task_result`
 
 ## Participant Setup
 
@@ -19,36 +15,14 @@ Room transfer lets BeamCore assign file delivery lanes to participant workers in
    `--capabilities transfer.multipart,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v2`,
    `--room-transfer-addr`, and `--room-transfer-advertise-url`.
 
-## Flow
+## Network and privacy
 
-BeamCore sends `room_task_offer_batch` to an eligible orchestrator.
+Room agents connect outbound to the worker's advertised endpoint and do not
+need a public listening port. Agent-only transfers are end-to-end encrypted;
+workers do not receive plaintext or room keys.
 
-The orchestrator redeems independently scoped source and target path leases,
-selects a connected WCP worker that advertises the direct and E2EE capabilities,
-and sends a `room.transfer` workload.
-
-The Worker publishes a per-workload bearer and direct runtime URL through
-progress. Source and target agents learn that runtime from signed room status,
-then connect outbound with both the runtime bearer and their own path token.
-The source encrypts each immutable object cell with the room/channel key epoch
-and uploads one signed ciphertext chunk at a time. Targets authenticate and
-decrypt locally, write plaintext to their inboxes, and return signed range and
-final receipts over the ciphertext commitment. The Worker holds at most one
-ciphertext chunk per active lane, checkpoints completed cells, and returns the
-receipts through the orchestrator.
-
-Room object chunk layout follows Beam's standard transfer chunking policy as
-published by the source agent. Workers do not choose or override chunk size; they
-validate the assignment layout and move the assigned ciphertext ranges.
-
-The orchestrator sends `room_task_result` to BeamCore.
-
-Room transfers do not allocate a relay session or expose an agent listener.
-The coordinator controls membership and path authorization, while the selected
-Worker owns the shared data service in the same pattern as Worker-hosted media.
-Workers validate the required protection envelope and key epoch but never
-receive room/channel keys. Missing E2EE capability or invalid protection fails
-closed.
+For publications involving object storage, use the
+[hybrid room configuration](room-storage-hybrid.md).
 
 ## Commands
 

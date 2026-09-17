@@ -12,12 +12,9 @@ BeamCore provides the public HTTP API, Core NATS control gateway, transfer lifec
 | Worker | Connects to its orchestrator over BeamLink/WCP, advertises capabilities, executes `transfer.multipart`, carries E2EE `room.transfer` ciphertext, and returns signed results |
 | Validator | Reads BeamCore epoch summaries, sets subnet weights, and posts weight proofs |
 
-Workers move object-channel MLS ciphertext between agents using task-scoped URLs and room-scoped leases. They never receive room-transfer plaintext or keys.
-When a Room publication contains an object-storage member, BeamCore presents
-that bucket leg as an ordinary `transfer.multipart` workload with short-lived
-source and destination routes. The worker uses the same bounded streaming,
-checkpoint, cancellation, and signed-result path as every standard transfer;
-it receives neither the room's storage credential nor a reusable provider URL.
+Agent-only room transfers are end-to-end encrypted; workers do not receive
+plaintext or room keys. Room transfers involving object storage use TLS with
+worker-visible plaintext. Workers do not receive storage credentials or room keys.
 
 ## Requirements
 
@@ -57,28 +54,19 @@ export SUBTENSOR_NETWORK=finney
 export NETUID=105
 ```
 
-Use the orchestrator API key as `BEAMCORE_NATS_PASSWORD` with `BEAMCORE_NATS_USER` set to the orchestrator hotkey. Keep `BEAM_PUBLIC_API_URL` configured so the client can translate NATS' generic authentication-callout denial into the terminal `duplicate_control_session` message after validating the key and confirming an active owner. Credentials-file auth uses `BEAMCORE_NATS_CREDS`. Token auth uses `BEAMCORE_NATS_TOKEN`.
+Use the orchestrator API key as `BEAMCORE_NATS_PASSWORD` with `BEAMCORE_NATS_USER` set to the orchestrator hotkey. Set `BEAM_PUBLIC_API_URL=https://beamcore.b1m.ai` for connection diagnostics. Credentials-file auth uses `BEAMCORE_NATS_CREDS`. Token auth uses `BEAMCORE_NATS_TOKEN`.
 
 For production, use the TLS-first control endpoint
 `tls://orch-gateway.b1m.ai:4222`. The official Go client uses NATS protocol 1;
 an `invalid client protocol` error indicates that the running binary should be
 checked and rebuilt from the official source. See the orchestrator guide for
-provenance commands and result-settlement semantics.
+provenance commands.
 
 ## Run
 
 - [Orchestrator guide](docs/orchestrator.md): run a miner that receives `worker_task_offer_batch` and `room_task_offer_batch`.
 - [Worker guide](docs/worker.md): run a worker that advertises and executes `transfer.multipart` and direct E2EE `room.transfer` workloads.
 - [Validator guide](docs/validator.md): run a validator that sets weights from BeamCore epoch summaries.
-
-## Runtime Flow
-
-```text
-Client -> BeamCore HTTP -> Transfer Runtime -> Core NATS -> orchestrator -> BeamLink/WCP -> worker
-Worker -> short-lived storage routes or direct Room agent paths
-Worker -> BeamLink/WCP -> orchestrator -> Core NATS -> Transfer Runtime result
-Validator -> BeamCore epoch summary -> Bittensor set_weights -> BeamCore weight proof
-```
 
 ## Links
 

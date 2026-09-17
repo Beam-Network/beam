@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Beam-Network/beam/internal/workload/contracts"
+	"github.com/Beam-Network/beam/internal/workload/storagehttp"
 )
 
 // A redirect could forward an assignment token or a signed provider request to
@@ -136,7 +137,7 @@ func readStorageChunk(ctx context.Context, client *http.Client, transfer contrac
 			request.Header.Set("If-Match", `"`+strings.Trim(lease.Storage.ETag, `"`)+`"`)
 		}
 	}
-	response, err := client.Do(request)
+	response, err := storagehttp.Get(client, request)
 	if err != nil {
 		return nil, contracts.StorageRangeResult{}, errors.New("storage source read failed")
 	}
