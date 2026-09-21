@@ -111,9 +111,14 @@ Guardrail reassignments feed **reliability** samples.
 
 Open the [Beam Dashboard](https://data.b1m.ai/weights) for live pool, confidence, and PRISM final score. Use the **Selected Orchestrator** panel for the full breakdown.
 
-For programmatic access:
+For programmatic access, authenticate with your orchestrator API key and request your own subnet UID:
 
-`GET /orchestrators/prism-scores/:orch_uid`
+```http
+GET /orchestrators/prism-scores/<your-orch-uid>
+X-Api-Key: b1m_...
+```
+
+You may read only your own score. Another orchestrator's UID returns `403`. Reading across orchestrators is a validator capability, since the breakdown includes `penalty_multiplier`, which feeds the weight formula.
 
 ## Improving your score
 

@@ -17,9 +17,8 @@ func TestHasActiveDuplicateControlSession(t *testing.T) {
 		writer.Header().Set("Content-Type", "application/json")
 		switch request.URL.Path {
 		case "/auth/me":
-			_, _ = writer.Write([]byte(`{"hotkey":"hotkey-1","current_key_role":"orchestrator"}`))
-		case "/validators/orchestrators":
-			_, _ = writer.Write([]byte(`{"orchestrators":[{"hotkey":"hotkey-1","status":"active"}]}`))
+			_, _ = writer.Write([]byte(
+				`{"hotkey":"hotkey-1","current_key_role":"orchestrator","orchestrator_status":"active"}`))
 		default:
 			writer.WriteHeader(http.StatusNotFound)
 		}
@@ -38,6 +37,38 @@ func TestHasActiveDuplicateControlSession(t *testing.T) {
 	}
 	if !duplicate {
 		t.Fatal("expected the active same-hotkey orchestrator to classify as a duplicate")
+	}
+}
+
+func TestHasActiveDuplicateControlSessionIgnoresInactiveOrchestrator(t *testing.T) {
+	// An orchestrator that owns the slot but is offline is not a duplicate session.
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("X-Api-Key") != "orchestrator-api-key" {
+			writer.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		if request.URL.Path == "/auth/me" {
+			_, _ = writer.Write([]byte(
+				`{"hotkey":"hotkey-1","current_key_role":"orchestrator","orchestrator_status":"inactive"}`))
+			return
+		}
+		writer.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(server.Close)
+
+	duplicate, err := hasActiveDuplicateControlSession(NATSConfig{
+		PublicAPIURL:   server.URL + "/",
+		Hotkey:         "hotkey-1",
+		User:           "hotkey-1",
+		Password:       "orchestrator-api-key",
+		RequestTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("classify authorization rejection: %v", err)
+	}
+	if duplicate {
+		t.Fatal("an inactive orchestrator must not be reported as a duplicate control session")
 	}
 }
 

@@ -127,8 +127,9 @@ func hasActiveDuplicateControlSession(config NATSConfig) (bool, error) {
 	publicAPIURL := strings.TrimRight(config.PublicAPIURL, "/")
 
 	var identity struct {
-		Hotkey         string `json:"hotkey"`
-		CurrentKeyRole string `json:"current_key_role"`
+		Hotkey             string `json:"hotkey"`
+		CurrentKeyRole     string `json:"current_key_role"`
+		OrchestratorStatus string `json:"orchestrator_status"`
 	}
 	if err := getBeamCoreJSON(client, publicAPIURL+"/auth/me", config.Password, &identity); err != nil {
 		return false, err
@@ -137,26 +138,7 @@ func hasActiveDuplicateControlSession(config NATSConfig) (bool, error) {
 		return false, nil
 	}
 
-	var listing struct {
-		Orchestrators []struct {
-			Hotkey string `json:"hotkey"`
-			Status string `json:"status"`
-		} `json:"orchestrators"`
-	}
-	if err := getBeamCoreJSON(
-		client,
-		publicAPIURL+"/validators/orchestrators?active_only=false&limit=512",
-		config.Password,
-		&listing,
-	); err != nil {
-		return false, err
-	}
-	for _, orchestrator := range listing.Orchestrators {
-		if strings.EqualFold(orchestrator.Hotkey, config.Hotkey) && orchestrator.Status == "active" {
-			return true, nil
-		}
-	}
-	return false, nil
+	return strings.EqualFold(identity.OrchestratorStatus, "active"), nil
 }
 
 func getBeamCoreJSON(client *http.Client, endpoint, apiKey string, target any) error {
