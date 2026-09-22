@@ -67,6 +67,8 @@ x-api-key: your_api_key
 
 API keys are scoped by role (`client`, `orchestrator`, `worker`, `validator`). Each role has access only to the routes relevant to that role.
 
+Validator routes are the exception: they authenticate with a hotkey signature rather than a key, and a validator obtains its key from the heartbeat response. See [Validators](./validators.md) for the header format and the issuance flow.
+
 ## Base URL
 
 ```
