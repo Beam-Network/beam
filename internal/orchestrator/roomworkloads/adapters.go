@@ -160,7 +160,7 @@ func (m *Manager) streamResultStatus(status resultStatus, value contracts.RoomGe
 	var result contracts.StreamResultDetails
 	_ = json.Unmarshal(value.Details, &result)
 	policy := "block"
-	if record, ok := m.stream.Record(value.Identity.WorkloadID); ok {
+	if record, ok := recordForIdentity(m.stream, value.Identity); ok {
 		policy = record.Definition.Workload.Details.BackpressurePolicy
 	}
 	status.details = contracts.StreamStatusDetails{Sequence: result.Sequence, Bytes: result.Bytes,

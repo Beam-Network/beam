@@ -34,17 +34,21 @@ type service[T, R any] = roomworkload.RoomWorkloadService[contracts.RoomWorkload
 type store[T, R any] = roomworkload.FileStore[contracts.RoomWorkloadDefinition[T], contracts.RoomWorkloadDefinition[T],
 	contracts.RoomPathIntent, contracts.RoomPathLease, contracts.RoomGenericProgress, R]
 
+type record[T, R any] = roomworkload.Record[contracts.RoomWorkloadDefinition[T], contracts.RoomWorkloadDefinition[T],
+	contracts.RoomPathIntent, contracts.RoomPathLease, contracts.RoomGenericProgress, R]
+
 type Manager struct {
-	mu          sync.RWMutex
-	now         func() time.Time
-	dispatcher  *dispatch.Service
-	datagram    *service[contracts.DatagramUnitDetails, contracts.DatagramResultDetails]
-	message     *service[contracts.MessageUnitDetails, contracts.MessageProgressDetails]
-	command     *service[contracts.CommandUnitDetails, contracts.CommandProgressDetails]
-	stream      *service[contracts.StreamUnitDetails, contracts.StreamResultDetails]
-	media       *service[contracts.MediaUnitDetails, contracts.MediaResultDetails]
-	provisioner Provisioner
-	sink        Sink
+	mu            sync.RWMutex
+	workloadLocks roomworkload.KeyedLocks
+	now           func() time.Time
+	dispatcher    *dispatch.Service
+	datagram      *service[contracts.DatagramUnitDetails, contracts.DatagramResultDetails]
+	message       *service[contracts.MessageUnitDetails, contracts.MessageProgressDetails]
+	command       *service[contracts.CommandUnitDetails, contracts.CommandProgressDetails]
+	stream        *service[contracts.StreamUnitDetails, contracts.StreamResultDetails]
+	media         *service[contracts.MediaUnitDetails, contracts.MediaResultDetails]
+	provisioner   Provisioner
+	sink          Sink
 }
 
 func OpenManager(stateDirectory string, dispatcher *dispatch.Service) (*Manager, error) {
@@ -149,6 +153,7 @@ func (m *Manager) Submit(ctx context.Context, encoded []byte) error {
 		Type          string      `json:"type"`
 		SchemaVersion string      `json:"schema_version"`
 		Kind          domain.Kind `json:"kind"`
+		WorkloadID    string      `json:"workload_id"`
 	}
 	if err := json.Unmarshal(encoded, &envelope); err != nil {
 		return err
@@ -159,6 +164,10 @@ func (m *Manager) Submit(ctx context.Context, encoded []byte) error {
 	if envelope.Type != contracts.RoomWorkloadOffer && envelope.Type != contracts.RoomWorkloadSubmit {
 		return errors.New("generic room workload message must be submit or offer")
 	}
+	if envelope.WorkloadID == "" {
+		return errors.New("room workload id is required")
+	}
+	defer m.workloadLocks.Lock(envelope.WorkloadID)()
 	if err := requireCanonicalDetails(encoded, envelope.Type, envelope.Kind); err != nil {
 		return err
 	}
@@ -217,7 +226,7 @@ func (m *Manager) submitOffer(ctx context.Context, kind domain.Kind, encoded []b
 		if err := value.Validate(m.now()); err != nil {
 			return err
 		}
-		return submitTyped(ctx, m, m.datagram, fromOffer(value))
+		return submitOfferedTyped(ctx, m, m.datagram, fromOffer(value))
 	case domain.KindRoomMessage:
 		var value contracts.RoomWorkloadOfferWire[contracts.MessageUnitDetails]
 		if err := decodeCanonical(encoded, &value); err != nil {
@@ -226,7 +235,7 @@ func (m *Manager) submitOffer(ctx context.Context, kind domain.Kind, encoded []b
 		if err := value.Validate(m.now()); err != nil {
 			return err
 		}
-		return submitTyped(ctx, m, m.message, fromOffer(value))
+		return submitOfferedTyped(ctx, m, m.message, fromOffer(value))
 	case domain.KindRoomCommand:
 		var value contracts.RoomWorkloadOfferWire[contracts.CommandUnitDetails]
 		if err := decodeCanonical(encoded, &value); err != nil {
@@ -235,7 +244,7 @@ func (m *Manager) submitOffer(ctx context.Context, kind domain.Kind, encoded []b
 		if err := value.Validate(m.now()); err != nil {
 			return err
 		}
-		return submitTyped(ctx, m, m.command, fromOffer(value))
+		return submitOfferedTyped(ctx, m, m.command, fromOffer(value))
 	case domain.KindRoomStream:
 		var value contracts.RoomWorkloadOfferWire[contracts.StreamUnitDetails]
 		if err := decodeCanonical(encoded, &value); err != nil {
@@ -244,7 +253,7 @@ func (m *Manager) submitOffer(ctx context.Context, kind domain.Kind, encoded []b
 		if err := value.Validate(m.now()); err != nil {
 			return err
 		}
-		return submitTyped(ctx, m, m.stream, fromOffer(value))
+		return submitOfferedTyped(ctx, m, m.stream, fromOffer(value))
 	case domain.KindRoomMedia:
 		var value contracts.RoomWorkloadOfferWire[contracts.MediaUnitDetails]
 		if err := decodeCanonical(encoded, &value); err != nil {
@@ -253,7 +262,7 @@ func (m *Manager) submitOffer(ctx context.Context, kind domain.Kind, encoded []b
 		if err := value.Validate(m.now()); err != nil {
 			return err
 		}
-		return submitTyped(ctx, m, m.media, fromOffer(value))
+		return submitOfferedTyped(ctx, m, m.media, fromOffer(value))
 	default:
 		return fmt.Errorf("unsupported generic room workload kind %s", kind)
 	}
@@ -327,8 +336,16 @@ func (m *Manager) submitDefinition(ctx context.Context, kind domain.Kind, encode
 }
 
 func submitTyped[T, R any](ctx context.Context, manager *Manager, target *service[T, R], definition contracts.RoomWorkloadDefinition[T]) error {
+	return submitTypedWithID(ctx, manager, target, definition, definition.Identity.WorkloadID)
+}
+
+func submitOfferedTyped[T, R any](ctx context.Context, manager *Manager, target *service[T, R], definition contracts.RoomWorkloadDefinition[T]) error {
+	return submitTypedWithID(ctx, manager, target, definition, offerDefinitionID(definition.Identity))
+}
+
+func submitTypedWithID[T, R any](ctx context.Context, manager *Manager, target *service[T, R], definition contracts.RoomWorkloadDefinition[T], definitionID string) error {
 	if err := target.Submit(ctx, roomworkload.RoomWorkloadDefinition[contracts.RoomWorkloadDefinition[T]]{
-		ID: definition.Identity.WorkloadID, RoomID: definition.Identity.RoomID,
+		ID: definitionID, RoomID: definition.Identity.RoomID,
 		OfferExpiresAt: definition.Identity.ExpiresAt, Workload: definition,
 	}); err != nil {
 		return err
@@ -336,28 +353,29 @@ func submitTyped[T, R any](ctx context.Context, manager *Manager, target *servic
 	return manager.publishStatus(ctx, definition.Identity, definition.Targets, contracts.RoomRunning, initialStatusDetails(definition.Details, len(definition.Targets)))
 }
 
+func offerDefinitionID(identity contracts.RoomWorkloadIdentity) string {
+	workloadID, attemptID := workloadIdentity(identity)
+	return "room-offer-" + workloadID + "-" + attemptID
+}
+
 func (m *Manager) Cancel(ctx context.Context, cancel contracts.RoomWorkloadCancelWire) error {
 	if err := cancel.Validate(); err != nil {
 		return err
 	}
-	var err error
+	defer m.workloadLocks.Lock(cancel.WorkloadID)()
 	var status statusContext
+	var err error
 	switch cancel.Kind {
 	case domain.KindRoomDatagram:
-		status = recordStatus(m.datagram, cancel.WorkloadID)
-		err = m.datagram.Cancel(ctx, cancel.WorkloadID, "cancelled by BeamCore")
+		status, err = cancelWorkload(ctx, m.datagram, cancel.WorkloadID)
 	case domain.KindRoomMessage:
-		status = recordStatus(m.message, cancel.WorkloadID)
-		err = m.message.Cancel(ctx, cancel.WorkloadID, "cancelled by BeamCore")
+		status, err = cancelWorkload(ctx, m.message, cancel.WorkloadID)
 	case domain.KindRoomCommand:
-		status = recordStatus(m.command, cancel.WorkloadID)
-		err = m.command.Cancel(ctx, cancel.WorkloadID, "cancelled by BeamCore")
+		status, err = cancelWorkload(ctx, m.command, cancel.WorkloadID)
 	case domain.KindRoomStream:
-		status = recordStatus(m.stream, cancel.WorkloadID)
-		err = m.stream.Cancel(ctx, cancel.WorkloadID, "cancelled by BeamCore")
+		status, err = cancelWorkload(ctx, m.stream, cancel.WorkloadID)
 	case domain.KindRoomMedia:
-		status = recordStatus(m.media, cancel.WorkloadID)
-		err = m.media.Cancel(ctx, cancel.WorkloadID, "cancelled by BeamCore")
+		status, err = cancelWorkload(ctx, m.media, cancel.WorkloadID)
 	default:
 		return fmt.Errorf("unsupported generic room workload kind %s", cancel.Kind)
 	}
@@ -377,13 +395,87 @@ type statusContext struct {
 }
 
 func recordStatus[T, R any](target *service[T, R], id string) statusContext {
-	record, ok := target.Record(id)
+	record, ok := latestRecordForWorkload(target, id)
 	if !ok {
 		return statusContext{}
 	}
 	definition := record.Definition.Workload
 	return statusContext{identity: definition.Identity, targets: definition.Targets,
 		details: initialStatusDetails(definition.Details, len(definition.Targets))}
+}
+
+func cancelWorkload[T, R any](ctx context.Context, target *service[T, R], workloadID string) (statusContext, error) {
+	records := recordsForWorkload(target, workloadID)
+	if len(records) == 0 {
+		return statusContext{}, errors.New("room workload definition was not found")
+	}
+	latest := records[0]
+	for _, candidate := range records[1:] {
+		if recordIsNewer(candidate, latest) {
+			latest = candidate
+		}
+	}
+	status := statusFromRecord(latest)
+	var joined error
+	for _, record := range records {
+		joined = errors.Join(joined, target.Cancel(ctx, record.Definition.ID, "cancelled by BeamCore"))
+	}
+	return status, joined
+}
+
+func latestRecordForWorkload[T, R any](target *service[T, R], workloadID string) (record[T, R], bool) {
+	records := recordsForWorkload(target, workloadID)
+	if len(records) == 0 {
+		var zero record[T, R]
+		return zero, false
+	}
+	latest := records[0]
+	for _, candidate := range records[1:] {
+		if recordIsNewer(candidate, latest) {
+			latest = candidate
+		}
+	}
+	return latest, true
+}
+
+func recordsForWorkload[T, R any](target *service[T, R], workloadID string) []record[T, R] {
+	var result []record[T, R]
+	for _, record := range target.Records() {
+		if record.Definition.Workload.Identity.WorkloadID == workloadID {
+			result = append(result, record)
+		}
+	}
+	return result
+}
+
+func recordIsNewer[T, R any](left, right record[T, R]) bool {
+	a := left.Definition.Workload.Identity
+	b := right.Definition.Workload.Identity
+	if a.Epoch != b.Epoch {
+		return a.Epoch > b.Epoch
+	}
+	if a.Attempt != b.Attempt {
+		return a.Attempt > b.Attempt
+	}
+	return left.UpdatedAt.After(right.UpdatedAt)
+}
+
+func statusFromRecord[T, R any](value record[T, R]) statusContext {
+	definition := value.Definition.Workload
+	return statusContext{identity: definition.Identity, targets: definition.Targets,
+		details: initialStatusDetails(definition.Details, len(definition.Targets))}
+}
+
+func recordForIdentity[T, R any](target *service[T, R], identity contracts.RoomWorkloadIdentity) (record[T, R], bool) {
+	for _, record := range target.Records() {
+		candidate := record.Definition.Workload.Identity
+		if candidate.WorkloadID == identity.WorkloadID && candidate.UnitID == identity.UnitID &&
+			candidate.Epoch == identity.Epoch && candidate.Attempt == identity.Attempt {
+			return record, true
+		}
+	}
+	var zero record[T, R]
+	return zero, false
 }
 
 func initialStatusDetails(value any, targets int) any {

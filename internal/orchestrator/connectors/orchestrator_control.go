@@ -171,6 +171,20 @@ func (session *roomControlSession) run(ctx context.Context) error {
 	defer stopHeartbeat()
 	heartbeatErrors := make(chan error, 1)
 	go control.runHeartbeat(heartbeatCtx, heartbeatErrors)
+	var roomQueue *roomWorkloadQueue
+	if control.workloads != nil {
+		jobsCtx, stopJobs := context.WithCancel(ctx)
+		roomQueue = newRoomWorkloadQueue(control.processRoomWorkloadJob)
+		stopped := make(chan struct{})
+		go func() {
+			roomQueue.run(jobsCtx)
+			close(stopped)
+		}()
+		defer func() {
+			stopJobs()
+			<-stopped
+		}()
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -190,11 +204,11 @@ func (session *roomControlSession) run(ctx context.Context) error {
 					log.Printf("ignore invalid BeamCore transfer cancellation: %v", err)
 				}
 			} else if strings.HasSuffix(message.Subject, ".room_workload_offer") {
-				if err := control.handleRoomWorkloadOffer(ctx, message.Data); err != nil {
+				if err := control.queueRoomWorkload(ctx, roomQueue, message.Data, false); err != nil {
 					log.Printf("ignore invalid BeamCore room workload offer: %v", err)
 				}
 			} else if strings.HasSuffix(message.Subject, ".room_workload_cancel") {
-				if err := control.handleRoomWorkloadCancel(ctx, message.Data); err != nil {
+				if err := control.queueRoomWorkload(ctx, roomQueue, message.Data, true); err != nil {
 					log.Printf("ignore invalid BeamCore room workload cancellation: %v", err)
 				}
 			} else if strings.HasSuffix(message.Subject, ".room_task_cancel") {
@@ -206,6 +220,41 @@ func (session *roomControlSession) run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+func (control *roomControl) queueRoomWorkload(ctx context.Context, queue *roomWorkloadQueue, encoded []byte, cancel bool) error {
+	if queue == nil {
+		return errors.New("generic room workload service is missing")
+	}
+	messageType := "room_workload_offer"
+	if cancel {
+		messageType = "room_workload_cancel"
+	}
+	payload, err := control.roomWorkloadPayload(encoded, messageType)
+	if err != nil {
+		return err
+	}
+	var identity struct {
+		WorkloadID string `json:"workload_id"`
+	}
+	if err := json.Unmarshal(payload, &identity); err != nil {
+		return err
+	}
+	if identity.WorkloadID == "" {
+		return errors.New("room workload id is required")
+	}
+	return queue.enqueue(ctx, roomWorkloadJob{workloadID: identity.WorkloadID, payload: payload, cancel: cancel})
+}
+
+func (control *roomControl) processRoomWorkloadJob(ctx context.Context, job roomWorkloadJob) error {
+	if !job.cancel {
+		return control.workloads.Submit(ctx, job.payload)
+	}
+	var cancel contracts.RoomWorkloadCancelWire
+	if err := decodeStrictRoomWire(job.payload, &cancel); err != nil {
+		return err
+	}
+	return control.workloads.Cancel(ctx, cancel)
 }
 
 // runHeartbeat sends liveness and capability changes.
@@ -234,26 +283,6 @@ func reportHeartbeatFailure(ctx context.Context, failures chan<- error, err erro
 	case failures <- err:
 	case <-ctx.Done():
 	}
-}
-
-func (control *roomControl) handleRoomWorkloadOffer(ctx context.Context, encoded []byte) error {
-	payload, err := control.roomWorkloadPayload(encoded, "room_workload_offer")
-	if err != nil {
-		return err
-	}
-	return control.workloads.Submit(ctx, payload)
-}
-
-func (control *roomControl) handleRoomWorkloadCancel(ctx context.Context, encoded []byte) error {
-	payload, err := control.roomWorkloadPayload(encoded, "room_workload_cancel")
-	if err != nil {
-		return err
-	}
-	var cancel contracts.RoomWorkloadCancelWire
-	if err := decodeStrictRoomWire(payload, &cancel); err != nil {
-		return err
-	}
-	return control.workloads.Cancel(ctx, cancel)
 }
 
 func (control *roomControl) roomWorkloadPayload(encoded []byte, messageType string) ([]byte, error) {

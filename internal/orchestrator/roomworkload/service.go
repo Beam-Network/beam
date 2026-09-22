@@ -13,8 +13,11 @@ import (
 
 type Config struct{ Now func() time.Time }
 
+const maxRoomPathRedemptions = 16
+
 type RoomWorkloadService[D, U, I, C, P, R, O any] struct {
-	mu           sync.Mutex
+	mu           sync.RWMutex
+	locks        KeyedLocks
 	config       Config
 	dispatcher   *dispatch.Service
 	store        Store[D, U, I, C, P, R]
@@ -56,12 +59,11 @@ func (s *RoomWorkloadService[D, U, I, C, P, R, O]) RegisterProgressSink(value Pr
 }
 
 func (s *RoomWorkloadService[D, U, I, C, P, R, O]) Submit(ctx context.Context, definition RoomWorkloadDefinition[D]) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := s.config.Now().UTC()
 	if definition.ID == "" || definition.RoomID == "" {
 		return errors.New("room workload definition identity is required")
 	}
+	defer s.locks.Lock(definition.ID)()
+	now := s.config.Now().UTC()
 	if err := s.strategy.ValidateDefinition(definition, now); err != nil {
 		return err
 	}
@@ -108,7 +110,7 @@ func (s *RoomWorkloadService[D, U, I, C, P, R, O]) Submit(ctx context.Context, d
 			return err
 		}
 	}
-	if record.UpstreamDelivered {
+	if record.UpstreamDelivered || record.Lifecycle == "cancelled" {
 		return nil
 	}
 	excluded := make([]string, 0, len(record.Attempts))
@@ -169,7 +171,12 @@ func (s *RoomWorkloadService[D, U, I, C, P, R, O]) Submit(ctx context.Context, d
 		if err != nil {
 			return err
 		}
-		for _, planned := range targetPaths {
+		credentials := make([]C, len(targetPaths))
+		redemptionErrors := make([]error, len(targetPaths))
+		pending := make([]bool, len(targetPaths))
+		var redemptions sync.WaitGroup
+		redemptionSlots := make(chan struct{}, maxRoomPathRedemptions)
+		for index, planned := range targetPaths {
 			pathID := planned.ID
 			target, ok := attempt.Targets[pathID]
 			if !ok {
@@ -180,28 +187,52 @@ func (s *RoomWorkloadService[D, U, I, C, P, R, O]) Submit(ctx context.Context, d
 			}
 			target.State = "provisioning"
 			attempt.Targets[pathID] = target
-			credential, err := s.redeem(ctx, record.Definition, unit, attempt, target, now)
-			if err != nil {
-				return fmt.Errorf("redeem target path %s for room execution unit %s: %w", pathID, unit.ID, err)
-			}
-			target.Credential = &credential
-			target.State = "ready"
-			attempt.Targets[pathID] = target
-			record.Attempts[unit.ID] = attempt
-			record.UpdatedAt = now
-			if err := s.store.Put(record); err != nil {
-				return err
-			}
+			pending[index] = true
+			redemptionSlots <- struct{}{}
+			redemptions.Add(1)
+			go func(index int, target RoomPath[I, C]) {
+				defer redemptions.Done()
+				defer func() { <-redemptionSlots }()
+				credentials[index], redemptionErrors[index] = s.redeem(ctx, record.Definition, unit, attempt, target, now)
+			}(index, target)
 		}
-		attempt.State = AttemptProvisioned
-		record.Lifecycle = "ready"
+		redemptions.Wait()
+		var redemptionErr error
+		for index, planned := range targetPaths {
+			if !pending[index] {
+				continue
+			}
+			if err := redemptionErrors[index]; err != nil {
+				if redemptionErr == nil {
+					redemptionErr = fmt.Errorf("redeem target path %s for room execution unit %s: %w", planned.ID, unit.ID, err)
+				}
+				continue
+			}
+			target := attempt.Targets[planned.ID]
+			target.Credential = &credentials[index]
+			target.State = "ready"
+			attempt.Targets[planned.ID] = target
+		}
 		record.Attempts[unit.ID] = attempt
 		record.UpdatedAt = now
 		if err := s.store.Put(record); err != nil {
 			return err
 		}
+		if redemptionErr != nil {
+			return redemptionErr
+		}
+		attempt.State = AttemptProvisioned
 		spec, err := s.strategy.BuildWorkerSpec(record.Definition, attempt, now)
 		if err != nil {
+			return err
+		}
+		// The Worker may report progress as soon as Dispatch commits. Bind its
+		// deterministic key durably before the Worker can start.
+		attempt.WorkloadKey = spec.Key()
+		record.Lifecycle = "ready"
+		record.Attempts[unit.ID] = attempt
+		record.UpdatedAt = now
+		if err := s.store.Put(record); err != nil {
 			return err
 		}
 		dispatched, err := s.dispatcher.Dispatch(ctx, dispatch.DispatchRequest{Source: s.strategy.DispatchSource(),
@@ -209,7 +240,10 @@ func (s *RoomWorkloadService[D, U, I, C, P, R, O]) Submit(ctx context.Context, d
 		if err != nil {
 			return fmt.Errorf("dispatch room execution unit %s: %w", unit.ID, err)
 		}
-		attempt.State, attempt.WorkloadKey = AttemptDispatched, dispatched.WorkloadKey
+		if dispatched.WorkloadKey != attempt.WorkloadKey {
+			return errors.New("dispatched room workload key differs from durable attempt")
+		}
+		attempt.State = AttemptDispatched
 		attempt.Source.State = "active"
 		for pathID, target := range attempt.Targets {
 			target.State = "active"
@@ -228,10 +262,13 @@ func (s *RoomWorkloadService[D, U, I, C, P, R, O]) Submit(ctx context.Context, d
 func (s *RoomWorkloadService[D, U, I, C, P, R, O]) redeem(ctx context.Context, definition RoomWorkloadDefinition[D],
 	unit RoomExecutionUnit[U], attempt RoomAttempt[U, I, C, P, R], path RoomPath[I, C], now time.Time) (C, error) {
 	var zero C
-	if s.provisioner == nil {
+	s.mu.RLock()
+	provisioner := s.provisioner
+	s.mu.RUnlock()
+	if provisioner == nil {
 		return zero, errors.New("room path provisioner is not connected")
 	}
-	credential, err := s.provisioner.Redeem(ctx, RedemptionRequest[D, U, I, C]{Definition: definition,
+	credential, err := provisioner.Redeem(ctx, RedemptionRequest[D, U, I, C]{Definition: definition,
 		Unit: unit, WorkerID: attempt.WorkerID, NodeID: attempt.NodeID, Path: path})
 	if err != nil {
 		return zero, err
@@ -243,10 +280,13 @@ func (s *RoomWorkloadService[D, U, I, C, P, R, O]) redeem(ctx context.Context, d
 }
 
 func (s *RoomWorkloadService[D, U, I, C, P, R, O]) DeliverProgress(ctx context.Context, task dispatch.Record, progress domain.Progress) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	record, unitID, found := s.findByWorkload(task.WorkloadKey)
 	if !found {
+		return errors.New("room workload progress does not match a durable attempt")
+	}
+	defer s.locks.Lock(record.Definition.ID)()
+	record, found = s.store.Get(record.Definition.ID)
+	if !found || record.Attempts[unitID].WorkloadKey != task.WorkloadKey {
 		return errors.New("room workload progress does not match a durable attempt")
 	}
 	attempt := record.Attempts[unitID]
@@ -264,17 +304,23 @@ func (s *RoomWorkloadService[D, U, I, C, P, R, O]) DeliverProgress(ctx context.C
 	if err := s.store.Put(record); err != nil {
 		return err
 	}
-	if s.progressSink != nil {
-		return s.progressSink.DeliverRoomWorkloadProgress(ctx, value)
+	s.mu.RLock()
+	progressSink := s.progressSink
+	s.mu.RUnlock()
+	if progressSink != nil {
+		return progressSink.DeliverRoomWorkloadProgress(ctx, value)
 	}
 	return nil
 }
 
 func (s *RoomWorkloadService[D, U, I, C, P, R, O]) DeliverResult(ctx context.Context, task dispatch.Record, result domain.Result) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	record, unitID, found := s.findByWorkload(task.WorkloadKey)
 	if !found {
+		return errors.New("room workload result does not match a durable attempt")
+	}
+	defer s.locks.Lock(record.Definition.ID)()
+	record, found = s.store.Get(record.Definition.ID)
+	if !found || record.Attempts[unitID].WorkloadKey != task.WorkloadKey {
 		return errors.New("room workload result does not match a durable attempt")
 	}
 	attempt := record.Attempts[unitID]
@@ -308,10 +354,10 @@ func (s *RoomWorkloadService[D, U, I, C, P, R, O]) DeliverResult(ctx context.Con
 }
 
 func (s *RoomWorkloadService[D, U, I, C, P, R, O]) Cancel(ctx context.Context, definitionID, reason string) error {
-	s.mu.Lock()
+	unlock := s.locks.Lock(definitionID)
 	record, ok := s.store.Get(definitionID)
 	if !ok {
-		s.mu.Unlock()
+		unlock()
 		return errors.New("room workload definition was not found")
 	}
 	workloadKeys := make([]string, 0, len(record.Attempts))
@@ -320,10 +366,10 @@ func (s *RoomWorkloadService[D, U, I, C, P, R, O]) Cancel(ctx context.Context, d
 			workloadKeys = append(workloadKeys, attempt.WorkloadKey)
 		}
 	}
-	s.mu.Unlock()
+	unlock()
 
 	// Dispatch cancellation may synchronously race a Worker result. Do not hold
-	// the workload mutex while taking the dispatcher's per-record lock: result
+	// the definition lock while taking the dispatcher's per-record lock: result
 	// delivery takes those locks in the opposite order.
 	for _, workloadKey := range workloadKeys {
 		if err := s.dispatcher.Cancel(ctx, workloadKey, reason); err != nil {
@@ -331,8 +377,7 @@ func (s *RoomWorkloadService[D, U, I, C, P, R, O]) Cancel(ctx context.Context, d
 		}
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.locks.Lock(definitionID)()
 	record, ok = s.store.Get(definitionID)
 	if !ok {
 		return errors.New("room workload definition was not found")
@@ -365,12 +410,12 @@ func (s *RoomWorkloadService[D, U, I, C, P, R, O]) Replay(ctx context.Context) {
 			continue
 		}
 		if _, terminal := s.strategy.Aggregate(record.Definition, record.Attempts); terminal {
-			s.mu.Lock()
+			unlock := s.locks.Lock(record.Definition.ID)
 			current, ok := s.store.Get(record.Definition.ID)
 			if ok {
 				_ = s.deliverTerminal(ctx, current)
 			}
-			s.mu.Unlock()
+			unlock()
 			continue
 		}
 		_ = s.Submit(ctx, record.Definition)
@@ -378,16 +423,22 @@ func (s *RoomWorkloadService[D, U, I, C, P, R, O]) Replay(ctx context.Context) {
 }
 
 func (s *RoomWorkloadService[D, U, I, C, P, R, O]) deliverTerminal(ctx context.Context, record Record[D, U, I, C, P, R]) error {
+	if record.UpstreamDelivered {
+		return nil
+	}
 	output, terminal := s.strategy.Aggregate(record.Definition, record.Attempts)
 	if !terminal {
 		return nil
 	}
-	if s.sink == nil {
+	s.mu.RLock()
+	sink := s.sink
+	s.mu.RUnlock()
+	if sink == nil {
 		record.UpstreamError = "room workload result sink is not connected"
 		_ = s.store.Put(record)
 		return errors.New(record.UpstreamError)
 	}
-	if err := s.sink.DeliverRoomWorkloadResult(ctx, output); err != nil {
+	if err := sink.DeliverRoomWorkloadResult(ctx, output); err != nil {
 		record.UpstreamError = err.Error()
 		_ = s.store.Put(record)
 		return err
@@ -424,6 +475,13 @@ func (s *RoomWorkloadService[D, U, I, C, P, R, O]) findByWorkload(key string) (R
 
 func (s *RoomWorkloadService[D, U, I, C, P, R, O]) Record(definitionID string) (Record[D, U, I, C, P, R], bool) {
 	return s.store.Get(definitionID)
+}
+
+// Records returns an immutable snapshot for logical-workload operations that
+// may span more than one execution attempt. Callers must still use the
+// definition ID for mutations.
+func (s *RoomWorkloadService[D, U, I, C, P, R, O]) Records() []Record[D, U, I, C, P, R] {
+	return s.store.List()
 }
 
 func fallback(value, other string) string {

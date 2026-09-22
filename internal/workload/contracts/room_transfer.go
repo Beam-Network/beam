@@ -90,8 +90,7 @@ type RoomTaskCancel struct {
 }
 
 func (cancel RoomTaskCancel) Validate() error {
-	if (cancel.LaneID == "") != (cancel.Attempt == 0) || cancel.Attempt < 0 ||
-		(cancel.LaneID != "" && cancel.SchemaVersion != RoomStorageSchemaVersion) {
+	if (cancel.LaneID == "") != (cancel.Attempt == 0) || cancel.Attempt < 0 {
 		return errors.New("invalid scoped room cancellation")
 	}
 	if cancel.Type != "room_task_cancel" || (cancel.SchemaVersion != RoomTransferSchemaVersion && cancel.SchemaVersion != RoomStorageSchemaVersion) ||

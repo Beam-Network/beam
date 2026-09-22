@@ -138,15 +138,16 @@ func (v RoomWorkloadOfferWire[T]) Validate(now time.Time) error {
 		}
 		seen[target.MemberID] = struct{}{}
 	}
-	if err := v.PathAuthorizations.Validate(v.Kind, v.UnitID, v.DestinationSnapshot.Targets, now); err != nil {
+	if err := v.PathAuthorizations.Validate(v.Kind, v.UnitID, v.Epoch, v.Attempt, v.DestinationSnapshot.Targets, now); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (v RoomPathAuthorizations) Validate(kind domain.Kind, unitID string, targets []RoomWireTarget, now time.Time) error {
+func (v RoomPathAuthorizations) Validate(kind domain.Kind, unitID string, epoch, attempt uint64, targets []RoomWireTarget, now time.Time) error {
 	protocol := RoomPathProtocol(kind)
-	if err := v.Source.validate(unitID+"/source", "source", "", protocol, now); err != nil {
+	attemptPath := fmt.Sprintf("%s/epoch-%d/attempt-%d", unitID, epoch, attempt)
+	if err := v.Source.validate(attemptPath+"/source", "source", "", protocol, now); err != nil {
 		return err
 	}
 	byMember := make(map[string]RoomPathAuthorization, len(v.Targets))
@@ -167,7 +168,7 @@ func (v RoomPathAuthorizations) Validate(kind domain.Kind, unitID string, target
 		if !ok {
 			return fmt.Errorf("canonical room workload target path authorization missing %s", target.MemberID)
 		}
-		if err := authorization.validate(unitID+"/target/"+target.MemberID, "target", target.MemberID, protocol, now); err != nil {
+		if err := authorization.validate(attemptPath+"/target/"+target.MemberID, "target", target.MemberID, protocol, now); err != nil {
 			return err
 		}
 	}

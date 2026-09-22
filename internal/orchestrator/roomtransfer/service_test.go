@@ -108,37 +108,49 @@ func TestServiceCancelsEveryActiveLaneForTransfer(t *testing.T) {
 }
 
 func TestScopedCancellationPreservesOtherAttempts(t *testing.T) {
-	now := time.Now().UTC()
-	store := NewMemoryStore()
-	service, err := NewService(Config{Now: func() time.Time { return now }}, testDispatcher(t, now, &testControl{}), store)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i, id := range []string{"old", "recovery"} {
-		batch := testBatch(t, now)
-		batch.BatchID, batch.SchemaVersion = id, contracts.RoomStorageSchemaVersion
-		batch.Lanes[0].Attempt = int64(i + 1)
-		if err := store.Put(Record{Batch: batch, Lanes: map[string]LaneRecord{
-			"lane-a": {LaneID: "lane-a", State: LanePending},
-			"lane-b": {LaneID: "lane-b", State: LanePending},
-		}}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	request := contracts.RoomTaskCancel{Type: "room_task_cancel", SchemaVersion: contracts.RoomStorageSchemaVersion,
-		TransferID: "transfer-1", LaneID: "lane-a", Attempt: 1, Reason: "attempt_expired", CancelledAt: now}
-	if err := service.Cancel(context.Background(), request); err != nil {
-		t.Fatal(err)
-	}
-	old, _ := store.Get("old")
-	recovery, _ := store.Get("recovery")
-	if old.Lanes["lane-a"].State != LaneCancelled || old.Lanes["lane-b"].State != LanePending ||
-		recovery.Lanes["lane-a"].State != LanePending || recovery.Lanes["lane-b"].State != LanePending {
-		t.Fatalf("scoped cancellation affected unrelated work: old=%+v recovery=%+v", old.Lanes, recovery.Lanes)
-	}
-	request.Attempt = 0
-	if service.Cancel(context.Background(), request) == nil {
-		t.Fatal("accepted incomplete attempt scope")
+	for _, schema := range []string{contracts.RoomTransferSchemaVersion, contracts.RoomStorageSchemaVersion} {
+		t.Run(schema, func(t *testing.T) {
+			now := time.Now().UTC()
+			store := NewMemoryStore()
+			service, err := NewService(Config{Now: func() time.Time { return now }}, testDispatcher(t, now, &testControl{}), store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, id := range []string{"old", "recovery"} {
+				batch := testBatch(t, now)
+				batch.BatchID, batch.SchemaVersion = id, schema
+				batch.Lanes[0].Attempt = int64(i + 1)
+				if err := store.Put(Record{Batch: batch, Lanes: map[string]LaneRecord{
+					"lane-a": {LaneID: "lane-a", State: LanePending},
+					"lane-b": {LaneID: "lane-b", State: LanePending},
+				}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			request := contracts.RoomTaskCancel{Type: "room_task_cancel", SchemaVersion: schema,
+				TransferID: "transfer-1", LaneID: "lane-a", Attempt: 1, Reason: "attempt_expired", CancelledAt: now}
+			if err := service.Cancel(context.Background(), request); err != nil {
+				t.Fatal(err)
+			}
+			old, _ := store.Get("old")
+			recovery, _ := store.Get("recovery")
+			if old.Lanes["lane-a"].State != LaneCancelled || old.Lanes["lane-b"].State != LanePending ||
+				recovery.Lanes["lane-a"].State != LanePending || recovery.Lanes["lane-b"].State != LanePending {
+				t.Fatalf("scoped cancellation affected unrelated work: old=%+v recovery=%+v", old.Lanes, recovery.Lanes)
+			}
+			request.Attempt = 0
+			if service.Cancel(context.Background(), request) == nil {
+				t.Fatal("accepted incomplete attempt scope")
+			}
+			request.LaneID, request.Attempt = "", 1
+			if service.Cancel(context.Background(), request) == nil {
+				t.Fatal("accepted attempt without lane")
+			}
+			request.LaneID, request.SchemaVersion = "lane-a", "unsupported"
+			if service.Cancel(context.Background(), request) == nil {
+				t.Fatal("accepted unsupported cancellation schema")
+			}
+		})
 	}
 }
 
