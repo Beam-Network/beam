@@ -118,18 +118,23 @@ type RoomSourceLane struct {
 }
 
 type TunnelLeaseIntent struct {
-	IntentID                 string    `json:"intent_id"`
-	TransferID               string    `json:"transfer_id"`
-	LaneID                   string    `json:"lane_id"`
-	Attempt                  int64     `json:"attempt"`
-	Role                     string    `json:"role"`
-	TargetMemberID           string    `json:"target_member_id,omitempty"`
-	ChunkStart               int64     `json:"chunk_start"`
-	ChunkEnd                 int64     `json:"chunk_end"`
-	OrchestratorID           string    `json:"orchestrator_id"`
-	RequiredWorkerCapability string    `json:"required_worker_capability"`
-	ExpiresAt                time.Time `json:"expires_at"`
-	Signature                string    `json:"signature"`
+	IntentID                 string `json:"intent_id"`
+	TransferID               string `json:"transfer_id"`
+	LaneID                   string `json:"lane_id"`
+	Attempt                  int64  `json:"attempt"`
+	Role                     string `json:"role"`
+	TargetMemberID           string `json:"target_member_id,omitempty"`
+	ChunkStart               int64  `json:"chunk_start"`
+	ChunkEnd                 int64  `json:"chunk_end"`
+	OrchestratorID           string `json:"orchestrator_id"`
+	RequiredWorkerCapability string `json:"required_worker_capability"`
+	ExpiresAt                string `json:"expires_at"`
+	Signature                string `json:"signature"`
+}
+
+// Deadline parses expiry without rewriting the signed wire representation.
+func (intent TunnelLeaseIntent) Deadline() (time.Time, error) {
+	return time.Parse(time.RFC3339Nano, intent.ExpiresAt)
 }
 
 type TunnelLeaseEndpoint struct {
@@ -458,10 +463,11 @@ func (lane RoomSourceLane) Validate(chunkCount int64, targets map[string]RoomTra
 }
 
 func (intent TunnelLeaseIntent) Validate(role, target string, lane RoomSourceLane, now time.Time) error {
+	deadline, err := intent.Deadline()
 	if intent.IntentID == "" || intent.TransferID == "" || intent.Signature == "" || intent.Role != role ||
 		intent.LaneID != lane.LaneID || intent.Attempt != lane.Attempt || intent.ChunkStart != lane.ChunkStart ||
 		intent.ChunkEnd != lane.ChunkEnd || intent.OrchestratorID == "" || (intent.RequiredWorkerCapability != RoomTransferE2EECapability && intent.RequiredWorkerCapability != RoomStorageCapability) ||
-		intent.ExpiresAt.IsZero() || !now.Before(intent.ExpiresAt) || intent.TargetMemberID != target {
+		err != nil || !now.Before(deadline) || intent.TargetMemberID != target {
 		return errors.New("room tunnel lease intent is invalid")
 	}
 	return nil

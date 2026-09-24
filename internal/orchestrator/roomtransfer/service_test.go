@@ -226,7 +226,7 @@ func testBatch(t *testing.T, now time.Time) contracts.RoomTaskOfferBatch {
 		}
 		base := contracts.TunnelLeaseIntent{TransferID: "transfer-1", LaneID: laneID, Attempt: 1,
 			ChunkStart: chunk, ChunkEnd: chunk, OrchestratorID: "orchestrator-1",
-			RequiredWorkerCapability: contracts.RoomTransferE2EECapability, ExpiresAt: now.Add(time.Hour), Signature: "signed"}
+			RequiredWorkerCapability: contracts.RoomTransferE2EECapability, ExpiresAt: now.Add(time.Hour).Format(time.RFC3339Nano), Signature: "signed"}
 		source := base
 		source.IntentID, source.Role = "source-"+laneID, contracts.TunnelLeaseRoleSourceRead
 		destination := base

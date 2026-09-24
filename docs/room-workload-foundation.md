@@ -2,6 +2,10 @@
 
 Room transfer lets BeamCore assign file delivery lanes to participant workers inside a Room.
 
+Forward signed lease intents unchanged, including the exact `expires_at`
+string. Parse deadlines separately for expiry checks; reformatting a signed
+timestamp invalidates the intent even when it represents the same instant.
+
 ## Capabilities
 
 - Capabilities: `room.transfer`, `room.transfer.direct.v1`, and `room.transfer.e2ee.v2`

@@ -285,11 +285,15 @@ func newLaneRecord(laneID string) LaneRecord {
 }
 
 func verifyRedeemedLease(intent contracts.TunnelLeaseIntent, lease contracts.TunnelLease, now time.Time) error {
+	deadline, err := intent.Deadline()
+	if err != nil {
+		return errors.New("room tunnel intent deadline is invalid")
+	}
 	expectedProtocol := contracts.RoomTransferDirectCapability
 	if intent.RequiredWorkerCapability == contracts.RoomStorageCapability {
 		expectedProtocol = contracts.RoomStorageCapability
 	}
-	if lease.IntentID != intent.IntentID || lease.ExpiresAt.After(intent.ExpiresAt) || lease.Protocol != expectedProtocol {
+	if lease.IntentID != intent.IntentID || lease.ExpiresAt.After(deadline) || lease.Protocol != expectedProtocol {
 		return errors.New("Tunnel coordinator redeemed another intent")
 	}
 	return lease.Validate(intent.Role, intent.TargetMemberID, now)
