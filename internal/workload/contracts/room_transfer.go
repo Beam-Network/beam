@@ -358,11 +358,21 @@ func NormalizeCapabilities(capabilities []string) []string {
 	return result
 }
 
+const TransferMultipartProtocolVersion = 2
+
+func CapabilityProtocolVersion(capability string) int {
+	if capability == TransferMultipartCapability {
+		return TransferMultipartProtocolVersion
+	}
+	return 1
+}
+
 func ProtocolRangesForCapabilities(capabilities []string) []ProtocolRange {
 	capabilities = NormalizeCapabilities(capabilities)
 	protocols := make([]ProtocolRange, 0, len(capabilities))
 	for _, capability := range capabilities {
-		protocols = append(protocols, ProtocolRange{Name: capability, Min: 1, Max: 1})
+		version := CapabilityProtocolVersion(capability)
+		protocols = append(protocols, ProtocolRange{Name: capability, Min: version, Max: version})
 	}
 	return protocols
 }
@@ -417,8 +427,9 @@ func SupportsCapability(manifest CapabilityManifest, capability string) bool {
 	if !foundCapability {
 		return false
 	}
+	version := CapabilityProtocolVersion(capability)
 	for _, protocol := range manifest.Protocols {
-		if protocol.Name == capability && protocol.Min <= 1 && protocol.Max >= 1 {
+		if protocol.Name == capability && protocol.Min <= version && protocol.Max >= version {
 			return true
 		}
 	}

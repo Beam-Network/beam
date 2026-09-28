@@ -44,7 +44,7 @@ func TestRoomWorkloadQueueKeepsOfferAndCancelOrdered(t *testing.T) {
 		if isCancel {
 			messageType = "room_workload_cancel"
 		}
-		encoded := roomWorkloadTestEnvelope(t, messageType, "workload-1")
+		encoded := roomWorkloadTestPayload(t, messageType, "workload-1")
 		if err := control.queueRoomWorkload(ctx, queue, encoded, isCancel); err != nil {
 			t.Fatal(err)
 		}
@@ -173,11 +173,9 @@ func TestRoomWorkloadQueuePreservesPerKeyBurstOrder(t *testing.T) {
 	}
 }
 
-func roomWorkloadTestEnvelope(t *testing.T, messageType, workloadID string) []byte {
+func roomWorkloadTestPayload(t *testing.T, messageType, workloadID string) []byte {
 	t.Helper()
-	encoded, err := msgpack.Marshal(orchestratorControlEnvelope{SchemaVersion: orchestratorControlSchema,
-		Environment: "dev", Hotkey: "participant", MessageType: messageType, Producer: "transfer-runtime",
-		Payload: map[string]any{"workload_id": workloadID}})
+	encoded, err := msgpack.Marshal(map[string]any{"type": messageType, "workload_id": workloadID})
 	if err != nil {
 		t.Fatal(err)
 	}

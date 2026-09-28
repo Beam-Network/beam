@@ -14,9 +14,9 @@ Orchestrators operate worker pools, connect to BeamCore over NATS, route executa
 An orchestrator is responsible for:
 
 1. Maintaining a BeamLink/WCP worker session pool.
-2. Receiving `worker_task_offer_batch` and `room_task_offer_batch` messages from BeamCore over NATS.
+2. Receiving `task_offer_batch` and `room_task_offer_batch` messages from BeamCore over NATS.
 3. Selecting a connected local worker for each offer.
-4. Relaying `task_result` and `room_task_result` messages to BeamCore immediately.
+4. Relaying `task_offer_result` and `room_task_result` messages to BeamCore immediately.
 5. Publishing aggregate capability updates from connected workers.
 6. Staying connected and ready so BeamCore can route work.
 
@@ -45,14 +45,14 @@ sequenceDiagram
     O->>NATS: register { url, gateway_url, ready }
     W->>WCP: capability manifest
     O->>NATS: capability_update
-    BC->>NATS: worker_task_offer_batch / room_task_offer_batch
-    NATS->>O: worker_task_offer_batch / room_task_offer_batch
+    BC->>NATS: task_offer_batch / room_task_offer_batch
+    NATS->>O: task_offer_batch / room_task_offer_batch
     O->>WCP: workload.offer
     WCP->>W: workload.offer
     W->>WCP: workload.result
     WCP->>O: workload.result
-    O->>NATS: task_result / room_task_result
-    NATS->>BC: task_result / room_task_result
+    O->>NATS: task_offer_result / room_task_result
+    NATS->>BC: task_offer_result / room_task_result
 ```
 
 ## Batch Offer Message
@@ -61,25 +61,26 @@ BeamCore sends executable normal-transfer offers directly:
 
 ```json
 {
-	"type": "worker_task_offer_batch",
+	"type": "task_offer_batch",
 	"batch_id": "uuid",
+	"assignment_timeout_ms": 60000,
 	"offers": [
 		{
-			"task_id": "uuid",
 			"offer_id": "uuid",
-			"chunk_size": 41943040,
-			"source_url": "https://source-presigned-url",
-			"dest_url": "https://dest-presigned-url",
-			"urls_expires_at": "2026-06-13T12:00:00.000Z",
-			"etag_required": true,
-			"source_headers": {},
-			"dest_headers": {}
+			"source": {
+				"url": "https://source-presigned-url",
+				"headers": { "Range": "bytes=0-41943039" },
+				"chunk_size": 41943040
+			},
+			"destinations": [
+				{ "url": "https://dest-presigned-url", "etag_required": true }
+			]
 		}
 	]
 }
 ```
 
-Each offer is assigned work for one chunk. The orchestrator keeps worker assignment local and forwards every offer to a connected worker as `workload.offer`. Local validation or execution failures are reported as failed `task_result` messages.
+Each offer delivers one source range to every listed destination; offers with several destinations go only to orchestrators that advertise `transfer.multipart.fanout.v1`. The orchestrator keeps worker assignment local and forwards every offer to a connected worker as `workload.offer`. Local validation or execution failures are reported as failed destinations in `task_offer_result`.
 
 Room transfer offers arrive as `room_task_offer_batch` with schema `room-transfer/v1`. The orchestrator turns each eligible lane into a `room.transfer` workload.
 
@@ -87,25 +88,22 @@ Room transfer offers arrive as `room_task_offer_batch` with schema `room-transfe
 
 Workers send canonical capability manifests to the orchestrator over WCP. The orchestrator aggregates fresh worker manifests and publishes `capability_update` to BeamCore. Manifest fields are `actor_type`, `actor_id`, `software_version`, `protocols`, `capabilities`, `capacity`, `observed_at`, and `expires_at`.
 
-`transfer.multipart` is the baseline normal-transfer capability. `room.transfer` enables Room data-transfer lanes. Fresh manifests are authoritative.
+`transfer.multipart` protocol version 2 is the baseline normal-transfer capability; older versions receive no offers. `room.transfer` enables Room data-transfer lanes. Fresh manifests are authoritative.
 
 ## Task Results
 
-Workers report task outcomes with canonical `task_result`:
+Workers report task outcomes with canonical `task_offer_result`, one per offer:
 
 ```json
 {
-	"type": "task_result",
-	"task_id": "uuid",
+	"type": "task_offer_result",
 	"offer_id": "uuid",
 	"worker_id": "worker-uuid",
-	"success": true,
-	"bytes_transferred": 41943040,
-	"duration_ms": 1234,
-	"etag": "\"abc123\"",
-	"error": null
+	"destinations": [{ "etag": "\"abc123\"" }]
 }
 ```
+
+`destinations` holds one outcome per offer destination, in order: `etag` on success, `error` on failure.
 
 BeamCore derives verified bytes from trusted task metadata and computes bandwidth from offer send time to completion time.
 

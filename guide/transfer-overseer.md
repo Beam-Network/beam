@@ -16,12 +16,12 @@ When the timeout fires, unfinished work is reassigned through the same participa
 - Keep the NATS control connection and worker gateway healthy.
 - Handle the full delivered task-offer wave.
 - Forward offers and results immediately.
-- Retain each result until BeamCore returns a terminal `task_result_ack`.
+- Retain each result until BeamCore returns a terminal `task_offer_result_ack`.
 
 ## Worker obligations
 
 - Queue every valid offer and execute it as capacity becomes available.
-- Report success and failure through `task_result`.
+- Report success and failure through `task_offer_result`.
 - Keep active tasks moving and report results before the assignment timeout expires.
 
 Stalled or failed work is reassigned and can reduce future PRISM routing share.

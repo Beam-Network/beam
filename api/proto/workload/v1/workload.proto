@@ -63,8 +63,10 @@ message TransferPart {
 }
 
 message MultipartTransferSpec {
-  string transfer_id = 1;
+  reserved 1;
+  reserved "transfer_id";
   repeated TransferPart parts = 2;
+  bool fanout = 3;
 }
 
 message DistributionChild {

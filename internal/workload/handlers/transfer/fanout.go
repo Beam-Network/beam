@@ -23,28 +23,28 @@ import (
 	"github.com/Beam-Network/beam/internal/workload/storagehttp"
 )
 
-func validateSourceGroup(transfer contracts.MultipartTransfer, spec domain.Spec) error {
-	if len(transfer.Parts) == 0 || transfer.DestinationConcurrency < 1 || transfer.DestinationConcurrency > 8 {
-		return errors.New("invalid source group concurrency")
+func validateFanout(transfer contracts.MultipartTransfer, spec domain.Spec) error {
+	if len(transfer.Parts) == 0 {
+		return errors.New("fan-out transfer has no destinations")
 	}
 	first := transfer.Parts[0]
 	if first.Length <= 0 || first.Length > spec.Resources.MemoryBytes-(4<<20) {
-		return errors.New("source group buffer exceeds reserved memory")
+		return errors.New("fan-out buffer exceeds reserved memory")
 	}
 	for index, part := range transfer.Parts {
-		if part.Index != index || part.TaskID == "" || part.OfferID == "" || part.Length != first.Length ||
+		if part.Index != index || part.Length != first.Length ||
 			part.Offset != first.Offset || part.SourceRange != first.SourceRange || !reflect.DeepEqual(part.Source, first.Source) ||
 			part.ExpectedSHA256 != first.ExpectedSHA256 {
-			return errors.New("source group does not describe one immutable range")
+			return errors.New("fan-out transfer does not describe one immutable range")
 		}
 		for _, endpoint := range []contracts.HTTPEndpoint{part.Source, part.Destination} {
 			parsed, err := url.Parse(endpoint.URL)
 			if err != nil || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
-				return errors.New("invalid source group endpoint")
+				return errors.New("invalid fan-out endpoint")
 			}
 			ip := net.ParseIP(parsed.Hostname())
 			if parsed.Scheme != "https" && !(parsed.Scheme == "http" && ip != nil && ip.IsLoopback()) {
-				return errors.New("source group endpoints require TLS outside loopback")
+				return errors.New("fan-out endpoints require TLS outside loopback")
 			}
 		}
 	}
@@ -53,23 +53,20 @@ func validateSourceGroup(transfer contracts.MultipartTransfer, spec domain.Spec)
 
 // The buffer belongs to a logical range, never to a destination. A slow or
 // retrying destination holds this one buffer while other bounded slots advance.
-func (h *Handler) executeSourceGroup(ctx context.Context, spec domain.Spec, transfer contracts.MultipartTransfer) (domain.Result, error) {
-	if err := validateSourceGroup(transfer, spec); err != nil {
+func (h *Handler) executeFanout(ctx context.Context, spec domain.Spec, transfer contracts.MultipartTransfer) (domain.Result, error) {
+	if err := validateFanout(transfer, spec); err != nil {
 		return domain.Result{}, err
 	}
-	var resumed contracts.SourceGroupCheckpoint
-	if _, ok, err := workloadcheckpoint.Current(ctx, contracts.SourceGroupCheckpointSchema, &resumed); err != nil {
+	var resumed contracts.FanoutCheckpoint
+	if _, ok, err := workloadcheckpoint.Current(ctx, contracts.FanoutCheckpointSchema, &resumed); err != nil {
 		return domain.Result{}, err
 	} else if ok {
-		if resumed.SourceGroupID != transfer.SourceGroupID || resumed.TransferID != transfer.TransferID {
-			return domain.Result{}, errors.New("source group checkpoint identity mismatch")
-		}
 		result := domain.Result{BytesProcessed: resumed.Bytes, Outputs: resumed.Outputs}
 		for _, part := range transfer.Parts {
 			if resumed.Outputs[fmt.Sprintf("part.%d.state", part.Index)] != "completed" {
 				// The old buffer is gone. Return proven deliveries and let Runtime
 				// assign only missing cells under a new fenced attempt.
-				return result, errors.New("source_group_worker_restarted")
+				return result, errors.New("fanout_worker_restarted")
 			}
 		}
 		return result, nil
@@ -107,12 +104,11 @@ func (h *Handler) executeSourceGroup(ctx context.Context, spec domain.Spec, tran
 	}
 	payload := make([]byte, first.Length)
 	read, err := io.ReadFull(response.Body, payload)
-	outputs := map[string]string{"source.read_count": "1", "source.payload_bytes": strconv.Itoa(read), "source.group_id": transfer.SourceGroupID}
+	outputs := map[string]string{}
 	var extra [1]byte
 	if err == nil {
 		var count int
 		count, err = response.Body.Read(extra[:])
-		outputs["source.payload_bytes"] = strconv.Itoa(read + count)
 		if count > 0 {
 			err = errors.New("excess source bytes")
 		} else if errors.Is(err, io.EOF) {
@@ -128,8 +124,8 @@ func (h *Handler) executeSourceGroup(ctx context.Context, spec domain.Spec, tran
 		return domain.Result{Outputs: outputs}, errors.New("room_source_changed")
 	}
 	checkpoint := func(total int64) error {
-		err := workloadcheckpoint.Save(ctx, contracts.SourceGroupCheckpointSchema, map[string]string{"source_group_id": transfer.SourceGroupID},
-			contracts.SourceGroupCheckpoint{TransferID: transfer.TransferID, SourceGroupID: transfer.SourceGroupID, Bytes: total, Outputs: outputs})
+		err := workloadcheckpoint.Save(ctx, contracts.FanoutCheckpointSchema, nil,
+			contracts.FanoutCheckpoint{Bytes: total, Outputs: outputs})
 		if errors.Is(err, workloadcheckpoint.ErrUnavailable) {
 			return nil
 		}
@@ -144,7 +140,7 @@ func (h *Handler) executeSourceGroup(ctx context.Context, spec domain.Spec, tran
 	var total int64
 	failed := false
 	var checkpointErr error
-	for slot := 0; slot < transfer.DestinationConcurrency; slot++ {
+	for slot := 0; slot < min(len(transfer.Parts), contracts.FanoutDestinationConcurrency); slot++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -181,7 +177,7 @@ func (h *Handler) executeSourceGroup(ctx context.Context, spec domain.Spec, tran
 		return result, checkpointErr
 	}
 	if failed {
-		return result, errors.New("source_group_delivery_failed")
+		return result, errors.New("fanout_delivery_failed")
 	}
 	return result, nil
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -54,10 +53,6 @@ type ProgressSink interface {
 	DeliverProgress(context.Context, Record, domain.Progress) error
 }
 
-type CheckpointSink interface {
-	DeliverCheckpoint(context.Context, Record, domain.Checkpoint) error
-}
-
 type Config struct {
 	OrchestratorID    string
 	AssignmentTTL     time.Duration
@@ -76,12 +71,12 @@ type Service struct {
 	// whose lock is held by a concurrent Dispatch or CancelWorkload call.
 	deliveryLocks [64]sync.Mutex
 
-	mu                 sync.RWMutex
-	cancelledTransfers map[string]time.Time
-	sinks              map[Source]ResultSink
-	subscribers        map[uint64]chan Event
-	nextSub            uint64
-	sequence           atomic.Uint64
+	mu               sync.RWMutex
+	cancelledBatches map[string]time.Time
+	sinks            map[Source]ResultSink
+	subscribers      map[uint64]chan Event
+	nextSub          uint64
+	sequence         atomic.Uint64
 }
 
 func NewService(config Config, orchestratorRegistry *registry.Registry, control Control, store Store) (*Service, error) {
@@ -112,21 +107,8 @@ func (s *Service) RegisterSink(source Source, sink ResultSink) {
 }
 
 func (s *Service) Dispatch(ctx context.Context, request DispatchRequest) (Record, error) {
-	var beamTransferID string
-	if request.Source == SourceBeamCore {
-		var payload struct {
-			TransferID string `json:"transfer_id"`
-		}
-		if err := json.Unmarshal(request.Spec.Payload, &payload); err != nil {
-			return Record{}, err
-		}
-		beamTransferID = payload.TransferID
-		s.mu.RLock()
-		cancelledUntil := s.cancelledTransfers[payload.TransferID]
-		s.mu.RUnlock()
-		if cancelledUntil.After(s.config.Now()) {
-			return Record{}, errors.New("transfer_cancelled")
-		}
+	if request.Source == SourceBeamCore && s.BatchCancelled(request.BatchID) {
+		return Record{}, errors.New("batch_cancelled")
 	}
 	if request.ExternalID == "" || request.Spec.WorkloadID == "" || request.Spec.AttemptID == "" {
 		return Record{}, errors.New("external id and workload identity are required")
@@ -149,7 +131,7 @@ func (s *Service) Dispatch(ctx context.Context, request DispatchRequest) (Record
 		record = existing
 	} else {
 		now := s.config.Now().UTC()
-		record = Record{Source: request.Source, ExternalID: request.ExternalID, WorkloadKey: key,
+		record = Record{Source: request.Source, ExternalID: request.ExternalID, WorkloadKey: key, BatchID: request.BatchID,
 			State: StateReceived, Spec: request.Spec, CreatedAt: now, UpdatedAt: now}
 		if err := s.save(record, "external task received"); err != nil {
 			return Record{}, err
@@ -211,14 +193,9 @@ func (s *Service) Dispatch(ctx context.Context, request DispatchRequest) (Record
 			return s.terminal(record, StateCancelled, "external authority refused commit: "+err.Error(), err)
 		}
 	}
-	if request.Source == SourceBeamCore {
-		s.mu.RLock()
-		cancelledUntil := s.cancelledTransfers[beamTransferID]
-		s.mu.RUnlock()
-		if cancelledUntil.After(s.config.Now()) {
-			_ = s.control.Cancel(ctx, record.WorkerID, record.Spec.WorkloadID, record.Spec.AttemptID)
-			return s.terminal(record, StateCancelled, "transfer_cancelled", errors.New("transfer_cancelled"))
-		}
+	if request.Source == SourceBeamCore && s.BatchCancelled(record.BatchID) {
+		_ = s.control.Cancel(ctx, record.WorkerID, record.Spec.WorkloadID, record.Spec.AttemptID)
+		return s.terminal(record, StateCancelled, "batch_cancelled", errors.New("batch_cancelled"))
 	}
 	token, err := randomToken(24)
 	if err != nil {
@@ -331,86 +308,50 @@ func (s *Service) HandleResult(ctx context.Context, result domain.Result) error 
 
 func (s *Service) ReplayResults(ctx context.Context) {
 	for _, record := range s.store.List() {
-		if record.Checkpoint != nil && record.Checkpoint.Sequence > record.UpstreamCheckpointSequence && !record.UpstreamDelivered {
-			_ = s.HandleCheckpoint(ctx, record.WorkerID, *record.Checkpoint)
-		}
 		if record.Result != nil && !record.UpstreamDelivered {
 			_ = s.HandleResult(ctx, *record.Result)
 		}
 	}
 }
 
-// Persist evidence before upstream delivery so a control reconnect cannot lose
-// destinations completed while other members of the source group are running.
-func (s *Service) HandleCheckpoint(ctx context.Context, workerID string, checkpoint domain.Checkpoint) error {
-	key := checkpoint.WorkloadID + "/" + checkpoint.AttemptID
-	delivery := &s.deliveryLocks[lockIndex(key)]
-	delivery.Lock()
-	defer delivery.Unlock()
-	lock := s.recordLock(key)
-	lock.Lock()
-	defer lock.Unlock()
-	record, ok := s.store.Get(key)
-	if !ok || record.WorkerID != workerID || checkpoint.Kind != record.Spec.Kind || checkpoint.Sequence == 0 {
-		return errors.New("checkpoint does not match the assigned worker and workload")
-	}
-	if record.UpstreamDelivered || checkpoint.Sequence <= record.UpstreamCheckpointSequence {
-		return nil
-	}
-	if record.Checkpoint == nil || checkpoint.Sequence > record.Checkpoint.Sequence {
-		record.Checkpoint = &checkpoint
-		record.UpdatedAt = s.config.Now().UTC()
-		if err := s.save(record, "Worker checkpoint retained for upstream delivery"); err != nil {
-			return err
-		}
-	}
-	s.mu.RLock()
-	sink, available := s.sinks[record.Source].(CheckpointSink)
-	s.mu.RUnlock()
-	if !available {
-		return errors.New("checkpoint upstream is unavailable")
-	}
-	retainedCheckpoint := record.Checkpoint
-	lock.Unlock()
-	err := sink.DeliverCheckpoint(ctx, record, *retainedCheckpoint)
-	lock.Lock()
-	var terminal *TerminalDeliveryError
-	if err != nil && !errors.As(err, &terminal) {
-		return err
-	}
-	record, _ = s.store.Get(key)
-	record.UpstreamCheckpointSequence = retainedCheckpoint.Sequence
-	record.UpstreamCheckpoint = retainedCheckpoint
-	record.UpdatedAt = s.config.Now().UTC()
-	return s.save(record, "external authority acknowledged checkpoint")
-}
-
 func (s *Service) Records() []Record { return s.store.List() }
 
-func (s *Service) CancelTransfer(ctx context.Context, transferID, reason string) error {
-	s.mu.Lock()
-	if s.cancelledTransfers == nil {
-		s.cancelledTransfers = make(map[string]time.Time)
+func (s *Service) BatchCancelled(batchID string) bool {
+	if batchID == "" {
+		return false
 	}
-	for id, until := range s.cancelledTransfers {
-		if !until.After(s.config.Now()) {
-			delete(s.cancelledTransfers, id)
+	s.mu.RLock()
+	cancelledUntil := s.cancelledBatches[batchID]
+	s.mu.RUnlock()
+	return cancelledUntil.After(s.config.Now())
+}
+
+func (s *Service) CancelBatches(ctx context.Context, batchIDs []string) error {
+	now := s.config.Now()
+	cancelled := make(map[string]struct{}, len(batchIDs))
+	s.mu.Lock()
+	if s.cancelledBatches == nil {
+		s.cancelledBatches = make(map[string]time.Time)
+	}
+	for id, until := range s.cancelledBatches {
+		if !until.After(now) {
+			delete(s.cancelledBatches, id)
 		}
 	}
-	s.cancelledTransfers[transferID] = s.config.Now().Add(24 * time.Hour)
+	for _, batchID := range batchIDs {
+		s.cancelledBatches[batchID] = now.Add(24 * time.Hour)
+		cancelled[batchID] = struct{}{}
+	}
 	s.mu.Unlock()
 	var failures []error
 	for _, record := range s.store.List() {
 		if record.Source != SourceBeamCore {
 			continue
 		}
-		var payload struct {
-			TransferID string `json:"transfer_id"`
-		}
-		if json.Unmarshal(record.Spec.Payload, &payload) != nil || payload.TransferID != transferID {
+		if _, ok := cancelled[record.BatchID]; !ok {
 			continue
 		}
-		if err := s.CancelWorkload(ctx, record.WorkloadKey, reason); err != nil {
+		if err := s.CancelWorkload(ctx, record.WorkloadKey, "batch_cancelled"); err != nil {
 			failures = append(failures, err)
 		}
 	}

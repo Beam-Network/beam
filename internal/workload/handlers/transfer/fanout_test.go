@@ -18,7 +18,7 @@ import (
 	"github.com/Beam-Network/beam/internal/workload/domain"
 )
 
-func TestSourceGroupReadsOnceAcrossDestinationBatchesAndRetry(t *testing.T) {
+func TestFanoutReadsOnceAcrossDestinationBatchesAndRetry(t *testing.T) {
 	var reads atomic.Int64
 	var mu sync.Mutex
 	writes := map[string]int{}
@@ -53,9 +53,9 @@ func TestSourceGroupReadsOnceAcrossDestinationBatchesAndRetry(t *testing.T) {
 		w.WriteHeader(200)
 	}))
 	defer server.Close()
-	group := contracts.MultipartTransfer{TransferID: "transfer", SourceGroupID: "range", DestinationConcurrency: 8}
+	group := contracts.MultipartTransfer{Fanout: true}
 	for i := 0; i < 101; i++ {
-		group.Parts = append(group.Parts, contracts.TransferPart{Index: i, TaskID: fmt.Sprint(i), OfferID: fmt.Sprint(i), ETagRequired: true,
+		group.Parts = append(group.Parts, contracts.TransferPart{Index: i, ETagRequired: true,
 			Length: 8, Source: contracts.HTTPEndpoint{URL: server.URL + "/source", Headers: map[string]string{"Range": "bytes=4-11", "If-Match": "frozen"}}, Destination: contracts.HTTPEndpoint{URL: server.URL + "/" + strconv.Itoa(i)}})
 	}
 	payload, _ := json.Marshal(group)
@@ -65,10 +65,10 @@ func TestSourceGroupReadsOnceAcrossDestinationBatchesAndRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := handler.Execute(context.Background(), spec)
-	if err == nil || err.Error() != "source_group_delivery_failed" {
+	if err == nil || err.Error() != "fanout_delivery_failed" {
 		t.Fatalf("error=%v", err)
 	}
-	if reads.Load() != 1 || result.BytesProcessed != 800 || result.Outputs["source.payload_bytes"] != "8" {
+	if reads.Load() != 1 || result.BytesProcessed != 800 {
 		t.Fatalf("source reads=%d result=%+v", reads.Load(), result)
 	}
 	for i := 0; i < 101; i++ {
@@ -85,7 +85,7 @@ func TestSourceGroupReadsOnceAcrossDestinationBatchesAndRetry(t *testing.T) {
 	}
 }
 
-func TestSourceGroupCheckpointsCompletedDestinationsBeforeTheGroupFinishes(t *testing.T) {
+func TestFanoutCheckpointsCompletedDestinationsBeforeTheOfferFinishes(t *testing.T) {
 	var reads atomic.Int64
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -104,9 +104,9 @@ func TestSourceGroupCheckpointsCompletedDestinationsBeforeTheGroupFinishes(t *te
 		w.WriteHeader(200)
 	}))
 	defer server.Close()
-	group := contracts.MultipartTransfer{TransferID: "transfer", SourceGroupID: "range", DestinationConcurrency: 2}
+	group := contracts.MultipartTransfer{Fanout: true}
 	for index, path := range []string{"/fast", "/slow"} {
-		group.Parts = append(group.Parts, contracts.TransferPart{Index: index, TaskID: fmt.Sprint(index), OfferID: fmt.Sprint(index), Length: 8, ETagRequired: true, Source: contracts.HTTPEndpoint{URL: server.URL}, Destination: contracts.HTTPEndpoint{URL: server.URL + path}})
+		group.Parts = append(group.Parts, contracts.TransferPart{Index: index, Length: 8, ETagRequired: true, Source: contracts.HTTPEndpoint{URL: server.URL}, Destination: contracts.HTTPEndpoint{URL: server.URL + path}})
 	}
 	encoded, _ := json.Marshal(group)
 	spec := domain.Spec{Resources: domain.Resources{MemoryBytes: (4 << 20) + 8}, Payload: encoded}
@@ -114,7 +114,7 @@ func TestSourceGroupCheckpointsCompletedDestinationsBeforeTheGroupFinishes(t *te
 	observed := false
 	ctx = workloadcheckpoint.WithManager(ctx, nil, func(value domain.Checkpoint) error {
 		durable = &value
-		var evidence contracts.SourceGroupCheckpoint
+		var evidence contracts.FanoutCheckpoint
 		if err := json.Unmarshal(value.Payload, &evidence); err != nil {
 			return err
 		}
@@ -130,12 +130,12 @@ func TestSourceGroupCheckpointsCompletedDestinationsBeforeTheGroupFinishes(t *te
 	}
 	restarted := workloadcheckpoint.WithManager(context.Background(), durable, func(domain.Checkpoint) error { return nil })
 	result, err = NewHandler(nil).Execute(restarted, spec)
-	if err == nil || err.Error() != "source_group_worker_restarted" || result.Outputs["part.0.state"] != "completed" || reads.Load() != 1 {
+	if err == nil || err.Error() != "fanout_worker_restarted" || result.Outputs["part.0.state"] != "completed" || reads.Load() != 1 {
 		t.Fatalf("restart reread or lost coverage: reads=%d result=%+v err=%v", reads.Load(), result, err)
 	}
 }
 
-func TestSourceGroupFailsBeforeUploadOnChangedSource(t *testing.T) {
+func TestFanoutFailsBeforeUploadOnChangedSource(t *testing.T) {
 	var writes atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -144,7 +144,7 @@ func TestSourceGroupFailsBeforeUploadOnChangedSource(t *testing.T) {
 		w.WriteHeader(412)
 	}))
 	defer server.Close()
-	group := contracts.MultipartTransfer{TransferID: "transfer", SourceGroupID: "range", DestinationConcurrency: 1, Parts: []contracts.TransferPart{{TaskID: "task", OfferID: "offer", Length: 8, Source: contracts.HTTPEndpoint{URL: server.URL}, Destination: contracts.HTTPEndpoint{URL: server.URL}}}}
+	group := contracts.MultipartTransfer{Fanout: true, Parts: []contracts.TransferPart{{Length: 8, Source: contracts.HTTPEndpoint{URL: server.URL}, Destination: contracts.HTTPEndpoint{URL: server.URL}}}}
 	payload, _ := json.Marshal(group)
 	_, err := NewHandler(nil).Execute(context.Background(), domain.Spec{Resources: domain.Resources{MemoryBytes: (4 << 20) + 8}, Payload: payload})
 	if err == nil || err.Error() != "room_source_changed" || writes.Load() != 0 {
@@ -152,7 +152,7 @@ func TestSourceGroupFailsBeforeUploadOnChangedSource(t *testing.T) {
 	}
 }
 
-func TestSourceGroupCancellationInterruptsDestinationAndRetainedBuffer(t *testing.T) {
+func TestFanoutCancellationInterruptsDestinationAndRetainedBuffer(t *testing.T) {
 	started := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
@@ -167,7 +167,7 @@ func TestSourceGroupCancellationInterruptsDestinationAndRetainedBuffer(t *testin
 		<-r.Context().Done()
 	}))
 	defer server.Close()
-	group := contracts.MultipartTransfer{TransferID: "transfer", SourceGroupID: "range", DestinationConcurrency: 1, Parts: []contracts.TransferPart{{TaskID: "task", OfferID: "offer", Length: 8, Source: contracts.HTTPEndpoint{URL: server.URL}, Destination: contracts.HTTPEndpoint{URL: server.URL}}}}
+	group := contracts.MultipartTransfer{Fanout: true, Parts: []contracts.TransferPart{{Length: 8, Source: contracts.HTTPEndpoint{URL: server.URL}, Destination: contracts.HTTPEndpoint{URL: server.URL}}}}
 	payload, _ := json.Marshal(group)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -185,7 +185,7 @@ func TestSourceGroupCancellationInterruptsDestinationAndRetainedBuffer(t *testin
 	select {
 	case err := <-done:
 		if err == nil {
-			t.Fatal("cancelled source group succeeded")
+			t.Fatal("cancelled fan-out succeeded")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("cancellation retained active provider I/O")

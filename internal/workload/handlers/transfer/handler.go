@@ -23,9 +23,8 @@ const defaultResponseBodyLimit = 64 << 10
 const multipartCheckpointSchema = "beam.transfer.multipart/1"
 
 type multipartCheckpoint struct {
-	TransferID string                    `json:"transfer_id"`
-	Parts      map[string]partCheckpoint `json:"parts"`
-	Bytes      int64                     `json:"bytes"`
+	Parts map[string]partCheckpoint `json:"parts"`
+	Bytes int64                     `json:"bytes"`
 }
 
 type partCheckpoint struct {
@@ -52,14 +51,11 @@ func (h *Handler) Validate(spec domain.Spec) error {
 	if err := json.Unmarshal(spec.Payload, &transfer); err != nil {
 		return fmt.Errorf("decode multipart transfer: %w", err)
 	}
-	if strings.TrimSpace(transfer.TransferID) == "" {
-		return errors.New("transfer_id is required")
-	}
 	if len(transfer.Parts) == 0 {
 		return errors.New("at least one transfer part is required")
 	}
-	if transfer.SourceGroupID != "" {
-		if err := validateSourceGroup(transfer, spec); err != nil {
+	if transfer.Fanout {
+		if err := validateFanout(transfer, spec); err != nil {
 			return err
 		}
 	}
@@ -93,14 +89,12 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 	if err := json.Unmarshal(spec.Payload, &transfer); err != nil {
 		return domain.Result{}, err
 	}
-	if transfer.SourceGroupID != "" {
-		return h.executeSourceGroup(ctx, spec, transfer)
+	if transfer.Fanout {
+		return h.executeFanout(ctx, spec, transfer)
 	}
-	resume := multipartCheckpoint{TransferID: transfer.TransferID, Parts: make(map[string]partCheckpoint)}
-	if _, ok, err := workloadcheckpoint.Current(ctx, multipartCheckpointSchema, &resume); err != nil {
+	resume := multipartCheckpoint{Parts: make(map[string]partCheckpoint)}
+	if _, _, err := workloadcheckpoint.Current(ctx, multipartCheckpointSchema, &resume); err != nil {
 		return domain.Result{}, fmt.Errorf("restore multipart checkpoint: %w", err)
-	} else if ok && resume.TransferID != transfer.TransferID {
-		return domain.Result{}, errors.New("multipart checkpoint belongs to another transfer")
 	}
 	if resume.Parts == nil {
 		resume.Parts = make(map[string]partCheckpoint)
@@ -130,7 +124,7 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 		resume.Bytes = total
 		resume.Parts[partKey] = partCheckpoint{Bytes: partResult.bytes, SHA256: partResult.sha256, ETag: partResult.etag}
 		if err := workloadcheckpoint.Save(ctx, multipartCheckpointSchema, map[string]string{
-			"transfer_id": transfer.TransferID, "completed_part": partKey,
+			"completed_part": partKey,
 		}, resume); err != nil && !errors.Is(err, workloadcheckpoint.ErrUnavailable) {
 			return domain.Result{BytesProcessed: total, Outputs: outputs}, fmt.Errorf("save multipart checkpoint: %w", err)
 		}

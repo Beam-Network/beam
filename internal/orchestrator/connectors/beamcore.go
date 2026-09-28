@@ -14,28 +14,9 @@ import (
 	"github.com/Beam-Network/beam/internal/orchestrator/payment"
 	"github.com/Beam-Network/beam/internal/orchestrator/roomtransfer"
 	"github.com/Beam-Network/beam/internal/orchestrator/roomworkloads"
-	beamcoreadapter "github.com/Beam-Network/beam/internal/workload/adapters/beamcore"
 	"github.com/Beam-Network/beam/internal/workload/contracts"
 	"github.com/Beam-Network/beam/internal/workload/domain"
 )
-
-type BeamCoreMessage struct {
-	EventID string                    `json:"event_id"`
-	Type    string                    `json:"type"`
-	Offer   beamcoreadapter.TaskOffer `json:"offer"`
-}
-
-type BeamCoreResult struct {
-	Type             string `json:"type"`
-	TaskID           string `json:"task_id"`
-	OfferID          string `json:"offer_id"`
-	WorkerID         string `json:"worker_id"`
-	Success          bool   `json:"success"`
-	BytesTransferred int64  `json:"bytes_transferred"`
-	ChunkHash        string `json:"chunk_hash,omitempty"`
-	ETag             string `json:"etag,omitempty"`
-	Error            string `json:"error,omitempty"`
-}
 
 type BeamCoreConnector struct {
 	config        NATSConfig
@@ -54,9 +35,6 @@ func NewBeamCoreConnector(config NATSConfig, orchestrator *dispatch.Service, pay
 	}
 	if config.Name == "" {
 		config.Name = "beam-orchestrator-beamcore"
-	}
-	if config.TaskSubject != "" && config.ResultSubject == "" {
-		return nil, errors.New("BeamCore result NATS subject is required")
 	}
 	connector := &BeamCoreConnector{config: config, orchestrator: orchestrator}
 	if len(payments) > 0 {
@@ -207,24 +185,7 @@ func (s *BeamCoreConnector) handle(ctx context.Context, encoded []byte) error {
 		}
 		return s.roomWorkloads.Cancel(ctx, cancel)
 	}
-	var message BeamCoreMessage
-	if err := json.Unmarshal(encoded, &message); err != nil {
-		return err
-	}
-	if message.Type != "task_offer" || message.Offer.TaskID == "" {
-		return errors.New("BeamCore NATS message must contain task_offer")
-	}
-	externalID := message.EventID
-	if externalID == "" {
-		externalID = message.Offer.OfferID
-	}
-	spec, err := beamcoreadapter.ToWorkload(message.Offer, domain.Identity{}, time.Now())
-	if err != nil {
-		return err
-	}
-	_, err = s.orchestrator.Dispatch(ctx, dispatch.DispatchRequest{Source: dispatch.SourceBeamCore,
-		ExternalID: externalID, Spec: spec})
-	return err
+	return fmt.Errorf("unsupported BeamCore JetStream message type %q", generic.Type)
 }
 
 func decodeStrictRoomWire(encoded []byte, value any) error {
@@ -321,55 +282,8 @@ func (s *BeamCoreConnector) SubmitRoomTaskResult(ctx context.Context, result con
 }
 
 func (s *BeamCoreConnector) DeliverResult(ctx context.Context, record dispatch.Record, result domain.Result) error {
-	if s.config.TaskSubject == "" {
-		if s.roomControl == nil || !s.roomControl.enabled() {
-			return errors.New("BeamCore orchestrator control is not configured")
-		}
-		return s.roomControl.submitTaskResult(ctx, record, result)
-	}
-	evidence, err := resultEvidence(record, result)
-	if err != nil {
-		return err
-	}
-	payload, err := json.Marshal(BeamCoreResult{Type: "task_result", TaskID: record.Spec.WorkloadID,
-		OfferID: record.Spec.AttemptID, WorkerID: record.WorkerID,
-		Success:          result.State == domain.StateCompleted || result.State == domain.StateReceiptCommitted,
-		BytesTransferred: result.BytesProcessed, ChunkHash: evidence.chunkHash, ETag: evidence.etag,
-		Error: result.ErrorMessage})
-	if err != nil {
-		return err
-	}
-	response, err := s.nats.request(ctx, s.config.ResultSubject, payload)
-	if err != nil {
-		return err
-	}
-	if len(response) == 0 {
-		return errors.New("BeamCore returned an empty task result acknowledgement")
-	}
-	var ack taskResultAcknowledgement
-	if err := json.Unmarshal(response, &ack); err != nil {
-		return err
-	}
-	return taskResultDisposition(ack)
-}
-
-func (s *BeamCoreConnector) DeliverCheckpoint(ctx context.Context, record dispatch.Record, checkpoint domain.Checkpoint) error {
-	if checkpoint.Schema != contracts.SourceGroupCheckpointSchema {
-		return nil
-	}
 	if s.roomControl == nil || !s.roomControl.enabled() {
 		return errors.New("BeamCore orchestrator control is not configured")
 	}
-	var transfer contracts.MultipartTransfer
-	var evidence contracts.SourceGroupCheckpoint
-	if err := json.Unmarshal(record.Spec.Payload, &transfer); err != nil {
-		return err
-	}
-	if err := json.Unmarshal(checkpoint.Payload, &evidence); err != nil {
-		return err
-	}
-	if transfer.SourceGroupID == "" || evidence.SourceGroupID != transfer.SourceGroupID || evidence.TransferID != transfer.TransferID {
-		return dispatch.TerminalDelivery(errors.New("source group checkpoint identity mismatch"))
-	}
-	return s.roomControl.submitSourceGroupResult(ctx, record, domain.Result{State: domain.StateRunning, BytesProcessed: evidence.Bytes, Outputs: evidence.Outputs}, transfer)
+	return s.roomControl.submitTaskResult(ctx, record, result)
 }

@@ -38,12 +38,12 @@ sequenceDiagram
     Worker->>WCP: Connect with worker_id, node identity, membership
     WCP-->>Worker: Session established
     Worker-->>WCP: capability manifest
-    BeamCore->>Orchestrator: worker_task_offer_batch / room_task_offer_batch
+    BeamCore->>Orchestrator: task_offer_batch / room_task_offer_batch
     Orchestrator->>WCP: workload.offer
     WCP->>Worker: workload.offer
     Worker-->>WCP: workload.result
     WCP-->>Orchestrator: workload.result
-    Orchestrator->>BeamCore: task_result / room_task_result
+    Orchestrator->>BeamCore: task_offer_result / room_task_result
 ```
 
 Workers keep their runtime session on WCP and use BeamCore HTTP separately for registration.
@@ -79,7 +79,6 @@ For normal transfers, the worker receives a `workload.offer`:
 	"workload_id": "uuid",
 	"attempt_id": "uuid",
 	"payload": {
-		"transfer_id": "uuid",
 		"parts": [
 			{
 				"index": 0,

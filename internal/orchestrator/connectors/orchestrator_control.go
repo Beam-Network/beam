@@ -2,8 +2,6 @@ package connectors
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,19 +19,7 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 )
 
-const orchestratorControlSchema = "orchestrator-control/v1"
-
-type orchestratorControlEnvelope struct {
-	MessageID     string `msgpack:"message_id"`
-	SchemaVersion string `msgpack:"schema_version"`
-	Environment   string `msgpack:"environment"`
-	Hotkey        string `msgpack:"hotkey"`
-	MessageType   string `msgpack:"message_type"`
-	RequestID     string `msgpack:"request_id,omitempty"`
-	OccurredAt    string `msgpack:"occurred_at"`
-	Producer      string `msgpack:"producer"`
-	Payload       any    `msgpack:"payload"`
-}
+const DefaultControlPrefix = "beam.orch.control.v2"
 
 type roomControl struct {
 	config                    NATSConfig
@@ -82,7 +68,7 @@ func newRoomControl(config NATSConfig, conn *nats.Conn, rooms *roomtransfer.Serv
 		config.Environment = "dev"
 	}
 	if config.ControlPrefix == "" {
-		config.ControlPrefix = "beam.orch.control"
+		config.ControlPrefix = DefaultControlPrefix
 	}
 	if config.RequestTimeout <= 0 {
 		config.RequestTimeout = 10 * time.Second
@@ -125,10 +111,10 @@ func (control *roomControl) bind(ctx context.Context) (_ *roomControlSession, er
 		session.subscriptions = append(session.subscriptions, subscription)
 		return nil
 	}
-	if err = subscribe("worker_task_offer_batch"); err != nil {
+	if err = subscribe("task_offer_batch"); err != nil {
 		return nil, err
 	}
-	if err = subscribe("worker_transfer_cancel"); err != nil {
+	if err = subscribe("task_offer_batch_cancel"); err != nil {
 		return nil, err
 	}
 	if control.rooms != nil {
@@ -195,28 +181,33 @@ func (session *roomControlSession) run(ctx context.Context) error {
 			if message == nil {
 				return nil
 			}
-			if strings.HasSuffix(message.Subject, ".worker_task_offer_batch") {
+			switch messageType := message.Subject[strings.LastIndex(message.Subject, ".")+1:]; messageType {
+			case "task_offer_batch":
 				if err := control.handleTaskOfferBatch(ctx, message.Data); err != nil {
-					log.Printf("ignore invalid BeamCore task offer: %v", err)
+					log.Printf("ignore invalid BeamCore task_offer_batch: %v", err)
 				}
-			} else if strings.HasSuffix(message.Subject, ".worker_transfer_cancel") {
-				if err := control.handleWorkerTransferCancel(ctx, message.Data); err != nil {
-					log.Printf("ignore invalid BeamCore transfer cancellation: %v", err)
+			case "task_offer_batch_cancel":
+				if err := control.handleTaskOfferBatchCancel(ctx, message.Data); err != nil {
+					log.Printf("ignore invalid BeamCore task_offer_batch_cancel: %v", err)
 				}
-			} else if strings.HasSuffix(message.Subject, ".room_workload_offer") {
+			case "room_workload_offer":
 				if err := control.queueRoomWorkload(ctx, roomQueue, message.Data, false); err != nil {
 					log.Printf("ignore invalid BeamCore room workload offer: %v", err)
 				}
-			} else if strings.HasSuffix(message.Subject, ".room_workload_cancel") {
+			case "room_workload_cancel":
 				if err := control.queueRoomWorkload(ctx, roomQueue, message.Data, true); err != nil {
 					log.Printf("ignore invalid BeamCore room workload cancellation: %v", err)
 				}
-			} else if strings.HasSuffix(message.Subject, ".room_task_cancel") {
+			case "room_task_cancel":
 				if err := control.handleCancel(ctx, message.Data); err != nil {
 					log.Printf("ignore invalid BeamCore room cancellation: %v", err)
 				}
-			} else if err := control.handleOffer(ctx, message.Data); err != nil {
-				log.Printf("ignore invalid BeamCore room transfer offer: %v", err)
+			case "room_task_offer_batch":
+				if err := control.handleOffer(ctx, message.Data); err != nil {
+					log.Printf("ignore invalid BeamCore room transfer offer: %v", err)
+				}
+			default:
+				log.Printf("ignore BeamCore control message of unknown type %q", messageType)
 			}
 		}
 	}
@@ -226,11 +217,14 @@ func (control *roomControl) queueRoomWorkload(ctx context.Context, queue *roomWo
 	if queue == nil {
 		return errors.New("generic room workload service is missing")
 	}
+	if control.workloads == nil {
+		return errors.New("generic room workload service is missing")
+	}
 	messageType := "room_workload_offer"
 	if cancel {
 		messageType = "room_workload_cancel"
 	}
-	payload, err := control.roomWorkloadPayload(encoded, messageType)
+	payload, err := decodeControlPayload(encoded, messageType)
 	if err != nil {
 		return err
 	}
@@ -285,53 +279,50 @@ func reportHeartbeatFailure(ctx context.Context, failures chan<- error, err erro
 	}
 }
 
-func (control *roomControl) roomWorkloadPayload(encoded []byte, messageType string) ([]byte, error) {
-	if control.workloads == nil {
-		return nil, errors.New("generic room workload service is missing")
-	}
-	var envelope orchestratorControlEnvelope
-	if err := msgpack.Unmarshal(encoded, &envelope); err != nil {
+func decodeControlPayload(encoded []byte, messageType string) ([]byte, error) {
+	var payload map[string]any
+	if err := msgpack.Unmarshal(encoded, &payload); err != nil {
 		return nil, err
 	}
-	if envelope.SchemaVersion != orchestratorControlSchema || envelope.Environment != control.config.Environment ||
-		strings.TrimSpace(envelope.Hotkey) != control.config.Hotkey || envelope.MessageType != messageType ||
-		envelope.Producer != "transfer-runtime" {
-		return nil, errors.New("BeamCore room workload envelope is invalid")
+	if payload["type"] != messageType {
+		return nil, fmt.Errorf("BeamCore %s payload has type %v", messageType, payload["type"])
 	}
-	return json.Marshal(envelope.Payload)
+	return json.Marshal(payload)
 }
 
 func (control *roomControl) handleTaskOfferBatch(ctx context.Context, encoded []byte) error {
-	var envelope orchestratorControlEnvelope
-	if err := msgpack.Unmarshal(encoded, &envelope); err != nil {
-		return err
-	}
-	if envelope.SchemaVersion != orchestratorControlSchema || envelope.Environment != control.config.Environment ||
-		strings.TrimSpace(envelope.Hotkey) != control.config.Hotkey || envelope.MessageType != "worker_task_offer_batch" ||
-		envelope.Producer != "transfer-runtime" {
-		return errors.New("BeamCore task offer envelope is invalid")
-	}
-	payload, err := json.Marshal(envelope.Payload)
+	payload, err := decodeControlPayload(encoded, "task_offer_batch")
 	if err != nil {
 		return err
 	}
-	var batch struct {
-		BatchID string                      `json:"batch_id"`
-		Offers  []beamcoreadapter.TaskOffer `json:"offers"`
-	}
+	var batch beamcoreadapter.TaskOfferBatch
 	if err := json.Unmarshal(payload, &batch); err != nil {
 		return err
 	}
 	if batch.BatchID == "" || len(batch.Offers) == 0 {
 		return errors.New("BeamCore task offer batch is empty")
 	}
-	specs, err := beamcoreadapter.GroupWorkloads(batch.Offers, time.Now())
-	if err != nil {
-		return err
+	if control.tasks.BatchCancelled(batch.BatchID) {
+		return errors.New("batch_cancelled")
+	}
+	receivedAt := time.Now()
+	timeout := time.Duration(batch.AssignmentTimeoutMS) * time.Millisecond
+	specs := make([]domain.Spec, 0, len(batch.Offers))
+	offers := make(map[string]struct{}, len(batch.Offers))
+	for _, offer := range batch.Offers {
+		if _, duplicate := offers[offer.OfferID]; duplicate {
+			return errors.New("duplicate task offer identity")
+		}
+		offers[offer.OfferID] = struct{}{}
+		spec, err := beamcoreadapter.ToWorkload(offer, timeout, receivedAt)
+		if err != nil {
+			return err
+		}
+		specs = append(specs, spec)
 	}
 	for _, spec := range specs {
 		if _, err := control.tasks.Dispatch(ctx, dispatch.DispatchRequest{
-			Source: dispatch.SourceBeamCore, ExternalID: spec.AttemptID, Spec: spec,
+			Source: dispatch.SourceBeamCore, ExternalID: spec.AttemptID, BatchID: batch.BatchID, Spec: spec,
 		}); err != nil {
 			return err
 		}
@@ -340,16 +331,7 @@ func (control *roomControl) handleTaskOfferBatch(ctx context.Context, encoded []
 }
 
 func (control *roomControl) handleCancel(ctx context.Context, encoded []byte) error {
-	var envelope orchestratorControlEnvelope
-	if err := msgpack.Unmarshal(encoded, &envelope); err != nil {
-		return err
-	}
-	if envelope.SchemaVersion != orchestratorControlSchema || envelope.Environment != control.config.Environment ||
-		strings.TrimSpace(envelope.Hotkey) != control.config.Hotkey || envelope.MessageType != "room_task_cancel" ||
-		envelope.Producer != "transfer-runtime" {
-		return errors.New("BeamCore room cancellation envelope is invalid")
-	}
-	payload, err := json.Marshal(envelope.Payload)
+	payload, err := decodeControlPayload(encoded, "room_task_cancel")
 	if err != nil {
 		return err
 	}
@@ -361,16 +343,7 @@ func (control *roomControl) handleCancel(ctx context.Context, encoded []byte) er
 }
 
 func (control *roomControl) handleOffer(ctx context.Context, encoded []byte) error {
-	var envelope orchestratorControlEnvelope
-	if err := msgpack.Unmarshal(encoded, &envelope); err != nil {
-		return err
-	}
-	if envelope.SchemaVersion != orchestratorControlSchema || envelope.Environment != control.config.Environment ||
-		strings.TrimSpace(envelope.Hotkey) != control.config.Hotkey || envelope.MessageType != "room_task_offer_batch" ||
-		envelope.Producer != "transfer-runtime" {
-		return errors.New("BeamCore room offer envelope is invalid")
-	}
-	payload, err := json.Marshal(envelope.Payload)
+	payload, err := decodeControlPayload(encoded, "room_task_offer_batch")
 	if err != nil {
 		return err
 	}
@@ -381,30 +354,26 @@ func (control *roomControl) handleOffer(ctx context.Context, encoded []byte) err
 	return control.rooms.Submit(ctx, batch)
 }
 
-func (control *roomControl) handleWorkerTransferCancel(ctx context.Context, encoded []byte) error {
-	var envelope orchestratorControlEnvelope
-	if err := msgpack.Unmarshal(encoded, &envelope); err != nil {
-		return err
-	}
-	if envelope.SchemaVersion != orchestratorControlSchema || envelope.Environment != control.config.Environment ||
-		strings.TrimSpace(envelope.Hotkey) != control.config.Hotkey || envelope.MessageType != "worker_transfer_cancel" || envelope.Producer != "transfer-runtime" {
-		return errors.New("invalid transfer cancellation authority")
-	}
-	encoded, err := json.Marshal(envelope.Payload)
+func (control *roomControl) handleTaskOfferBatchCancel(ctx context.Context, encoded []byte) error {
+	encoded, err := decodeControlPayload(encoded, "task_offer_batch_cancel")
 	if err != nil {
 		return err
 	}
 	var payload struct {
-		TransferID string `json:"transfer_id"`
-		Reason     string `json:"reason"`
+		BatchIDs []string `json:"batch_ids"`
 	}
 	if err := json.Unmarshal(encoded, &payload); err != nil {
 		return err
 	}
-	if strings.TrimSpace(payload.TransferID) == "" || control.tasks == nil {
-		return errors.New("invalid transfer cancellation")
+	if len(payload.BatchIDs) == 0 || control.tasks == nil {
+		return errors.New("invalid batch cancellation")
 	}
-	return control.tasks.CancelTransfer(ctx, payload.TransferID, payload.Reason)
+	for _, batchID := range payload.BatchIDs {
+		if strings.TrimSpace(batchID) == "" {
+			return errors.New("invalid batch cancellation")
+		}
+	}
+	return control.tasks.CancelBatches(ctx, payload.BatchIDs)
 }
 
 func (control *roomControl) submitResult(ctx context.Context, result contracts.RoomTaskResult) error {
@@ -412,26 +381,11 @@ func (control *roomControl) submitResult(ctx context.Context, result contracts.R
 }
 
 func (control *roomControl) submitTaskResult(ctx context.Context, record dispatch.Record, result domain.Result) error {
-	var transfer contracts.MultipartTransfer
-	if err := json.Unmarshal(record.Spec.Payload, &transfer); err != nil {
-		return err
-	}
-	if transfer.SourceGroupID != "" {
-		return control.submitSourceGroupResult(ctx, record, result, transfer)
-	}
-	evidence, err := resultEvidence(record, result)
+	payload, err := taskOfferResult(record, result)
 	if err != nil {
 		return err
 	}
-	return control.request(ctx, "task_result", map[string]any{
-		"worker_id":  record.WorkerID,
-		"task_id":    record.Spec.WorkloadID,
-		"offer_id":   record.Spec.AttemptID,
-		"success":    result.State == domain.StateCompleted || result.State == domain.StateReceiptCommitted,
-		"chunk_hash": evidence.chunkHash,
-		"etag":       evidence.etag,
-		"error":      result.ErrorMessage,
-	})
+	return control.request(ctx, "task_offer_result", payload)
 }
 
 func (control *roomControl) submitRoomWorkload(ctx context.Context, messageType string, encoded []byte) error {
@@ -555,19 +509,19 @@ func capabilityManifestFingerprint(manifest contracts.CapabilityManifest) string
 }
 
 func (control *roomControl) request(ctx context.Context, messageType string, payload any) error {
-	requestID := controlID()
 	jsonPayload, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	var normalizedPayload any
+	var normalizedPayload map[string]any
 	if err := json.Unmarshal(jsonPayload, &normalizedPayload); err != nil {
 		return err
 	}
-	envelope := orchestratorControlEnvelope{MessageID: controlID(), SchemaVersion: orchestratorControlSchema,
-		Environment: control.config.Environment, Hotkey: control.config.Hotkey, MessageType: messageType,
-		RequestID: requestID, OccurredAt: time.Now().UTC().Format(time.RFC3339Nano), Producer: "orchestrator", Payload: normalizedPayload}
-	encoded, err := msgpack.Marshal(envelope)
+	if normalizedPayload == nil {
+		normalizedPayload = map[string]any{}
+	}
+	normalizedPayload["type"] = messageType
+	encoded, err := msgpack.Marshal(normalizedPayload)
 	if err != nil {
 		return err
 	}
@@ -577,19 +531,22 @@ func (control *roomControl) request(ctx context.Context, messageType string, pay
 	if err != nil {
 		return err
 	}
-	var response orchestratorControlEnvelope
+	var response map[string]any
 	if err := msgpack.Unmarshal(message.Data, &response); err != nil {
 		return err
 	}
-	if response.RequestID != requestID || response.Producer != "transfer-runtime" || response.MessageType == "error" ||
-		response.MessageType == "register_error" {
-		return fmt.Errorf("BeamCore rejected %s", messageType)
+	if replyType, _ := response["type"].(string); replyType != controlReplyType(messageType) {
+		reason, _ := response["reason"].(string)
+		if reason == "" {
+			reason, _ = response["message"].(string)
+		}
+		return fmt.Errorf("BeamCore rejected %s with %v: %s", messageType, response["type"], fallback(reason, "no reason supplied"))
+	}
+	encodedPayload, err := json.Marshal(response)
+	if err != nil {
+		return err
 	}
 	if messageType == "capability_update" {
-		encodedPayload, err := json.Marshal(response.Payload)
-		if err != nil {
-			return err
-		}
 		var acknowledgement struct {
 			Accepted bool   `json:"accepted"`
 			Reason   string `json:"reason"`
@@ -601,21 +558,20 @@ func (control *roomControl) request(ctx context.Context, messageType string, pay
 			return fmt.Errorf("BeamCore rejected capability_update: %s", fallback(acknowledgement.Reason, "not accepted"))
 		}
 	}
-	if messageType == "room_task_result" || messageType == "task_result" {
-		encodedPayload, err := json.Marshal(response.Payload)
-		if err != nil {
+	if messageType == "task_offer_result" {
+		var acknowledgement taskOfferResultAcknowledgement
+		if err := json.Unmarshal(encodedPayload, &acknowledgement); err != nil {
 			return err
 		}
+		return taskOfferResultDisposition(acknowledgement)
+	}
+	if messageType == "room_task_result" {
 		var acknowledgement struct {
 			Received bool   `json:"received"`
-			Status   string `json:"status"`
 			Reason   string `json:"reason"`
 		}
 		if err := json.Unmarshal(encodedPayload, &acknowledgement); err != nil {
 			return err
-		}
-		if messageType == "task_result" {
-			return taskResultDisposition(taskResultAcknowledgement(acknowledgement))
 		}
 		if !acknowledgement.Received {
 			return fmt.Errorf("BeamCore rejected %s: %s", messageType, fallback(acknowledgement.Reason, "not received"))
@@ -624,13 +580,14 @@ func (control *roomControl) request(ctx context.Context, messageType string, pay
 	return nil
 }
 
+func controlReplyType(messageType string) string {
+	if messageType == "set_ready" {
+		return "ready_state"
+	}
+	return messageType + "_ack"
+}
+
 func (control *roomControl) subject(direction, messageType string) string {
 	return fmt.Sprintf("%s.%s.%s.%s.%s", strings.Trim(control.config.ControlPrefix, "."), control.config.Environment,
 		direction, strings.ToLower(control.config.Hotkey), messageType)
-}
-
-func controlID() string {
-	value := make([]byte, 16)
-	_, _ = rand.Read(value)
-	return hex.EncodeToString(value)
 }

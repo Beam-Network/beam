@@ -31,7 +31,7 @@ A Beam transfer moves data from a source to a destination by splitting it into c
 
     alt Worker completes assigned work
         Worker->>Storage: Upload chunk
-        Worker-->>Orchestrator: task_result
+        Worker-->>Orchestrator: task_offer_result
     else Task times out
         CoreServer->>Orchestrator: Reassign chunk
     end
@@ -96,7 +96,7 @@ The orchestrator assigns each task to an available worker over BeamLink/WCP:
 1. Download the source chunk
 2. Write it to the destination backend
 3. Compute a cryptographic hash of the transferred bytes
-4. Report the completed chunk with `task_result`
+4. Report the completed chunk with `task_offer_result`
 
 ### 4. Completion
 
@@ -111,7 +111,7 @@ Failed or missing verified task evidence can reduce the orchestrator's reliabili
 
 ## Signed URL Multipart (`signed_url_v1`)
 
-For client-supplied destination storage, Beam prepares task-scoped signed access for each chunk. A worker receives only the short-lived source and destination access needed for its assigned chunk, uploads the part, and reports the storage `ETag` in `task_result`.
+For client-supplied destination storage, Beam prepares task-scoped signed access for each chunk. A worker receives only the short-lived source and destination access needed for its assigned chunk, uploads the part, and reports the storage `ETag` in `task_offer_result`.
 
 BeamCore verifies the uploaded parts with object storage and completes the multipart object after all chunks are done. Workers do not receive bucket credentials or unrestricted access to the full source or destination object.
 
@@ -145,13 +145,13 @@ When an active task-offer batch has a **5 second** gap between valid task result
 
 Recovery follows the same orchestrator flow as initial delivery:
 
-1. Eligible orchestrators receive `worker_task_offer_batch` with executable task offers.
+1. Eligible orchestrators receive `task_offer_batch` with executable task offers.
 2. Each orchestrator selects connected local workers and forwards individual workload offers over BeamLink/WCP.
-3. Workers report success or failure with `task_result`; orchestrators relay each result immediately until BeamCore returns a terminal acknowledgement.
+3. Workers report success or failure with `task_offer_result`; orchestrators relay each result immediately until BeamCore returns a terminal acknowledgement.
 
 Qualifying transfers draw recovery candidates from the qualifying pool. Qualified transfers draw from the qualified pool.
 
-Orchestrators should keep the NATS control connection healthy and route `worker_task_offer_batch` messages promptly during recovery. Repeated stalls on the same orchestrator reduce its PRISM routing weight until reliability improves.
+Orchestrators should keep the NATS control connection healthy and route `task_offer_batch` messages promptly during recovery. Repeated stalls on the same orchestrator reduce its PRISM routing weight until reliability improves.
 
 ---
 

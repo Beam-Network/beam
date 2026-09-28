@@ -6,7 +6,7 @@ The public participant runtime includes Go orchestrators, Go workers, Room trans
 
 | Path | Command | Capabilities |
 | --- | --- | --- |
-| Go orchestrator | `./bin/beam-orchestrator serve` | Core NATS, WCP routing, `worker_task_offer_batch`, `room_task_offer_batch`, `capability_update` |
+| Go orchestrator | `./bin/beam-orchestrator serve` | Core NATS, WCP routing, `task_offer_batch`, `room_task_offer_batch`, `capability_update` |
 | Go worker | `./bin/beam-worker serve` | `transfer.multipart`, `room.transfer`, `room.transfer.direct.v1`, `room.transfer.e2ee.v2` |
 | Validator | `python actors/validator/main.py` | BeamCore PRISM weight setting |
 

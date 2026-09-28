@@ -17,7 +17,7 @@ type callbackSink struct {
 func callbackService(t *testing.T) (*Service, Record) {
 	t.Helper()
 	store := NewMemoryStore()
-	service := checkpointServiceForTest(time.Now().UTC(), store)
+	service := storeServiceForTest(time.Now().UTC(), store)
 	service.control = &cancelControl{}
 	spec := domain.Spec{WorkloadID: "workload", AttemptID: "attempt", Kind: domain.KindActionExecute}
 	record := Record{Source: SourceStudio, ExternalID: "event", WorkloadKey: spec.Key(),
@@ -34,12 +34,9 @@ func (s callbackSink) DeliverResult(ctx context.Context, record Record, _ domain
 func (s callbackSink) DeliverProgress(ctx context.Context, record Record, _ domain.Progress) error {
 	return s.call(ctx, record)
 }
-func (s callbackSink) DeliverCheckpoint(ctx context.Context, record Record, _ domain.Checkpoint) error {
-	return s.call(ctx, record)
-}
 
 func TestCallbacksPermitDispatchReplayAndPreserveCancellation(t *testing.T) {
-	for _, event := range []string{"progress", "checkpoint", "result"} {
+	for _, event := range []string{"progress", "result"} {
 		t.Run(event, func(t *testing.T) {
 			service, record := callbackService(t)
 			request := DispatchRequest{Source: SourceStudio, ExternalID: record.ExternalID, Spec: record.Spec}
@@ -57,10 +54,6 @@ func TestCallbacksPermitDispatchReplayAndPreserveCancellation(t *testing.T) {
 				switch event {
 				case "progress":
 					done <- service.HandleProgress(domain.Progress{WorkloadID: record.Spec.WorkloadID, AttemptID: record.Spec.AttemptID})
-				case "checkpoint":
-					done <- service.HandleCheckpoint(context.Background(), record.WorkerID, domain.Checkpoint{
-						WorkloadID: record.Spec.WorkloadID, AttemptID: record.Spec.AttemptID,
-						Kind: record.Spec.Kind, Sequence: 1, Schema: "coverage", Payload: []byte(`{}`)})
 				case "result":
 					done <- service.HandleResult(context.Background(), domain.Result{
 						WorkloadID: record.Spec.WorkloadID, AttemptID: record.Spec.AttemptID, State: domain.StateCompleted})
@@ -81,9 +74,6 @@ func TestCallbacksPermitDispatchReplayAndPreserveCancellation(t *testing.T) {
 				}
 			} else if current.State != StateCancelled {
 				t.Fatal("callback acknowledgement overwrote concurrent cancellation")
-			}
-			if event == "checkpoint" && current.UpstreamCheckpointSequence != 1 {
-				t.Fatal("checkpoint acknowledgement was lost")
 			}
 		})
 	}

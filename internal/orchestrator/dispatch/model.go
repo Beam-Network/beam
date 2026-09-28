@@ -37,22 +37,20 @@ const (
 )
 
 type Record struct {
-	Source                     Source             `json:"source"`
-	ExternalID                 string             `json:"external_id"`
-	WorkloadKey                string             `json:"workload_key"`
-	WorkerID                   string             `json:"worker_id,omitempty"`
-	State                      State              `json:"state"`
-	Spec                       domain.Spec        `json:"spec"`
-	Result                     *domain.Result     `json:"result,omitempty"`
-	Progress                   *domain.Progress   `json:"progress,omitempty"`
-	Checkpoint                 *domain.Checkpoint `json:"checkpoint,omitempty"`
-	UpstreamCheckpoint         *domain.Checkpoint `json:"upstream_checkpoint,omitempty"`
-	UpstreamCheckpointSequence uint64             `json:"upstream_checkpoint_sequence,omitempty"`
-	UpstreamDelivered          bool               `json:"upstream_delivered"`
-	UpstreamError              string             `json:"upstream_error,omitempty"`
-	CreatedAt                  time.Time          `json:"created_at"`
-	UpdatedAt                  time.Time          `json:"updated_at"`
-	AssignmentExpiresAt        time.Time          `json:"assignment_expires_at,omitempty"`
+	Source              Source           `json:"source"`
+	ExternalID          string           `json:"external_id"`
+	WorkloadKey         string           `json:"workload_key"`
+	WorkerID            string           `json:"worker_id,omitempty"`
+	State               State            `json:"state"`
+	Spec                domain.Spec      `json:"spec"`
+	Result              *domain.Result   `json:"result,omitempty"`
+	Progress            *domain.Progress `json:"progress,omitempty"`
+	UpstreamDelivered   bool             `json:"upstream_delivered"`
+	UpstreamError       string           `json:"upstream_error,omitempty"`
+	BatchID             string           `json:"batch_id,omitempty"`
+	CreatedAt           time.Time        `json:"created_at"`
+	UpdatedAt           time.Time        `json:"updated_at"`
+	AssignmentExpiresAt time.Time        `json:"assignment_expires_at,omitempty"`
 }
 
 func (r Record) Validate() error {
@@ -84,6 +82,7 @@ type Event struct {
 type DispatchRequest struct {
 	Source       Source
 	ExternalID   string
+	BatchID      string
 	Spec         domain.Spec
 	WorkerID     string
 	NodeID       string

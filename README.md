@@ -64,7 +64,7 @@ provenance commands.
 
 ## Run
 
-- [Orchestrator guide](docs/orchestrator.md): run a miner that receives `worker_task_offer_batch` and `room_task_offer_batch`.
+- [Orchestrator guide](docs/orchestrator.md): run a miner that receives `task_offer_batch` and `room_task_offer_batch`.
 - [Worker guide](docs/worker.md): run a worker that advertises and executes `transfer.multipart` and direct E2EE `room.transfer` workloads.
 - [Validator guide](docs/validator.md): run a validator that sets weights from BeamCore epoch summaries.
 

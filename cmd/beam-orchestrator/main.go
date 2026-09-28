@@ -26,7 +26,6 @@ import (
 	orchestratorserver "github.com/Beam-Network/beam/internal/orchestrator/server"
 	platformbittensor "github.com/Beam-Network/beam/internal/platform/bittensor"
 	versioninfo "github.com/Beam-Network/beam/internal/version"
-	"github.com/Beam-Network/beam/internal/workload/contracts"
 )
 
 var version = versioninfo.Version
@@ -67,7 +66,7 @@ func serve(arguments []string) {
 	ensureStreams := flags.Bool("nats-ensure-streams", false, "create missing JetStream task streams (development only)")
 	beamCoreNATS := natsFlags(flags, "beamcore", "BEAMCORE", "", "", "", "")
 	flags.StringVar(&beamCoreNATS.Environment, "beamcore-environment", envOrDefault("BEAM_ENV", "prod"), "BeamCore control environment")
-	flags.StringVar(&beamCoreNATS.ControlPrefix, "beamcore-control-prefix", envOrDefault("BEAMCORE_CONTROL_PREFIX", "beam.orch.control"), "BeamCore orchestrator control subject prefix")
+	flags.StringVar(&beamCoreNATS.ControlPrefix, "beamcore-control-prefix", envOrDefault("BEAMCORE_CONTROL_PREFIX", connectors.DefaultControlPrefix), "BeamCore orchestrator control subject prefix")
 	flags.StringVar(&beamCoreNATS.GatewayURL, "beamcore-gateway-url", os.Getenv("BEAMCORE_GATEWAY_URL"), "public orchestrator URL registered with BeamCore")
 	flags.StringVar(&beamCoreNATS.PublicAPIURL, "beamcore-public-api-url", os.Getenv("BEAM_PUBLIC_API_URL"), "BeamCore Public API URL used to classify duplicate control-session denials")
 	beamCoreNATS.SoftwareVersion = version
@@ -232,11 +231,6 @@ func serve(arguments []string) {
 		}()
 		go func() {
 			for event := range wcpServer.Checkpoints() {
-				if tasks != nil && event.Checkpoint.Schema == contracts.SourceGroupCheckpointSchema {
-					if err := tasks.HandleCheckpoint(ctx, event.WorkerID, event.Checkpoint); err != nil {
-						log.Printf("persist/deliver transfer checkpoint: %v", err)
-					}
-				}
 				if rooms != nil {
 					if err := rooms.DeliverCheckpoint(ctx, event.Checkpoint); err != nil {
 						log.Printf("persist/deliver room transfer checkpoint: %v", err)

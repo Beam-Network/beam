@@ -44,24 +44,20 @@ func (connection *fakeRoomControlConnection) flushWithContext(ctx context.Contex
 }
 
 func (connection *fakeRoomControlConnection) requestWithContext(_ context.Context, _ string, payload []byte) (*nats.Msg, error) {
-	var request orchestratorControlEnvelope
+	var request map[string]any
 	if err := msgpack.Unmarshal(payload, &request); err != nil {
 		return nil, err
 	}
-	responsePayload := map[string]any{}
-	if request.MessageType == "capability_update" {
-		responsePayload["accepted"] = true
+	messageType, _ := request["type"].(string)
+	response := map[string]any{"type": controlReplyType(messageType)}
+	if messageType == "capability_update" {
+		response["accepted"] = true
 	}
-	response, err := msgpack.Marshal(orchestratorControlEnvelope{
-		RequestID:   request.RequestID,
-		Producer:    "transfer-runtime",
-		MessageType: request.MessageType + "_ack",
-		Payload:     responsePayload,
-	})
+	encoded, err := msgpack.Marshal(response)
 	if err != nil {
 		return nil, err
 	}
-	return &nats.Msg{Data: response}, nil
+	return &nats.Msg{Data: encoded}, nil
 }
 
 type fakeControlWCP struct{}

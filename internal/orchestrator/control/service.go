@@ -81,7 +81,7 @@ func (s *Service) Accept(hello WorkerHello) (OrchestratorWelcome, error) {
 	if exists && observation.PlanVersion > currentPlanVersion {
 		currentPlanVersion = observation.PlanVersion
 	}
-	if _, err := workerCapabilities(hello.Identity, hello.CapabilityManifest, hello.Capabilities); err != nil {
+	if _, err := workerCapabilities(hello.Identity, hello.CapabilityManifest); err != nil {
 		return OrchestratorWelcome{}, err
 	}
 	sessionBytes := make([]byte, 16)
@@ -96,9 +96,9 @@ func (s *Service) Accept(hello WorkerHello) (OrchestratorWelcome, error) {
 }
 
 func (s *Service) Heartbeat(identity workload.Identity, status, region, circuitEndpoint string,
-	capabilities []string, capabilityManifest *contracts.CapabilityManifest,
+	_ []string, capabilityManifest *contracts.CapabilityManifest,
 	total, available workload.Resources, planVersion uint64) error {
-	canonicalCapabilities, err := workerCapabilities(identity, capabilityManifest, capabilities)
+	canonicalCapabilities, err := workerCapabilities(identity, capabilityManifest)
 	if err != nil {
 		return err
 	}
@@ -109,13 +109,8 @@ func (s *Service) Heartbeat(identity workload.Identity, status, region, circuitE
 	}, s.now())
 }
 
-func workerCapabilities(identity workload.Identity, manifest *contracts.CapabilityManifest, legacy []string) ([]string, error) {
+func workerCapabilities(identity workload.Identity, manifest *contracts.CapabilityManifest) ([]string, error) {
 	if manifest == nil {
-		for _, capability := range contracts.NormalizeCapabilities(legacy) {
-			if capability == contracts.TransferMultipartCapability {
-				return []string{contracts.TransferMultipartCapability}, nil
-			}
-		}
 		return nil, nil
 	}
 	if manifest.SchemaVersion != contracts.RoomTransferSchemaVersion || manifest.ActorType != "worker" ||
