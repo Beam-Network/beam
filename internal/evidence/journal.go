@@ -24,6 +24,9 @@ type JournalRecord struct {
 type Journal interface {
 	Put(Receipt) (bool, error)
 	Acknowledge(string, time.Time) error
+	// AcknowledgeMany marks known receipts acknowledged with one durable write
+	// and ignores receipt ids the journal no longer holds.
+	AcknowledgeMany(map[string]time.Time) error
 	Get(string) (JournalRecord, error)
 	Pending() []Receipt
 	Records() []JournalRecord
@@ -64,6 +67,19 @@ func (j *memoryJournal) Acknowledge(receiptID string, at time.Time) error {
 	if record.AcknowledgedAt.IsZero() {
 		record.AcknowledgedAt = at.UTC()
 		j.records[receiptID] = record
+	}
+	return nil
+}
+
+func (j *memoryJournal) AcknowledgeMany(acknowledgements map[string]time.Time) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	for receiptID, at := range acknowledgements {
+		record, ok := j.records[receiptID]
+		if ok && record.AcknowledgedAt.IsZero() {
+			record.AcknowledgedAt = at.UTC()
+			j.records[receiptID] = record
+		}
 	}
 	return nil
 }
@@ -182,6 +198,33 @@ func (j *FileJournal) Acknowledge(receiptID string, at time.Time) error {
 	if err := j.persistLocked(); err != nil {
 		record.AcknowledgedAt = time.Time{}
 		j.records[receiptID] = record
+		return err
+	}
+	return nil
+}
+
+func (j *FileJournal) AcknowledgeMany(acknowledgements map[string]time.Time) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	previous := make(map[string]JournalRecord, len(acknowledgements))
+	for receiptID, at := range acknowledgements {
+		record, ok := j.records[receiptID]
+		if !ok || !record.AcknowledgedAt.IsZero() {
+			continue
+		}
+		previous[receiptID] = record
+		record.AcknowledgedAt = at.UTC()
+		j.records[receiptID] = record
+	}
+	if len(previous) == 0 {
+		return nil
+	}
+	if err := j.persistLocked(); err != nil {
+		for receiptID, record := range previous {
+			if _, ok := j.records[receiptID]; ok {
+				j.records[receiptID] = record
+			}
+		}
 		return err
 	}
 	return nil
