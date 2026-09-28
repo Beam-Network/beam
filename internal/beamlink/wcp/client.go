@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"sync/atomic"
 	"time"
@@ -81,6 +82,9 @@ func (c *Client) Run(ctx context.Context) error {
 		err := c.runSession(ctx)
 		if ctx.Err() != nil {
 			return nil
+		}
+		if err != nil {
+			log.Printf("WCP session ended worker_id=%s address=%s retry_in=%s: %v", c.config.Identity.WorkerID, c.config.Address, backoff, err)
 		}
 		if err == nil {
 			backoff = c.config.ReconnectMinimum
@@ -344,7 +348,9 @@ func (c *Client) readLoop(ctx context.Context, framed *framedConn, initialSequen
 				}
 			}
 		case TypeError:
-			continue
+			message, _ := decodePayload[ErrorMessage](envelope)
+			log.Printf("Orchestrator rejected WCP message worker_id=%s reply_to=%s code=%s: %s",
+				c.config.Identity.WorkerID, envelope.ReplyTo, message.Code, message.Message)
 		default:
 			return fmt.Errorf("unsupported Orchestrator message type %q", envelope.Type)
 		}
