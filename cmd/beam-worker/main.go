@@ -93,6 +93,8 @@ func serve(arguments []string) {
 	roomTransferAdvertiseURL := flags.String("room-transfer-advertise-url", os.Getenv("BEAM_ROOM_TRANSFER_ADVERTISE_URL"), "public base URL reaching the Worker room-transfer listener")
 	roomStorageAddr := flags.String("room-storage-addr", os.Getenv("BEAM_ROOM_STORAGE_LISTEN_ADDR"), "TLS listen address for worker-executed hybrid room transfers")
 	roomStorageAdvertiseURL := flags.String("room-storage-advertise-url", os.Getenv("BEAM_ROOM_STORAGE_ADVERTISE_URL"), "HTTPS URL reaching the hybrid room listener")
+	roomMessageAddr := flags.String("room-message-addr", os.Getenv("BEAM_ROOM_MESSAGE_LISTEN_ADDR"), "TLS listen address for Worker-hosted encrypted room messages")
+	roomMessageAdvertiseURL := flags.String("room-message-advertise-url", os.Getenv("BEAM_ROOM_MESSAGE_ADVERTISE_URL"), "HTTPS URL reaching the encrypted room-message listener")
 	mediaPublicIP := flags.String("media-public-ip", os.Getenv("BEAM_MEDIA_PUBLIC_IP"), "public IP announced in worker WebRTC ICE candidates")
 	mediaUDPPortMin := flags.Uint("media-udp-port-min", uint(envIntOrDefault("BEAM_MEDIA_UDP_PORT_MIN", 0)), "minimum worker WebRTC UDP port")
 	mediaUDPPortMax := flags.Uint("media-udp-port-max", uint(envIntOrDefault("BEAM_MEDIA_UDP_PORT_MAX", 0)), "maximum worker WebRTC UDP port")
@@ -205,12 +207,19 @@ func serve(arguments []string) {
 	if contains(capabilities, "tunnel.tcp") {
 		registerHandler(tunnelhandler.NewTCPHandler(tunnelhandler.Config{AllowPublicListeners: *allowPublicNetwork}))
 	}
+	if err := validateRoomMediaStartup(capabilities, *mediaAdvertiseURL); err != nil {
+		log.Fatal(err)
+	}
 	if contains(capabilities, contracts.RoomMediaWebRTCCapability) {
 		mediaHandler := roommediahandler.NewHandler(roommediahandler.Config{ListenAddress: *mediaAddr,
 			AdvertiseURL: *mediaAdvertiseURL, PublicIP: *mediaPublicIP, UDPPortMin: uint16(*mediaUDPPortMin),
 			UDPPortMax: uint16(*mediaUDPPortMax), ICEServers: splitList(*mediaICEServers), TURNSecret: *mediaTURNSecret,
 			TURNCredentialTTL: *mediaTURNCredentialTTL, TURNUsernamePrefix: *mediaTURNUsernamePrefix,
 			MaxViewers: *mediaMaxViewers, PublisherReconnectGrace: *mediaPublisherReconnectGrace})
+		if err := mediaHandler.PrepareListener(); err != nil {
+			log.Fatal(err)
+		}
+		defer mediaHandler.Close()
 		// WebRTC sessions share one signaling listener and are multiplexed by
 		// session ID. Keep this stateful handler in the Worker process even when
 		// other workload kinds use subprocess isolation.
@@ -223,7 +232,21 @@ func serve(arguments []string) {
 	if contains(capabilities, "room.datagram") {
 		registerHandler(roomworkloadhandlers.NewDatagramHandler(nil))
 	}
-	if contains(capabilities, "room.message") {
+	directRoomMessage := contains(capabilities, contracts.RoomMessageDirectCapability)
+	if directRoomMessage && (!contains(capabilities, "room.message") || *roomMessageAddr == "" || *roomMessageAdvertiseURL == "") {
+		log.Fatal("room.message.direct.v1 requires room.message, room-message-addr, and room-message-advertise-url")
+	}
+	if directRoomMessage {
+		messageHandler := roomworkloadhandlers.NewDirectMessageHandler(roomworkloadhandlers.DirectMessageConfig{
+			ListenAddress: *roomMessageAddr, AdvertiseURL: *roomMessageAdvertiseURL})
+		if err := messageHandler.PrepareListener(); err != nil {
+			log.Fatal(err)
+		}
+		defer messageHandler.Close()
+		if registerErr := registry.Register(messageHandler); registerErr != nil {
+			log.Fatal(registerErr)
+		}
+	} else if contains(capabilities, "room.message") {
 		registerHandler(roomworkloadhandlers.NewMessageHandler(nil))
 	}
 	if contains(capabilities, "room.command") {
@@ -422,6 +445,21 @@ func envDurationOrDefault(name string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return parsed
+}
+
+// validateRoomMediaStartup fails worker-hosted WebRTC media closed unless it
+// is paired with room.media and a pinned HTTPS advertise URL.
+func validateRoomMediaStartup(capabilities []string, advertiseURL string) error {
+	if !contains(capabilities, contracts.RoomMediaWebRTCCapability) {
+		return nil
+	}
+	if !contains(capabilities, "room.media") {
+		return errors.New("room.media.webrtc.v1 requires room.media")
+	}
+	if err := roommediahandler.ValidateAdvertiseURL(advertiseURL); err != nil {
+		return fmt.Errorf("room.media.webrtc.v1 requires media-advertise-url: %w", err)
+	}
+	return nil
 }
 
 func validateAdvertisedEndpoint(endpoint string) error {

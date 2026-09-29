@@ -211,6 +211,17 @@ func (s *BeamCoreConnector) SubmitRoomWorkloadProgress(ctx context.Context, valu
 	return s.roomControl.submitRoomWorkload(ctx, "room_workload_progress", payload)
 }
 
+func (s *BeamCoreConnector) SubmitRoomMessageRuntime(ctx context.Context, value contracts.RoomMessageRuntimeWire) error {
+	if s.roomControl == nil || !s.roomControl.enabled() {
+		return errors.New("BeamCore room workload control is not configured")
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return s.roomControl.submitRoomWorkload(ctx, contracts.RoomWorkloadRuntimeType, encoded)
+}
+
 func encodeRoomWorkloadProgress(value contracts.RoomGenericProgress) ([]byte, error) {
 	if !validRoomWireIdentity(value.Identity) || value.At.IsZero() || !json.Valid(value.Details) {
 		return nil, errors.New("room workload progress timestamp or typed details are invalid")

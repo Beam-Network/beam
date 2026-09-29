@@ -100,6 +100,14 @@ For current Room transfers, the orchestrator advertises eligibility only when
 connected workers also expose `room.transfer.direct.v1` and
 `room.transfer.e2ee.v2`.
 
+Room workloads (`room.datagram`, `room.message`, `room.command`, `room.stream`,
+`room.media`) require the room tunnel coordinator. The orchestrator advertises
+each room capability only while a connected worker can take it. Versioned
+endpoint capabilities come in worker pairs: `room.media` +
+`room.media.webrtc.v1`, `room.message` + `room.message.direct.v1`, and
+`room.transfer` + `room.transfer.storage.v2`. Configure those workers as
+described in [Room Endpoint Capabilities](worker.md#room-endpoint-capabilities).
+
 ## NATS Connectivity and Build Provenance
 
 The canonical Go runtime uses `github.com/nats-io/nats.go` and NATS protocol 1.

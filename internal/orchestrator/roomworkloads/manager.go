@@ -23,6 +23,7 @@ type Provisioner interface {
 
 type Sink interface {
 	SubmitRoomWorkloadProgress(context.Context, contracts.RoomGenericProgress) error
+	SubmitRoomMessageRuntime(context.Context, contracts.RoomMessageRuntimeWire) error
 	SubmitRoomWorkloadResult(context.Context, contracts.RoomGenericResult) error
 	SubmitRoomWorkloadStatus(context.Context, json.RawMessage) error
 	SubmitRoomWorkloadProvisioningResult(context.Context, contracts.RoomWorkloadProvisioningResultWire) error
@@ -223,7 +224,7 @@ func (m *Manager) submitOffer(ctx context.Context, kind domain.Kind, encoded []b
 		if err := decodeCanonical(encoded, &value); err != nil {
 			return err
 		}
-		if err := value.Validate(m.now()); err != nil {
+		if err := value.Validate(m.now(), false); err != nil {
 			return err
 		}
 		return submitOfferedTyped(ctx, m, m.datagram, fromOffer(value))
@@ -232,7 +233,7 @@ func (m *Manager) submitOffer(ctx context.Context, kind domain.Kind, encoded []b
 		if err := decodeCanonical(encoded, &value); err != nil {
 			return err
 		}
-		if err := value.Validate(m.now()); err != nil {
+		if err := value.Validate(m.now(), false); err != nil {
 			return err
 		}
 		return submitOfferedTyped(ctx, m, m.message, fromOffer(value))
@@ -241,7 +242,7 @@ func (m *Manager) submitOffer(ctx context.Context, kind domain.Kind, encoded []b
 		if err := decodeCanonical(encoded, &value); err != nil {
 			return err
 		}
-		if err := value.Validate(m.now()); err != nil {
+		if err := value.Validate(m.now(), false); err != nil {
 			return err
 		}
 		return submitOfferedTyped(ctx, m, m.command, fromOffer(value))
@@ -250,7 +251,7 @@ func (m *Manager) submitOffer(ctx context.Context, kind domain.Kind, encoded []b
 		if err := decodeCanonical(encoded, &value); err != nil {
 			return err
 		}
-		if err := value.Validate(m.now()); err != nil {
+		if err := value.Validate(m.now(), false); err != nil {
 			return err
 		}
 		return submitOfferedTyped(ctx, m, m.stream, fromOffer(value))
@@ -259,7 +260,7 @@ func (m *Manager) submitOffer(ctx context.Context, kind domain.Kind, encoded []b
 		if err := decodeCanonical(encoded, &value); err != nil {
 			return err
 		}
-		if err := value.Validate(m.now()); err != nil {
+		if err := value.Validate(m.now(), lateJoinMedia(value.Details.Profile)); err != nil {
 			return err
 		}
 		return submitOfferedTyped(ctx, m, m.media, fromOffer(value))
@@ -275,7 +276,7 @@ func (m *Manager) submitDefinition(ctx context.Context, kind domain.Kind, encode
 		if err := decodeCanonical(encoded, &value); err != nil {
 			return err
 		}
-		if err := value.Validate(m.now()); err != nil {
+		if err := value.Validate(m.now(), false); err != nil {
 			return err
 		}
 		details := contracts.DatagramUnitDetails{TTLMS: value.Details.TTLMS, MaxPacketBytes: value.Details.MaxPacketBytes}
@@ -285,7 +286,7 @@ func (m *Manager) submitDefinition(ctx context.Context, kind domain.Kind, encode
 		if err := decodeCanonical(encoded, &value); err != nil {
 			return err
 		}
-		if err := value.Validate(m.now()); err != nil {
+		if err := value.Validate(m.now(), false); err != nil {
 			return err
 		}
 		details := contracts.MessageUnitDetails{MessageID: value.Details.MessageID, ContentType: value.Details.ContentType,
@@ -296,7 +297,7 @@ func (m *Manager) submitDefinition(ctx context.Context, kind domain.Kind, encode
 		if err := decodeCanonical(encoded, &value); err != nil {
 			return err
 		}
-		if err := value.Validate(m.now()); err != nil {
+		if err := value.Validate(m.now(), false); err != nil {
 			return err
 		}
 		details := contracts.CommandUnitDetails{CommandID: value.Details.CommandID, Command: value.Details.Command,
@@ -307,7 +308,7 @@ func (m *Manager) submitDefinition(ctx context.Context, kind domain.Kind, encode
 		if err := decodeCanonical(encoded, &value); err != nil {
 			return err
 		}
-		if err := value.Validate(m.now()); err != nil {
+		if err := value.Validate(m.now(), false); err != nil {
 			return err
 		}
 		if value.Details.HeartbeatTimeoutMS <= 0 || value.Details.HeartbeatTimeoutMS > 300_000 {
@@ -321,7 +322,7 @@ func (m *Manager) submitDefinition(ctx context.Context, kind domain.Kind, encode
 		if err := decodeCanonical(encoded, &value); err != nil {
 			return err
 		}
-		if err := value.Validate(m.now()); err != nil {
+		if err := value.Validate(m.now(), lateJoinMedia(value.Details.Profile)); err != nil {
 			return err
 		}
 		if value.Details.HeartbeatTimeoutMS <= 0 || value.Details.HeartbeatTimeoutMS > 300_000 {
@@ -356,6 +357,12 @@ func submitTypedWithID[T, R any](ctx context.Context, manager *Manager, target *
 func offerDefinitionID(identity contracts.RoomWorkloadIdentity) string {
 	workloadID, attemptID := workloadIdentity(identity)
 	return "room-offer-" + workloadID + "-" + attemptID
+}
+
+// lateJoinMedia admits worker-hosted WebRTC media without targets; viewers join
+// the running session later. Other kinds and the legacy profile need a target.
+func lateJoinMedia(profile string) bool {
+	return profile == contracts.RoomMediaWebRTCWorkerProfile
 }
 
 func (m *Manager) Cancel(ctx context.Context, cancel contracts.RoomWorkloadCancelWire) error {

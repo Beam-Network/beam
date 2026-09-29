@@ -196,7 +196,7 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 		if shared.certificates == nil {
 			return domain.Result{}, errors.New("hybrid room assignment requires TLS")
 		}
-		fingerprint, err := shared.certificates.forLease(expiresAt)
+		fingerprint, err := shared.certificates.ForLease(expiresAt)
 		if err != nil {
 			return domain.Result{}, err
 		}

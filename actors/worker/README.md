@@ -68,8 +68,13 @@ export BEAM_WCP_SERVER_NAME=orchestrator.example.com
 
 ./bin/beam-worker serve \
   --node-key data/worker/node.key \
-  --capabilities transfer.multipart,room.transfer
+  --capabilities transfer.multipart,transfer.multipart.fanout.v1,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v2 \
+  --room-transfer-addr 0.0.0.0:9470 \
+  --room-transfer-advertise-url https://worker.example.com:9470
 ```
+
+Room media and direct room messages need their own HTTPS listeners; see
+[Room Endpoint Capabilities](../../docs/worker.md#room-endpoint-capabilities).
 
 ## More Detail
 

@@ -218,17 +218,12 @@ func serve(arguments []string) {
 				log.Printf("Worker result worker_id=%s workload_id=%s state=%s", event.WorkerID, event.Result.WorkloadID, event.Result.State)
 			}
 		}()
-		go func() {
-			for event := range wcpServer.Progress() {
-				if tasks != nil {
-					if err := tasks.HandleProgressContext(ctx, event.Progress); err != nil {
-						log.Printf("persist Worker progress: %v", err)
-					}
-				}
-				log.Printf("Worker progress worker_id=%s workload_id=%s state=%s", event.WorkerID,
-					event.Progress.WorkloadID, event.Progress.State)
+		go consumeWorkerProgress(ctx, wcpServer.Progress(), func(ctx context.Context, event wcp.ProgressEvent) error {
+			if tasks == nil {
+				return nil
 			}
-		}()
+			return tasks.HandleProgressContext(ctx, event.Progress)
+		})
 		go func() {
 			for event := range wcpServer.Checkpoints() {
 				if rooms != nil {

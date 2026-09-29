@@ -2,6 +2,7 @@ package roomworkloads
 
 import (
 	"errors"
+	"time"
 
 	"github.com/Beam-Network/beam/internal/orchestrator/dispatch"
 	"github.com/Beam-Network/beam/internal/workload/contracts"
@@ -48,7 +49,8 @@ func newMessageStrategy() MessageStrategy {
 			return nil
 		},
 		progressDetails: decodeProgress[contracts.MessageProgressDetails], resultDetails: decodeResult[contracts.MessageProgressDetails],
-		payload: workerPayload[contracts.MessageUnitDetails, contracts.MessageProgressDetails],
+		payload:           workerPayload[contracts.MessageUnitDetails, contracts.MessageProgressDetails],
+		extraCapabilities: []string{contracts.RoomMessageDirectCapability},
 	}}
 }
 
@@ -111,5 +113,26 @@ func newMediaStrategy() MediaStrategy {
 			return nil
 		},
 		progressDetails: mediaProgress, resultDetails: mediaResult, payload: mediaPayload,
+		allowNoTargets: func(value contracts.MediaUnitDetails) bool { return lateJoinMedia(value.Profile) },
 	}}
+}
+
+// ValidateDefinition adds worker-hosted WebRTC admission, which needs the
+// identity, targets, and capacity alongside the media details.
+func (s MediaStrategy) ValidateDefinition(value genericDefinition[contracts.MediaUnitDetails], now time.Time) error {
+	if err := s.strategyBase.ValidateDefinition(value, now); err != nil {
+		return err
+	}
+	definition := value.Workload
+	if definition.Details.Profile != contracts.RoomMediaWebRTCWorkerProfile {
+		return nil
+	}
+	if definition.RequiredCapacity != (contracts.RoomCapacityRequirement{Capability: contracts.RoomMediaWebRTCCapability, Units: 1}) {
+		return errors.New("room.media WebRTC requires one room.media.webrtc.v1 capacity unit")
+	}
+	targets := make([]string, 0, len(definition.Targets))
+	for _, target := range definition.Targets {
+		targets = append(targets, target.MemberID)
+	}
+	return contracts.ValidateWebRTCMediaAdmission(definition.Identity, targets, definition.Details, now)
 }

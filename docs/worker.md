@@ -1,6 +1,7 @@
 # BEAM Worker Guide
 
-Run a Go worker on BEAM mainnet for `transfer.multipart` and room transfer workloads.
+Run a Go worker on BEAM mainnet for `transfer.multipart`, room transfer, and
+worker-hosted room workloads.
 
 ## Requirements
 
@@ -74,7 +75,7 @@ export BEAM_WCP_SERVER_NAME=orchestrator.example.com
 
 ./bin/beam-worker serve \
   --node-key data/worker/node.key \
-  --capabilities transfer.multipart,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v2 \
+  --capabilities transfer.multipart,transfer.multipart.fanout.v1,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v2 \
   --room-transfer-addr 0.0.0.0:9470 \
   --room-transfer-advertise-url https://worker.example.com:9470
 ```
@@ -102,6 +103,29 @@ outbound clients. See [hybrid room execution](room-storage-hybrid.md) for
 listener requirements and transport security.
 
 Add `BEAM_ORCHESTRATOR_DELEGATION=<base64url-value>` when the membership response includes a delegation.
+
+## Room Endpoint Capabilities
+
+Enable each versioned room endpoint together with its base capability. Startup
+fails closed when a pair is incomplete or its HTTPS advertise URL is missing:
+
+| Capabilities | Flags (environment) |
+| --- | --- |
+| `room.media` + `room.media.webrtc.v1` | `--media-addr` (`BEAM_MEDIA_LISTEN_ADDR`), `--media-advertise-url` (`BEAM_MEDIA_ADVERTISE_URL`), `--media-public-ip` (`BEAM_MEDIA_PUBLIC_IP`), `--media-udp-port-min` / `--media-udp-port-max` (`BEAM_MEDIA_UDP_PORT_MIN` / `BEAM_MEDIA_UDP_PORT_MAX`) |
+| `room.message` + `room.message.direct.v1` | `--room-message-addr` (`BEAM_ROOM_MESSAGE_LISTEN_ADDR`), `--room-message-advertise-url` (`BEAM_ROOM_MESSAGE_ADVERTISE_URL`) |
+| `room.transfer` + `room.transfer.storage.v2` | `--room-storage-addr` (`BEAM_ROOM_STORAGE_LISTEN_ADDR`), `--room-storage-advertise-url` (`BEAM_ROOM_STORAGE_ADVERTISE_URL`) |
+
+Room messages are placed only on workers that enable `room.message.direct.v1`.
+
+Advertise URLs use `https://` without credentials, query, or fragment; `{port}`
+expands to the bound listener port. These listeners serve short-lived
+self-signed TLS certificates that agents pin by fingerprint, so each port must
+reach the worker directly through TCP passthrough; a TLS-terminating proxy or
+load balancer breaks the pin. Open the media UDP port range to clients and set
+the media public IP to the address they reach. For clients behind restrictive
+networks, optionally list STUN/TURN URLs in `--media-ice-servers`
+(`BEAM_MEDIA_ICE_SERVERS`) and set `--media-turn-secret`
+(`BEAM_MEDIA_TURN_SECRET`) to issue temporary TURN credentials.
 
 ## Health
 

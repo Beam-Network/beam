@@ -89,8 +89,8 @@ type messageBranch struct {
 	target contracts.RoomWorkerTarget
 }
 type messageRecord struct {
-	MessageID string `json:"message_id"`
-	Payload   []byte `json:"payload"`
+	MessageID  string `json:"message_id"`
+	Ciphertext []byte `json:"ciphertext"`
 }
 type messageDriver struct {
 	handler *Handler
@@ -125,15 +125,8 @@ func (h *Handler) executeMessage(ctx context.Context, spec domain.Spec) (domain.
 		return domain.Result{}, errors.New("room.message source returned invalid JSON")
 	}
 	var record messageRecord
-	if json.Unmarshal(payload, &record) != nil || record.MessageID == "" {
-		// Preserve the original worker source contract while normalizing every
-		// target delivery to the typed agent adapter contract.
-		if int64(len(payload)) != assignment.Details.SizeBytes {
-			return domain.Result{}, errors.New("room.message source returned an invalid record")
-		}
-		record = messageRecord{MessageID: assignment.Details.MessageID, Payload: payload}
-		payload, _ = json.Marshal(record)
-	} else if record.MessageID != assignment.Details.MessageID || int64(len(record.Payload)) != assignment.Details.SizeBytes {
+	if json.Unmarshal(payload, &record) != nil || record.MessageID != assignment.Details.MessageID ||
+		int64(len(record.Ciphertext)) != assignment.Details.SizeBytes {
 		return domain.Result{}, errors.New("room.message source returned an invalid record")
 	}
 	branches := make([]messageBranch, 0, len(assignment.Targets))

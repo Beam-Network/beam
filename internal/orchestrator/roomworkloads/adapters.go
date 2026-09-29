@@ -57,6 +57,34 @@ func (s progressSink[T, R]) DeliverRoomWorkloadProgress(ctx context.Context, val
 	if sink == nil {
 		return nil
 	}
+	if value.Identity.Kind == domain.KindRoomMessage {
+		var details contracts.MessageProgressDetails
+		if err := json.Unmarshal(value.Details, &details); err != nil {
+			return err
+		}
+		if details.Runtime != nil {
+			if err := details.Runtime.Validate(value.Identity, s.manager.now().UTC()); err != nil {
+				return err
+			}
+			announcement := contracts.RoomMessageRuntimeWire{Type: contracts.RoomWorkloadRuntimeType,
+				SchemaVersion: contracts.RoomWorkloadSchema, Kind: value.Identity.Kind,
+				WorkloadID: value.Identity.WorkloadID, UnitID: value.Identity.UnitID, Epoch: value.Identity.Epoch,
+				Attempt: value.Identity.Attempt, WorkerID: value.Identity.WorkerID,
+				Runtime: *details.Runtime, ReportedAt: value.At.UTC()}
+			if err := sink.SubmitRoomMessageRuntime(ctx, announcement); err != nil {
+				return err
+			}
+			details.Runtime = nil
+			if len(details.Deliveries) == 0 {
+				return nil
+			}
+			encoded, err := json.Marshal(details)
+			if err != nil {
+				return err
+			}
+			value.Details = encoded
+		}
+	}
 	return sink.SubmitRoomWorkloadProgress(ctx, value)
 }
 

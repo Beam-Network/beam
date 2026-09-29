@@ -26,7 +26,7 @@ func TestWorkerTLSBindsAssignedCertificateAndRotatesWithoutBreakingActivePins(t 
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("scoped bytes")) })}
 	go func() { _ = server.Serve(secure) }()
 	t.Cleanup(func() { _ = server.Close() })
-	pin, err := certificates.forLease(clock().Add(time.Hour))
+	pin, err := certificates.ForLease(clock().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestWorkerTLSBindsAssignedCertificateAndRotatesWithoutBreakingActivePins(t 
 	mu.Lock()
 	now = now.Add(47 * time.Hour)
 	mu.Unlock()
-	newPin, err := certificates.forLease(clock().Add(3 * time.Hour))
+	newPin, err := certificates.ForLease(clock().Add(3 * time.Hour))
 	if err != nil || newPin == pin {
 		t.Fatalf("certificate did not rotate: %v", err)
 	}

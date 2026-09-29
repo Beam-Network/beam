@@ -22,13 +22,15 @@ import (
 type progress = contracts.RoomGenericProgress
 
 type strategyBase[T, R any] struct {
-	kind            domain.Kind
-	class           domain.Class
-	dispatchSource  dispatch.Source
-	validateDetails func(T) error
-	progressDetails func(map[string]string) (json.RawMessage, error)
-	resultDetails   func(map[string]string) (R, error)
-	payload         func(contracts.RoomWorkloadDefinition[T], genericAttempt[T, R]) (json.RawMessage, error)
+	kind              domain.Kind
+	class             domain.Class
+	dispatchSource    dispatch.Source
+	validateDetails   func(T) error
+	progressDetails   func(map[string]string) (json.RawMessage, error)
+	resultDetails     func(map[string]string) (R, error)
+	payload           func(contracts.RoomWorkloadDefinition[T], genericAttempt[T, R]) (json.RawMessage, error)
+	extraCapabilities []string
+	allowNoTargets    func(T) bool
 }
 
 type genericDefinition[T any] = roomworkload.RoomWorkloadDefinition[contracts.RoomWorkloadDefinition[T]]
@@ -45,7 +47,8 @@ func (s strategyBase[T, R]) ValidateDefinition(value genericDefinition[T], now t
 	if err := definition.Identity.Validate(s.kind, now); err != nil {
 		return err
 	}
-	if len(definition.Targets) == 0 || len(definition.Targets) > 10_000 {
+	lateJoin := s.allowNoTargets != nil && s.allowNoTargets(definition.Details)
+	if (len(definition.Targets) == 0 && !lateJoin) || len(definition.Targets) > 10_000 {
 		return errors.New("room workload requires between 1 and 10000 targets")
 	}
 	if definition.Source.PathID == "" || definition.Source.Role != "source" {
@@ -92,10 +95,11 @@ func (s strategyBase[T, R]) Paths(_ genericDefinition[T], value genericUnit[T]) 
 
 func (s strategyBase[T, R]) RequiredCapabilities(def genericDefinition[T], _ genericUnit[T]) []string {
 	capability := def.Workload.RequiredCapacity.Capability
+	result := append([]string{string(s.kind)}, s.extraCapabilities...)
 	if capability == string(s.kind) {
-		return []string{capability}
+		return result
 	}
-	return []string{string(s.kind), capability}
+	return append(result, capability)
 }
 
 func (s strategyBase[T, R]) Resources(_ genericDefinition[T], value genericUnit[T]) domain.Resources {
@@ -328,8 +332,8 @@ func validateDetails(value any) error {
 			return errors.New("negative room.datagram result counter")
 		}
 	case contracts.MessageProgressDetails:
-		if len(current.Deliveries) == 0 || len(current.Deliveries) > 10_000 {
-			return errors.New("room.message deliveries are empty or too large")
+		if (len(current.Deliveries) == 0) == (current.Runtime == nil) || len(current.Deliveries) > 10_000 {
+			return errors.New("room.message progress requires deliveries or one private runtime")
 		}
 		for _, delivery := range current.Deliveries {
 			if delivery.TargetMemberID == "" || (delivery.State != "delivered" && delivery.State != "failed") {
@@ -405,12 +409,17 @@ func validateMediaCounters(tracks []contracts.MediaTrackCounters) error {
 	return nil
 }
 
+// validateMediaRuntime accepts only a clean HTTPS runtime with a lowercase
+// SHA-256 certificate pin, so BeamCore never receives a runtime it rejects.
 func validateMediaRuntime(runtime *contracts.MediaRuntime) error {
 	if runtime == nil {
 		return nil
 	}
 	endpoint, err := url.Parse(runtime.BaseURL)
-	if err != nil || endpoint.Host == "" || (endpoint.Scheme != "http" && endpoint.Scheme != "https") ||
+	pin, pinErr := hex.DecodeString(runtime.TLSCertificateSHA256)
+	if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" ||
+		endpoint.Fragment != "" || pinErr != nil || len(pin) != sha256.Size ||
+		runtime.TLSCertificateSHA256 != strings.ToLower(runtime.TLSCertificateSHA256) ||
 		runtime.Capability != contracts.RoomMediaWebRTCCapability || runtime.Transport != "worker_sfu" ||
 		runtime.AccessToken == "" || runtime.ExpiresAt.IsZero() {
 		return errors.New("invalid room.media Worker runtime")

@@ -404,6 +404,10 @@ func (control *roomControl) SubmitRoomWorkloadProgress(ctx context.Context, valu
 	return control.submitRoomWorkload(ctx, "room_workload_progress", encoded)
 }
 
+func (control *roomControl) SubmitRoomMessageRuntime(ctx context.Context, value contracts.RoomMessageRuntimeWire) error {
+	return control.request(ctx, contracts.RoomWorkloadRuntimeType, value)
+}
+
 func (control *roomControl) SubmitRoomWorkloadResult(ctx context.Context, value contracts.RoomGenericResult) error {
 	encoded, err := encodeRoomWorkloadResult(value, time.Now().UTC())
 	if err != nil {
@@ -465,6 +469,10 @@ func (control *roomControl) capabilityManifest(now time.Time) contracts.Capabili
 			continue
 		}
 		capabilities = append(capabilities, string(kind))
+	}
+	if control.workloads != nil && control.workloads.CapacityCapabilityAvailable(
+		domain.KindRoomMessage, contracts.RoomMessageDirectCapability) {
+		capabilities = append(capabilities, contracts.RoomMessageDirectCapability)
 	}
 	if control.workloads != nil && control.workloads.CapacityCapabilityAvailable(
 		domain.KindRoomMedia, contracts.RoomMediaWebRTCCapability) {

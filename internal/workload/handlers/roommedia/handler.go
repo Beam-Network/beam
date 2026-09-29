@@ -10,13 +10,13 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Beam-Network/beam/internal/workload/contracts"
 	"github.com/Beam-Network/beam/internal/workload/domain"
+	"github.com/Beam-Network/beam/internal/workload/handlers/workertls"
 	workloadprogress "github.com/Beam-Network/beam/internal/workload/progress"
 )
 
@@ -36,15 +36,17 @@ type Config struct {
 
 type Handler struct {
 	config Config
+	now    func() time.Time
 
 	serverMu sync.Mutex
 	server   *sharedServer
 }
 
 type sharedServer struct {
-	listener net.Listener
-	http     *http.Server
-	baseURL  string
+	listener     net.Listener
+	http         *http.Server
+	baseURL      string
+	certificates *workertls.Certificates
 
 	mu       sync.RWMutex
 	sessions map[string]http.Handler
@@ -68,7 +70,7 @@ func NewHandler(config Config) *Handler {
 	if config.PublisherReconnectGrace <= 0 {
 		config.PublisherReconnectGrace = 30 * time.Second
 	}
-	return &Handler{config: config}
+	return &Handler{config: config, now: time.Now}
 }
 
 func (*Handler) Kind() domain.Kind { return domain.KindRoomMedia }
@@ -88,14 +90,18 @@ func (h *Handler) Validate(spec domain.Spec) error {
 	if worker.Details.SessionID == "" || len(worker.Details.Tracks) == 0 {
 		return errors.New("room media worker requires a session and declared tracks")
 	}
+	targets := make([]string, 0, len(worker.Targets))
+	for _, target := range worker.Targets {
+		targets = append(targets, target.MemberID)
+	}
+	if err := contracts.ValidateWebRTCMediaAdmission(worker.Identity, targets, worker.Details, h.now().UTC()); err != nil {
+		return err
+	}
 	if _, _, err := net.SplitHostPort(h.config.ListenAddress); err != nil {
 		return errors.New("room media listen address must be host:port")
 	}
-	if h.config.AdvertiseURL != "" {
-		parsed, err := url.Parse(strings.ReplaceAll(h.config.AdvertiseURL, "{port}", "1"))
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-			return errors.New("room media advertise URL must be absolute")
-		}
+	if err := ValidateAdvertiseURL(h.config.AdvertiseURL); err != nil {
+		return err
 	}
 	if (h.config.UDPPortMin == 0) != (h.config.UDPPortMax == 0) ||
 		(h.config.UDPPortMin != 0 && h.config.UDPPortMin > h.config.UDPPortMax) {
@@ -121,14 +127,18 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 	if err != nil {
 		return domain.Result{}, err
 	}
+	fingerprint, err := shared.certificates.ForLease(worker.Identity.ExpiresAt)
+	if err != nil {
+		return domain.Result{}, err
+	}
 	token, err := randomToken(32)
 	if err != nil {
 		return domain.Result{}, err
 	}
 	baseURL := strings.TrimRight(shared.baseURL, "/") + "/v1/rooms/" + url.PathEscape(worker.Details.SessionID)
 	runtime := &contracts.MediaRuntime{Capability: contracts.RoomMediaWebRTCCapability,
-		Transport: "worker_sfu", BaseURL: baseURL,
-		AccessToken: token, ExpiresAt: worker.Identity.ExpiresAt}
+		Transport: "worker_sfu", BaseURL: baseURL, AccessToken: token,
+		TLSCertificateSHA256: fingerprint, ExpiresAt: worker.Identity.ExpiresAt}
 	if err := shared.add(worker.Details.SessionID, authorize(token, media.Handler(runtime.BaseURL))); err != nil {
 		return domain.Result{}, err
 	}
@@ -165,6 +175,22 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 	}
 }
 
+// PrepareListener binds the pinned TLS signaling listener before the worker
+// advertises WebRTC media. Configuration or port conflicts fail startup closed.
+func (h *Handler) PrepareListener() error {
+	_, err := h.sharedServer()
+	return err
+}
+
+func (h *Handler) Close() error {
+	h.serverMu.Lock()
+	defer h.serverMu.Unlock()
+	if h.server == nil {
+		return nil
+	}
+	return h.server.http.Close()
+}
+
 func (h *Handler) sharedServer() (*sharedServer, error) {
 	h.serverMu.Lock()
 	defer h.serverMu.Unlock()
@@ -185,7 +211,9 @@ func (h *Handler) sharedServer() (*sharedServer, error) {
 		_ = listener.Close()
 		return nil, err
 	}
-	shared := &sharedServer{listener: listener, baseURL: baseURL, sessions: make(map[string]http.Handler), done: make(chan struct{})}
+	secure, certificates := workertls.WrapListener(listener, h.now)
+	shared := &sharedServer{listener: secure, baseURL: baseURL, certificates: certificates,
+		sessions: make(map[string]http.Handler), done: make(chan struct{})}
 	shared.http = &http.Server{Handler: shared, ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: time.Minute}
 	h.server = shared
@@ -284,23 +312,26 @@ func reportProgress(ctx context.Context, details contracts.MediaProgressDetails)
 	workloadprogress.Report(ctx, map[string]string{"room_progress_details": string(encoded)})
 }
 
+// ValidateAdvertiseURL requires the clean HTTPS origin that agents reach with
+// the pinned worker certificate. {port} expands to the bound listener port.
+func ValidateAdvertiseURL(configured string) error {
+	parsed, err := url.Parse(strings.ReplaceAll(configured, "{port}", "1"))
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("room media requires an HTTPS advertise URL")
+	}
+	return nil
+}
+
 func advertisedURL(configured string, address net.Addr) (string, error) {
-	bound, ok := address.(*net.TCPAddr)
-	if !ok {
-		return "", errors.New("room media listener is not TCP")
-	}
-	if strings.TrimSpace(configured) == "" {
-		host := bound.IP.String()
-		if host == "" || bound.IP.IsUnspecified() {
-			host = "127.0.0.1"
-		}
-		return "http://" + net.JoinHostPort(host, strconv.Itoa(bound.Port)), nil
-	}
-	parsed, err := url.Parse(strings.TrimRight(configured, "/"))
+	_, port, err := net.SplitHostPort(address.String())
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimRight(strings.ReplaceAll(parsed.String(), "{port}", strconv.Itoa(bound.Port)), "/"), nil
+	value := strings.TrimRight(strings.ReplaceAll(configured, "{port}", port), "/")
+	if err := ValidateAdvertiseURL(value); err != nil {
+		return "", err
+	}
+	return value, nil
 }
 
 func randomToken(size int) (string, error) {

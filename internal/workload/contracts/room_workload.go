@@ -21,6 +21,9 @@ const (
 	RoomWorkloadCancel             = "room_workload_cancel"
 	RoomWorkloadStatusType         = "room_workload_status"
 	RoomWorkloadProvisioningResult = "room_workload_provisioning_result"
+	RoomWorkloadRuntimeType        = "room_workload_runtime"
+	RoomMessageDirectCapability    = "room.message.direct.v1"
+	RoomMessageRuntimeSchema       = "room-message-runtime/v1"
 )
 
 type RoomLifecycleState string
@@ -120,10 +123,12 @@ type RoomWorkloadOfferWire[T any] struct {
 	Details             T                       `json:"details"`
 }
 
-func (v RoomWorkloadOfferWire[T]) Validate(now time.Time) error {
+// Validate checks a canonical offer. allowNoTargets admits an empty destination
+// snapshot; callers set it only for late-join room media.
+func (v RoomWorkloadOfferWire[T]) Validate(now time.Time, allowNoTargets bool) error {
 	if v.Type != RoomWorkloadOffer || v.SchemaVersion != RoomWorkloadSchema || !IsLogicalRoomWorkloadKind(v.Kind) || v.WorkloadID == "" || v.RoomID == "" ||
 		v.ChannelID == "" || v.SourceMemberID == "" || v.DestinationSnapshot.SnapshotVersion == 0 ||
-		len(v.DestinationSnapshot.Targets) == 0 || len(v.DestinationSnapshot.Targets) > 10_000 ||
+		(len(v.DestinationSnapshot.Targets) == 0 && !allowNoTargets) || len(v.DestinationSnapshot.Targets) > 10_000 ||
 		v.AuthorizationEpoch == 0 || v.PlanEpoch == 0 || v.UnitID == "" || v.Epoch == 0 || v.Attempt == 0 ||
 		v.RequiredCapacity.Capability == "" || v.RequiredCapacity.Units <= 0 || v.OfferExpiresAt.IsZero() || !now.Before(v.OfferExpiresAt) {
 		return errors.New("canonical room workload offer is incomplete or expired")
@@ -198,9 +203,11 @@ func (v RoomPathAuthorization) validate(pathID, role, targetMemberID, protocol s
 	return nil
 }
 
-func (v RoomWorkloadSubmitWire[T]) Validate(now time.Time) error {
+// Validate checks a canonical submission. allowNoTargets admits an empty target
+// list; callers set it only for late-join room media.
+func (v RoomWorkloadSubmitWire[T]) Validate(now time.Time, allowNoTargets bool) error {
 	if v.Type != RoomWorkloadSubmit || v.SchemaVersion != RoomWorkloadSchema || !IsLogicalRoomWorkloadKind(v.Kind) || v.WorkloadID == "" || v.IdempotencyKey == "" ||
-		v.RoomID == "" || v.ChannelID == "" || v.SourceMemberID == "" || len(v.Targets) == 0 || len(v.Targets) > 10_000 ||
+		v.RoomID == "" || v.ChannelID == "" || v.SourceMemberID == "" || (len(v.Targets) == 0 && !allowNoTargets) || len(v.Targets) > 10_000 ||
 		v.AuthorizationEpoch == 0 || v.PlanEpoch == 0 || v.RequiredCapacity.Capability == "" || v.RequiredCapacity.Units <= 0 ||
 		v.ExpiresAt.IsZero() || !now.Before(v.ExpiresAt) {
 		return errors.New("canonical room workload submission is incomplete or expired")
@@ -464,8 +471,56 @@ type MessageDelivery struct {
 	Reason         *string `json:"reason"`
 }
 type MessageProgressDetails struct {
-	Deliveries []MessageDelivery `json:"deliveries"`
+	Deliveries []MessageDelivery   `json:"deliveries,omitempty"`
+	Runtime    *RoomMessageRuntime `json:"runtime,omitempty"`
 }
+
+type RoomMessageRuntime struct {
+	SchemaVersion        string    `json:"schema_version"`
+	WorkloadID           string    `json:"workload_id"`
+	UnitID               string    `json:"unit_id"`
+	Epoch                uint64    `json:"epoch"`
+	Attempt              uint64    `json:"attempt"`
+	WorkerID             string    `json:"worker_id"`
+	Capability           string    `json:"capability"`
+	Transport            string    `json:"transport"`
+	BaseURL              string    `json:"base_url"`
+	AccessToken          string    `json:"access_token"`
+	TLSCertificateSHA256 string    `json:"tls_certificate_sha256"`
+	ExpiresAt            time.Time `json:"expires_at"`
+}
+
+type RoomMessageRuntimeWire struct {
+	Type          string             `json:"type"`
+	SchemaVersion string             `json:"schema_version"`
+	Kind          domain.Kind        `json:"kind"`
+	WorkloadID    string             `json:"workload_id"`
+	UnitID        string             `json:"unit_id"`
+	Epoch         uint64             `json:"epoch"`
+	Attempt       uint64             `json:"attempt"`
+	WorkerID      string             `json:"worker_id"`
+	Runtime       RoomMessageRuntime `json:"runtime"`
+	ReportedAt    time.Time          `json:"reported_at"`
+}
+
+func (runtime RoomMessageRuntime) Validate(identity RoomWorkloadIdentity, now time.Time) error {
+	parsed, err := url.Parse(runtime.BaseURL)
+	if runtime.SchemaVersion != RoomMessageRuntimeSchema || runtime.WorkloadID != identity.WorkloadID ||
+		runtime.UnitID != identity.UnitID || runtime.Epoch != identity.Epoch || runtime.Attempt != identity.Attempt ||
+		runtime.WorkerID != identity.WorkerID || runtime.Capability != RoomMessageDirectCapability ||
+		runtime.Transport != "worker_https" || runtime.AccessToken == "" || len(runtime.TLSCertificateSHA256) != 64 ||
+		runtime.ExpiresAt.IsZero() || !now.Before(runtime.ExpiresAt) || err != nil || parsed.Scheme != "https" ||
+		parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("invalid direct room message runtime")
+	}
+	for _, character := range runtime.TLSCertificateSHA256 {
+		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
+			return errors.New("invalid direct room message TLS fingerprint")
+		}
+	}
+	return nil
+}
+
 type MessageStatusDetails struct {
 	Delivered int64 `json:"delivered"`
 	Failed    int64 `json:"failed"`
@@ -583,11 +638,12 @@ const (
 )
 
 type MediaRuntime struct {
-	Capability  string    `json:"capability"`
-	Transport   string    `json:"transport"`
-	BaseURL     string    `json:"base_url"`
-	AccessToken string    `json:"access_token"`
-	ExpiresAt   time.Time `json:"expires_at"`
+	Capability           string    `json:"capability"`
+	Transport            string    `json:"transport"`
+	BaseURL              string    `json:"base_url"`
+	AccessToken          string    `json:"access_token"`
+	TLSCertificateSHA256 string    `json:"tls_certificate_sha256"`
+	ExpiresAt            time.Time `json:"expires_at"`
 }
 type MediaProtection struct {
 	Scheme   string `json:"scheme"`
@@ -635,4 +691,30 @@ type MediaResultDetails struct {
 	Tracks         []MediaTrackCounters `json:"tracks"`
 	Runtime        *MediaRuntime        `json:"runtime,omitempty"`
 	TerminalReason string               `json:"terminal_reason"`
+}
+
+// ValidateWebRTCMediaAdmission applies worker-hosted WebRTC media admission:
+// a lifetime of at most 23 hours, no replay, audio or video tracks with unique
+// ids, and a source member that is not also a target.
+func ValidateWebRTCMediaAdmission(identity RoomWorkloadIdentity, targetMemberIDs []string, details MediaUnitDetails, now time.Time) error {
+	if !now.Before(identity.ExpiresAt) || identity.ExpiresAt.After(now.Add(23*time.Hour)) {
+		return errors.New("room media lifetime must be at most 23 hours")
+	}
+	if details.Replay {
+		return errors.New("room media cannot replay")
+	}
+	tracks := make(map[string]struct{}, len(details.Tracks))
+	for _, track := range details.Tracks {
+		if track.TrackID == "" || (track.Kind != "audio" && track.Kind != "video") {
+			return errors.New("room media tracks must be audio or video")
+		}
+		if _, duplicate := tracks[track.TrackID]; duplicate {
+			return fmt.Errorf("duplicate room media track %s", track.TrackID)
+		}
+		tracks[track.TrackID] = struct{}{}
+	}
+	if slices.Contains(targetMemberIDs, identity.SourceMemberID) {
+		return errors.New("room media source cannot be a target")
+	}
+	return nil
 }

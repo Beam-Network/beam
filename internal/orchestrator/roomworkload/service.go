@@ -4,16 +4,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/Beam-Network/beam/internal/orchestrator/dispatch"
+	"github.com/Beam-Network/beam/internal/orchestrator/scheduling"
 	"github.com/Beam-Network/beam/internal/workload/domain"
 )
 
 type Config struct{ Now func() time.Time }
 
-const maxRoomPathRedemptions = 16
+const (
+	maxRoomPathRedemptions = 16
+	failedWorkerCooldown   = 5 * time.Minute
+)
 
 type RoomWorkloadService[D, U, I, C, P, R, O any] struct {
 	mu           sync.RWMutex
@@ -25,6 +30,7 @@ type RoomWorkloadService[D, U, I, C, P, R, O any] struct {
 	provisioner  Provisioner[D, U, I, C]
 	sink         ResultSink[O]
 	progressSink ProgressSink[P]
+	cooldowns    map[string]time.Time
 }
 
 func NewRoomWorkloadService[D, U, I, C, P, R, O any](config Config, dispatcher *dispatch.Service,
@@ -114,6 +120,7 @@ func (s *RoomWorkloadService[D, U, I, C, P, R, O]) Submit(ctx context.Context, d
 		return nil
 	}
 	excluded := make([]string, 0, len(record.Attempts))
+	cooling := s.coolingDown(now)
 	record.Lifecycle = "planning"
 	record.UpdatedAt = now
 	if err := s.store.Put(record); err != nil {
@@ -134,8 +141,11 @@ func (s *RoomWorkloadService[D, U, I, C, P, R, O]) Submit(ctx context.Context, d
 			continue
 		}
 		if attempt.WorkerID == "" {
-			placement, err := s.dispatcher.SelectWorker(s.strategy.RequiredCapabilities(record.Definition, unit),
-				s.strategy.Resources(record.Definition, unit), excluded)
+			required, resources := s.strategy.RequiredCapabilities(record.Definition, unit), s.strategy.Resources(record.Definition, unit)
+			placement, err := s.dispatcher.SelectWorker(required, resources, append(slices.Clone(excluded), cooling...))
+			if errors.Is(err, scheduling.ErrNoCandidate) && len(cooling) > 0 {
+				placement, err = s.dispatcher.SelectWorker(required, resources, excluded)
+			}
 			if err != nil {
 				return fmt.Errorf("select Worker for room execution unit %s: %w", unit.ID, err)
 			}
@@ -295,6 +305,7 @@ func (s *RoomWorkloadService[D, U, I, C, P, R, O]) DeliverProgress(ctx context.C
 	}
 	value, err := s.strategy.ValidateProgress(record.Definition, attempt, progress)
 	if err != nil {
+		s.coolDown(attempt.WorkerID)
 		return err
 	}
 	attempt.Progress = &RoomProgress[P]{ObservedAt: progress.ObservedAt, Progress: value}
@@ -334,6 +345,7 @@ func (s *RoomWorkloadService[D, U, I, C, P, R, O]) DeliverResult(ctx context.Con
 		} else {
 			attempt.State = AttemptFailed
 			record.Lifecycle = "failed"
+			s.coolDown(attempt.WorkerID)
 		}
 		attempt.Error = fallback(result.ErrorMessage, "room workload Worker failed")
 	} else {
@@ -482,6 +494,32 @@ func (s *RoomWorkloadService[D, U, I, C, P, R, O]) Record(definitionID string) (
 // definition ID for mutations.
 func (s *RoomWorkloadService[D, U, I, C, P, R, O]) Records() []Record[D, U, I, C, P, R] {
 	return s.store.List()
+}
+
+func (s *RoomWorkloadService[D, U, I, C, P, R, O]) coolDown(workerID string) {
+	if workerID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cooldowns == nil {
+		s.cooldowns = map[string]time.Time{}
+	}
+	s.cooldowns[workerID] = s.config.Now().UTC().Add(failedWorkerCooldown)
+}
+
+func (s *RoomWorkloadService[D, U, I, C, P, R, O]) coolingDown(now time.Time) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	workers := make([]string, 0, len(s.cooldowns))
+	for workerID, until := range s.cooldowns {
+		if !now.Before(until) {
+			delete(s.cooldowns, workerID)
+			continue
+		}
+		workers = append(workers, workerID)
+	}
+	return workers
 }
 
 func fallback(value, other string) string {

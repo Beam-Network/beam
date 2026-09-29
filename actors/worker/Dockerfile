@@ -26,4 +26,4 @@ WORKDIR /app
 COPY --from=build /out/beam-worker /usr/local/bin/beam-worker
 
 ENTRYPOINT ["beam-worker"]
-CMD ["serve", "--capabilities", "transfer.multipart,room.transfer"]
+CMD ["serve"]
