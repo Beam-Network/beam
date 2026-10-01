@@ -50,6 +50,10 @@ type Server struct {
 	journal     Journal
 	circuits    map[string]circuit.Plan
 	revoked     map[string]revokedCircuit
+
+	relayMu   sync.Mutex
+	relays    map[string]*serverRelay
+	relaySink func(StorageProbeRelayEvent)
 }
 
 type revokedCircuit struct {
@@ -74,6 +78,7 @@ func NewServerWithJournal(orchestratorID string, orchestratorRegistry *registry.
 		sessions: make(map[string]*Session), pending: make(map[string]chan runtime.Decision),
 		results: make(chan ResultEvent, 256), progress: make(chan ProgressEvent, 256), checkpoints: make(chan CheckpointEvent, 256), receipts: make(chan ReceiptEvent, 256), journal: journal,
 		circuits: make(map[string]circuit.Plan), revoked: make(map[string]revokedCircuit),
+		relays: make(map[string]*serverRelay),
 	}
 	if err := server.restoreCircuits(journal.Events()); err != nil {
 		return nil, err

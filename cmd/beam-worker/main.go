@@ -34,6 +34,7 @@ import (
 	roommediahandler "github.com/Beam-Network/beam/internal/workload/handlers/roommedia"
 	roomtransferhandler "github.com/Beam-Network/beam/internal/workload/handlers/roomtransfer"
 	roomworkloadhandlers "github.com/Beam-Network/beam/internal/workload/handlers/roomworkloads"
+	"github.com/Beam-Network/beam/internal/workload/handlers/storageprobe"
 	"github.com/Beam-Network/beam/internal/workload/handlers/transfer"
 	tunnelhandler "github.com/Beam-Network/beam/internal/workload/handlers/tunnel"
 	"github.com/Beam-Network/beam/internal/workload/runtime"
@@ -73,7 +74,7 @@ func serve(arguments []string) {
 	memory := flags.Int64("memory-bytes", 512<<20, "reservable memory")
 	scratch := flags.Int64("scratch-bytes", 10<<30, "reservable scratch bytes")
 	bandwidth := flags.Int64("bandwidth-mbps", 100, "reservable bandwidth")
-	capabilityList := flags.String("capabilities", "transfer.multipart,transfer.multipart.fanout.v1,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v2", "comma-separated enabled capabilities")
+	capabilityList := flags.String("capabilities", "transfer.multipart,transfer.multipart.fanout.v1,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v2,storage.probe.relay.v1", "comma-separated enabled capabilities")
 	statePath := flags.String("state", "data/worker/workloads.json", "durable workload journal")
 	actionRoot := flags.String("action-root", os.Getenv("BEAM_ACTION_ROOT"), "root of checksum-pinned Studio actions")
 	actionCache := flags.String("action-cache", "data/worker/action-cache", "content-addressed Studio action cache")
@@ -298,6 +299,17 @@ func serve(arguments []string) {
 	httpServer := &http.Server{Handler: workerServer.Handler(), ReadHeaderTimeout: 5 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	var relayBinder wcp.StorageProbeRelayBinder
+	if contains(capabilities, contracts.StorageProbeRelayCapability) {
+		relayService, relayErr := storageprobe.New(storageprobe.Config{WorkerID: identity.WorkerID})
+		if relayErr != nil {
+			log.Fatal(relayErr)
+		}
+		relayBinder = func(orchestratorHotkey string, emitter wcp.StorageProbeRelayEmitter) wcp.StorageProbeRelaySession {
+			return relayService.Bind(orchestratorHotkey, emitter)
+		}
+		log.Printf("storage probe relay enabled")
+	}
 	var receiptRecorder *evidence.Recorder
 	if *wcpAddress != "" {
 		receiptJournal, err := evidence.OpenFileJournal(*receiptState)
@@ -369,7 +381,7 @@ func serve(arguments []string) {
 			SoftwareVersion: version, Region: *region, Capabilities: capabilities,
 			TotalResources: governor.Snapshot().Capacity, Engine: engine, Governor: governor, Store: store,
 			CircuitEndpoint: advertisedCircuitEndpoint, Circuits: circuitService,
-			Receipts: receiptRecorder,
+			Receipts: receiptRecorder, StorageProbeRelays: relayBinder,
 		})
 		if err != nil {
 			log.Fatal(err)

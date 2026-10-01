@@ -26,6 +26,7 @@ type BeamCoreConnector struct {
 	rooms         *roomtransfer.Service
 	roomWorkloads *roomworkloads.Manager
 	roomControl   *roomControl
+	relays        StorageProbeRelayLink
 	running       atomic.Bool
 }
 
@@ -62,6 +63,7 @@ func (s *BeamCoreConnector) Run(ctx context.Context) error {
 		return err
 	}
 	control := newRoomControl(s.config, session.conn, s.rooms, s.roomWorkloads, s.orchestrator)
+	control.relays = s.relays
 	var controlSession *roomControlSession
 	if control.enabled() {
 		controlSession, err = control.bind(ctx)

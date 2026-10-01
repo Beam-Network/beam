@@ -151,6 +151,13 @@ func (r *Registry) UpdateObservation(observation orchestratordomain.WorkerObserv
 	return nil
 }
 
+// Hotkey is the Orchestrator's Bittensor hotkey association.
+func (r *Registry) Hotkey() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.orchestrator.Hotkey
+}
+
 func (r *Registry) Observation(workerID string) (orchestratordomain.WorkerObservation, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

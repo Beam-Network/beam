@@ -24,7 +24,7 @@ readiness_multiplier  = current_ready_gate x active_time_ratio
 prism_final_score     = performance_score x readiness_multiplier x penalty_multiplier
 ```
 
-Scores and multipliers are clamped to `[0, 1]`.
+PRISM scores and routing multipliers are clamped to `[0, 1]`. The separate fraud-report emission multiplier ranges from `1` to `2`; it does not enter this routing formula.
 
 ## Performance
 
@@ -36,7 +36,7 @@ Beam compares orchestrators in the same pool cohort and maps each value linearly
 transfer_mbps = SUM(batch_mbps x batch_task_count) / SUM(batch_task_count)
 ```
 
-`first assignment` batches always count toward throughput. Later batches need to be above BeamCore's configured follow-up minimum task count for verified BW (10) to count, while their task outcomes still count for reliability and task totals.
+The singleton `first_assignment` batch always counts toward throughput. Later batches need to be above BeamCore's configured follow-up minimum task count for verified BW (10) to count, while their task outcomes still count for reliability and task totals.
 
 **Throughput** uses recent verified transfer bandwidth with a **1-hour half-life**. A bandwidth sample around 1 hour old contributes about `0.5`; a sample around 2 hours old contributes about `0.25`.
 
@@ -91,7 +91,7 @@ Active penalties shape your penalty multiplier:
 | Kind | Typical source | Default coefficient | Duration |
 | ---- | -------------- | ------------------- | ---------------- |
 | `fraud` | Fraud penalty record | `0.1` | `168h` |
-| `integrity_chunk_mismatch` | Destination integrity mismatch | `1.0` | permanent |
+| `integrity_chunk_mismatch` | Destination bytes differ from the audited source chunk | `1.0` | permanent |
 | `sybil` | Sybil violation tied to your hotkey | `0.5` | `168h` |
 
 Each event contributes:
@@ -118,7 +118,9 @@ GET /orchestrators/prism-scores/<your-orch-uid>
 X-Api-Key: b1m_...
 ```
 
-You may read only your own score. Another orchestrator's UID returns `403`. Reading across orchestrators is a validator capability, since the breakdown includes `penalty_multiplier`, which feeds the weight formula.
+You may read only your own score. Another orchestrator's UID returns `403`. Validators can read orchestrator breakdowns to verify emission weights.
+
+Your breakdown also shows your **Fraud report bonus** and award expiries. See [Weights](./weights.md#fraud-report-bonuses) for the rules.
 
 ## Improving your score
 

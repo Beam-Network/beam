@@ -29,6 +29,7 @@ type WorkerHello struct {
 
 type OrchestratorWelcome struct {
 	OrchestratorID     string
+	OrchestratorHotkey string
 	SessionID          string
 	HeartbeatInterval  time.Duration
 	ConfigEpoch        uint64
@@ -91,7 +92,7 @@ func (s *Service) Accept(hello WorkerHello) (OrchestratorWelcome, error) {
 	return OrchestratorWelcome{
 		OrchestratorID: s.orchestratorID, SessionID: "session_" + hex.EncodeToString(sessionBytes),
 		HeartbeatInterval: s.heartbeatInterval, ConfigEpoch: s.configEpoch,
-		CurrentPlanVersion: currentPlanVersion,
+		CurrentPlanVersion: currentPlanVersion, OrchestratorHotkey: strings.TrimSpace(s.registry.Hotkey()),
 	}, nil
 }
 

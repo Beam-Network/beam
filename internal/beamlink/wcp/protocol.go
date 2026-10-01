@@ -1,6 +1,7 @@
 package wcp
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -43,6 +44,13 @@ const (
 	TypeCircuitRevoke = "circuit.revoke"
 	TypeDrain         = "worker.drain"
 	TypeError         = "error"
+
+	// Storage probe relay messages carry the BeamCore relay fields unchanged.
+	// Orchestrator to Worker: open, data, close. Worker to Orchestrator: opened, data, close.
+	TypeStorageProbeRelayOpen   = "storage_probe_relay.open"
+	TypeStorageProbeRelayOpened = "storage_probe_relay.opened"
+	TypeStorageProbeRelayData   = "storage_probe_relay.data"
+	TypeStorageProbeRelayClose  = "storage_probe_relay.close"
 )
 
 type Envelope struct {
@@ -77,11 +85,13 @@ type Hello struct {
 }
 
 type Welcome struct {
-	OrchestratorID    string        `json:"orchestrator_id"`
-	SessionID         string        `json:"session_id"`
-	HeartbeatInterval time.Duration `json:"heartbeat_interval"`
-	ConfigEpoch       uint64        `json:"config_epoch"`
-	PlanVersion       uint64        `json:"plan_version"`
+	OrchestratorID string `json:"orchestrator_id"`
+	// OrchestratorHotkey is the BeamCore hotkey whose relay intents this session may carry.
+	OrchestratorHotkey string        `json:"orchestrator_hotkey,omitempty"`
+	SessionID          string        `json:"session_id"`
+	HeartbeatInterval  time.Duration `json:"heartbeat_interval"`
+	ConfigEpoch        uint64        `json:"config_epoch"`
+	PlanVersion        uint64        `json:"plan_version"`
 }
 
 type Heartbeat struct {
@@ -180,6 +190,20 @@ func decodePayload[T any](envelope Envelope) (T, error) {
 	var result T
 	if err := json.Unmarshal(envelope.Payload, &result); err != nil {
 		return result, fmt.Errorf("decode %s payload: %w", envelope.Type, err)
+	}
+	return result, nil
+}
+
+// decodeStrictPayload rejects unknown fields, as relay messages require.
+func decodeStrictPayload[T any](envelope Envelope) (T, error) {
+	var result T
+	decoder := json.NewDecoder(bytes.NewReader(envelope.Payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&result); err != nil {
+		return result, fmt.Errorf("decode %s payload: %w", envelope.Type, err)
+	}
+	if decoder.More() {
+		return result, fmt.Errorf("decode %s payload: trailing data", envelope.Type)
 	}
 	return result, nil
 }

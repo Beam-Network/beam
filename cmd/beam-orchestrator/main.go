@@ -174,7 +174,7 @@ func serve(arguments []string) {
 		beamCoreNATS.EnsureStream = *ensureStreams
 		studioNATS.EnsureStream = *ensureStreams
 		tunnelNATS.EnsureStream = *ensureStreams
-		startConnectors(ctx, stop, tasks, payments, rooms, roomWorkloads, *beamCoreNATS, *studioNATS, *tunnelNATS)
+		startConnectors(ctx, stop, tasks, payments, rooms, roomWorkloads, wcpServer, *beamCoreNATS, *studioNATS, *tunnelNATS)
 		go replayDurable(ctx, tasks, payments, rooms, roomWorkloads)
 	}
 	if wcpServer != nil {
@@ -263,7 +263,8 @@ type connectorRunner interface {
 }
 
 func startConnectors(ctx context.Context, stop context.CancelFunc, tasks *dispatch.Service, payments *payment.Service,
-	rooms *roomtransfer.Service, roomWorkloads *roomworkloads.Manager, configs ...connectors.NATSConfig) {
+	rooms *roomtransfer.Service, roomWorkloads *roomworkloads.Manager, relays connectors.StorageProbeRelayLink,
+	configs ...connectors.NATSConfig) {
 	for index, config := range configs {
 		if !config.Enabled() {
 			continue
@@ -277,6 +278,7 @@ func startConnectors(ctx context.Context, stop context.CancelFunc, tasks *dispat
 			if connector != nil {
 				connector.AttachRoomTransfers(rooms)
 				connector.AttachRoomWorkloads(roomWorkloads)
+				connector.AttachStorageProbeRelays(relays)
 			}
 			runner = connector
 		case 1:

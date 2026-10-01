@@ -43,7 +43,8 @@ async def _set_weights(validator, subnet_core_available: bool) -> None:
         logger.warning("No persisted BeamCore weight snapshot available")
         return
 
-    uids, weights, formula_version, params_hash, data_epoch, _no_weight_period, _burn_reason = weight_snapshot
+    (uids, weights, formula_version, params_hash, data_epoch,
+     _no_weight_period, _burn_reason, source, reward_evaluated_at) = weight_snapshot
 
     # Set weights on chain
     try:
@@ -139,6 +140,8 @@ async def _set_weights(validator, subnet_core_available: bool) -> None:
                     "weights": {uid: round(w, 6) for uid, w in zip(uids, weights)},
                     "weight_method": weight_method,
                     "formula_version": formula_version,
+                    "source": source,
+                    "reward_evaluated_at": reward_evaluated_at,
                 }
             )
 
@@ -155,6 +158,8 @@ async def _set_weights(validator, subnet_core_available: bool) -> None:
                         weights=list(weights),
                         formula_version=formula_version,
                         params_hash=params_hash,
+                        source=source,
+                        reward_evaluated_at=reward_evaluated_at,
                     )
                     logger.debug("Weight proof submitted to BeamCore")
                 except Exception as _e:
@@ -177,7 +182,8 @@ async def _set_weights(validator, subnet_core_available: bool) -> None:
 
 async def _get_persisted_weight_snapshot(
     validator,
-) -> Optional[Tuple[List[int], List[float], str, Optional[str], int]]:
+) -> Optional[Tuple[List[int], List[float], str, Optional[str], int, bool, str,
+                    Optional[str], Optional[str]]]:
     """Fetch recommended weights from BeamCore epoch summary (ops-materialized)."""
     if not validator.subnet_core_client:
         return None
@@ -202,4 +208,9 @@ async def _get_persisted_weight_snapshot(
 
     _no_weight_period = bool(snapshot.get("no_weight_period"))
     _burn_reason = snapshot.get("reason", "") if _no_weight_period else ""
-    return (list(uids), list(weights), fv, params_hash, data_epoch, _no_weight_period, _burn_reason)
+    source = snapshot.get("source")
+    reward_evaluated_at = snapshot.get("reward_evaluated_at")
+    return (list(uids), list(weights), fv, params_hash, data_epoch,
+            _no_weight_period, _burn_reason,
+            source if isinstance(source, str) else None,
+            reward_evaluated_at if isinstance(reward_evaluated_at, str) else None)

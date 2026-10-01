@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,13 +29,40 @@ func (subscription *fakeControlSubscription) Unsubscribe() error {
 
 type fakeRoomControlConnection struct {
 	subscriptions    []*fakeControlSubscription
+	subjects         []string
 	flushErr         error
 	flushHasDeadline bool
+	requests         []fakeControlRequest
+	publishedMu      sync.Mutex
+	published        []fakeControlRequest
 }
 
-func (connection *fakeRoomControlConnection) chanSubscribe(_ string, _ chan *nats.Msg) (roomControlSubscription, error) {
+type fakeControlRequest struct {
+	subject string
+	payload map[string]any
+}
+
+func (connection *fakeRoomControlConnection) publish(subject string, payload []byte) error {
+	var message map[string]any
+	if err := msgpack.Unmarshal(payload, &message); err != nil {
+		return err
+	}
+	connection.publishedMu.Lock()
+	defer connection.publishedMu.Unlock()
+	connection.published = append(connection.published, fakeControlRequest{subject: subject, payload: message})
+	return nil
+}
+
+func (connection *fakeRoomControlConnection) publishedMessages() []fakeControlRequest {
+	connection.publishedMu.Lock()
+	defer connection.publishedMu.Unlock()
+	return append([]fakeControlRequest(nil), connection.published...)
+}
+
+func (connection *fakeRoomControlConnection) chanSubscribe(subject string, _ chan *nats.Msg) (roomControlSubscription, error) {
 	subscription := &fakeControlSubscription{}
 	connection.subscriptions = append(connection.subscriptions, subscription)
+	connection.subjects = append(connection.subjects, subject)
 	return subscription, nil
 }
 
@@ -43,11 +71,12 @@ func (connection *fakeRoomControlConnection) flushWithContext(ctx context.Contex
 	return connection.flushErr
 }
 
-func (connection *fakeRoomControlConnection) requestWithContext(_ context.Context, _ string, payload []byte) (*nats.Msg, error) {
+func (connection *fakeRoomControlConnection) requestWithContext(_ context.Context, subject string, payload []byte) (*nats.Msg, error) {
 	var request map[string]any
 	if err := msgpack.Unmarshal(payload, &request); err != nil {
 		return nil, err
 	}
+	connection.requests = append(connection.requests, fakeControlRequest{subject: subject, payload: request})
 	messageType, _ := request["type"].(string)
 	response := map[string]any{"type": controlReplyType(messageType)}
 	if messageType == "capability_update" {

@@ -413,27 +413,7 @@ func NewWorkerCapabilityManifest(actorID, softwareVersion string, capabilities [
 }
 
 func SupportsCapability(manifest CapabilityManifest, capability string) bool {
-	capability = strings.TrimSpace(capability)
-	if capability == "" || manifest.Capacity.AvailableConnections <= 0 {
-		return false
-	}
-	foundCapability := false
-	for _, advertised := range manifest.Capabilities {
-		if advertised == capability {
-			foundCapability = true
-			break
-		}
-	}
-	if !foundCapability {
-		return false
-	}
-	version := CapabilityProtocolVersion(capability)
-	for _, protocol := range manifest.Protocols {
-		if protocol.Name == capability && protocol.Min <= version && protocol.Max >= version {
-			return true
-		}
-	}
-	return false
+	return manifest.Capacity.AvailableConnections > 0 && AdvertisesCapabilityProtocol(manifest, capability)
 }
 
 func (lane RoomSourceLane) Validate(chunkCount int64, targets map[string]RoomTransferTarget, now time.Time) error {

@@ -75,7 +75,7 @@ export BEAM_WCP_SERVER_NAME=orchestrator.example.com
 
 ./bin/beam-worker serve \
   --node-key data/worker/node.key \
-  --capabilities transfer.multipart,transfer.multipart.fanout.v1,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v2 \
+  --capabilities transfer.multipart,transfer.multipart.fanout.v1,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v2,storage.probe.relay.v1 \
   --room-transfer-addr 0.0.0.0:9470 \
   --room-transfer-advertise-url https://worker.example.com:9470
 ```
@@ -126,6 +126,13 @@ the media public IP to the address they reach. For clients behind restrictive
 networks, optionally list STUN/TURN URLs in `--media-ice-servers`
 (`BEAM_MEDIA_ICE_SERVERS`) and set `--media-turn-secret`
 (`BEAM_MEDIA_TURN_SECRET`) to issue temporary TURN credentials.
+
+## Storage Probe Relay
+
+`storage.probe.relay.v1` lets BeamCore check a storage host from the worker's
+network: for each BeamCore-signed request, the worker opens one outbound TCP
+connection to the named host on port 443 and forwards bytes. TLS runs end to end
+between BeamCore and the host, so the worker carries only ciphertext.
 
 ## Health
 

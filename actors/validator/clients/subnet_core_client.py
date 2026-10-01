@@ -161,6 +161,8 @@ class SubnetCoreClient:
         formula_version: Optional[str] = None,
         params_hash: Optional[str] = None,
         tx_hash: Optional[str] = None,
+        source: Optional[str] = None,
+        reward_evaluated_at: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Record a successful on-chain weight set so the dashboard can reflect it."""
         body = {
@@ -172,6 +174,8 @@ class SubnetCoreClient:
             "formula_version": formula_version,
             "params_hash": params_hash,
             "tx_hash": tx_hash,
+            "source": source,
+            "reward_evaluated_at": reward_evaluated_at,
         }
         response = await self._request(
             "POST",

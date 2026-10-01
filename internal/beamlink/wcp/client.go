@@ -37,6 +37,8 @@ type ClientConfig struct {
 	CircuitEndpoint        string
 	Circuits               circuit.Controller
 	Receipts               *evidence.Recorder
+	// StorageProbeRelays serves storage.probe.relay.v1; nil refuses relays.
+	StorageProbeRelays StorageProbeRelayBinder
 }
 
 type Client struct {
@@ -150,8 +152,16 @@ func (c *Client) runSession(ctx context.Context) error {
 
 	sessionContext, cancelSession := context.WithCancel(ctx)
 	defer cancelSession()
+	emitter := relayEmitter{framed: framed, cursor: &c.eventCursor}
+	var relays StorageProbeRelaySession
+	if c.config.StorageProbeRelays != nil {
+		relays = c.config.StorageProbeRelays(welcome.OrchestratorHotkey, emitter)
+		defer relays.CloseAll()
+	}
 	readError := make(chan error, 1)
-	go func() { readError <- c.readLoop(sessionContext, framed, welcomeEnvelope.Sequence) }()
+	go func() {
+		readError <- c.readLoop(sessionContext, framed, welcomeEnvelope.Sequence, relays, emitter)
+	}()
 	heartbeatError := make(chan error, 1)
 	go func() {
 		ticker := time.NewTicker(welcome.HeartbeatInterval)
@@ -242,7 +252,8 @@ func (c *Client) replayProgress(framed *framedConn, sent map[string]struct{}) er
 	return nil
 }
 
-func (c *Client) readLoop(ctx context.Context, framed *framedConn, initialSequence uint64) error {
+func (c *Client) readLoop(ctx context.Context, framed *framedConn, initialSequence uint64,
+	relays StorageProbeRelaySession, relayEmitter StorageProbeRelayEmitter) error {
 	lastSequence := initialSequence
 	for {
 		envelope, err := framed.read()
@@ -343,6 +354,8 @@ func (c *Client) readLoop(ctx context.Context, framed *framedConn, initialSequen
 					}
 				}
 			}
+		case TypeStorageProbeRelayOpen, TypeStorageProbeRelayData, TypeStorageProbeRelayClose:
+			handleStorageProbeRelay(relays, relayEmitter, envelope)
 		case TypeError:
 			continue
 		default:

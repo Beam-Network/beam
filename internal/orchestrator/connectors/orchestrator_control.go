@@ -27,6 +27,7 @@ type roomControl struct {
 	rooms                     *roomtransfer.Service
 	workloads                 *roomworkloads.Manager
 	tasks                     *dispatch.Service
+	relays                    StorageProbeRelayLink
 	lastCapabilityFingerprint string
 }
 
@@ -38,6 +39,7 @@ type roomControlNATS interface {
 	chanSubscribe(string, chan *nats.Msg) (roomControlSubscription, error)
 	flushWithContext(context.Context) error
 	requestWithContext(context.Context, string, []byte) (*nats.Msg, error)
+	publish(string, []byte) error
 }
 
 type natsRoomControlConnection struct {
@@ -56,9 +58,14 @@ func (connection natsRoomControlConnection) requestWithContext(ctx context.Conte
 	return connection.conn.RequestWithContext(ctx, subject, payload)
 }
 
+func (connection natsRoomControlConnection) publish(subject string, payload []byte) error {
+	return connection.conn.Publish(subject, payload)
+}
+
 type roomControlSession struct {
 	control       *roomControl
 	messages      chan *nats.Msg
+	relayMessages chan *nats.Msg
 	subscriptions []roomControlSubscription
 }
 
@@ -95,22 +102,21 @@ func (control *roomControl) bind(ctx context.Context) (_ *roomControlSession, er
 	if err := control.publishCapability(ctx, true); err != nil {
 		return nil, err
 	}
-	session := &roomControlSession{control: control, messages: make(chan *nats.Msg, 256)}
+	session := &roomControlSession{control: control, messages: make(chan *nats.Msg, 256), relayMessages: make(chan *nats.Msg, 256)}
 	defer func() {
 		if err != nil {
 			session.close()
 		}
 	}()
-	subscribe := func(messageType string) error {
-		subscription, subscribeErr := control.conn.chanSubscribe(
-			control.subject("runtime", messageType), session.messages,
-		)
+	subscribeTo := func(messageType string, messages chan *nats.Msg) error {
+		subscription, subscribeErr := control.conn.chanSubscribe(control.subject("runtime", messageType), messages)
 		if subscribeErr != nil {
 			return subscribeErr
 		}
 		session.subscriptions = append(session.subscriptions, subscription)
 		return nil
 	}
+	subscribe := func(messageType string) error { return subscribeTo(messageType, session.messages) }
 	if err = subscribe("task_offer_batch"); err != nil {
 		return nil, err
 	}
@@ -131,6 +137,15 @@ func (control *roomControl) bind(ctx context.Context) (_ *roomControlSession, er
 		}
 		if err = subscribe("room_workload_cancel"); err != nil {
 			return nil, err
+		}
+	}
+	if control.relays != nil {
+		// Relay frames have their own queue so offers never delay them.
+		for _, messageType := range []string{contracts.StorageProbeRelayOpenType, contracts.StorageProbeRelayDataType,
+			contracts.StorageProbeRelayCloseType} {
+			if err = subscribeTo(messageType, session.relayMessages); err != nil {
+				return nil, err
+			}
 		}
 	}
 	flushCtx, cancelFlush := context.WithTimeout(ctx, control.config.RequestTimeout)
@@ -157,6 +172,20 @@ func (session *roomControlSession) run(ctx context.Context) error {
 	defer stopHeartbeat()
 	heartbeatErrors := make(chan error, 1)
 	go control.runHeartbeat(heartbeatCtx, heartbeatErrors)
+	if control.relays != nil {
+		relayCtx, stopRelays := context.WithCancel(ctx)
+		stopped := make(chan struct{})
+		control.relays.SetStorageProbeRelaySink(control.publishStorageProbeRelayEvent)
+		go func() {
+			control.runStorageProbeRelays(relayCtx, session.relayMessages)
+			close(stopped)
+		}()
+		defer func() {
+			stopRelays()
+			<-stopped
+			control.relays.SetStorageProbeRelaySink(nil)
+		}()
+	}
 	var roomQueue *roomWorkloadQueue
 	if control.workloads != nil {
 		jobsCtx, stopJobs := context.WithCancel(ctx)
@@ -481,6 +510,10 @@ func (control *roomControl) capabilityManifest(now time.Time) contracts.Capabili
 	availableConnections := int64(0)
 	if len(capabilities) > 0 {
 		availableConnections = 1
+	}
+	// Relays are not gated by room capacity, so they do not count toward it.
+	if control.relays != nil && control.relays.StorageProbeRelayAvailable() {
+		capabilities = append(capabilities, contracts.StorageProbeRelayCapability)
 	}
 	manifest := contracts.NewOrchestratorCapabilityManifest(
 		control.config.Hotkey,

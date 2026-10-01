@@ -70,6 +70,7 @@ func (s *Server) handle(parent context.Context, connection net.Conn) {
 		framed: framed, server: s, done: make(chan struct{}),
 	}
 	session.lastRead.Store(envelope.Sequence)
+	session.storageProbeRelay.Store(advertisesStorageProbeRelay(hello.CapabilityManifest))
 	s.mu.Lock()
 	previous := s.sessions[session.workerID]
 	s.sessions[session.workerID] = session
@@ -84,9 +85,10 @@ func (s *Server) handle(parent context.Context, connection net.Conn) {
 		}
 		s.mu.Unlock()
 		session.close()
+		s.dropStorageProbeRelays(session)
 	}()
 	if _, err := session.send(TypeWelcome, envelope.MessageID, Welcome{
-		OrchestratorID: welcome.OrchestratorID, SessionID: welcome.SessionID,
+		OrchestratorID: welcome.OrchestratorID, OrchestratorHotkey: welcome.OrchestratorHotkey, SessionID: welcome.SessionID,
 		HeartbeatInterval: welcome.HeartbeatInterval, ConfigEpoch: welcome.ConfigEpoch,
 		PlanVersion: welcome.CurrentPlanVersion,
 	}); err != nil {
@@ -127,6 +129,8 @@ func (s *Server) handleEnvelope(session *Session, envelope Envelope) error {
 		return s.handleCheckpoint(session, envelope)
 	case TypeReceipt:
 		return s.handleReceipt(session, envelope)
+	case TypeStorageProbeRelayOpened, TypeStorageProbeRelayData, TypeStorageProbeRelayClose:
+		return s.handleStorageProbeRelay(session, envelope)
 	case TypeError:
 		_, err := decodePayload[ErrorMessage](envelope)
 		return err
@@ -143,8 +147,12 @@ func (s *Server) handleHeartbeat(session *Session, envelope Envelope) error {
 	if heartbeat.Identity.WorkerID != session.workerID || heartbeat.Identity.NodeID != session.identity.NodeID {
 		return errors.New("heartbeat identity changed within session")
 	}
-	return s.control.Heartbeat(heartbeat.Identity, heartbeat.Status, heartbeat.Region, heartbeat.CircuitEndpoint,
-		heartbeat.Capabilities, heartbeat.CapabilityManifest, heartbeat.Total, heartbeat.Available, heartbeat.PlanVersion)
+	if err := s.control.Heartbeat(heartbeat.Identity, heartbeat.Status, heartbeat.Region, heartbeat.CircuitEndpoint,
+		heartbeat.Capabilities, heartbeat.CapabilityManifest, heartbeat.Total, heartbeat.Available, heartbeat.PlanVersion); err != nil {
+		return err
+	}
+	session.storageProbeRelay.Store(advertisesStorageProbeRelay(heartbeat.CapabilityManifest))
+	return nil
 }
 
 func (s *Server) handleDecision(envelope Envelope) error {
@@ -272,6 +280,8 @@ type Session struct {
 	done       chan struct{}
 	closeOnce  sync.Once
 	lastRead   atomic.Uint64
+	// storageProbeRelay reports whether the Worker's manifest advertises storage.probe.relay.v1.
+	storageProbeRelay atomic.Bool
 }
 
 func (s *Session) send(messageType, replyTo string, value any) (Envelope, error) {
