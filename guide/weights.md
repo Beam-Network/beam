@@ -63,7 +63,7 @@ Weights are computed only for orchestrators in the **qualified** pool.
 
 ## Fraud report bonuses
 
-Administrators grant emission bonuses for distinct, verified fraud or exploit findings:
+Administrators grant emission bonuses for distinct, verified fraud, exploit or security findings:
 
 | Severity | Bonus per finding |
 | --- | ---: |
@@ -80,7 +80,7 @@ Awards follow your hotkey on the same subnet through resets and UID changes. Tim
 
 The bonus affects emission ranking, not routing or qualification. Zero uploads or a zero penalty still produce zero weight.
 
-> The fraud reporting pipeline is still in development and will be released soon.
+Report them on the [bug desk](./bug-reports.md) with the **Exploit** or **Security** category.
 
 ## No-transfer behavior
 
