@@ -6,7 +6,7 @@ sidebar_label: Reporting Bugs
 
 # Reporting Bugs
 
-Registered orchestrators report BeamCore bugs on the dashboard at **[/bugs](pathname:///bugs)**, not in public Discord channels. Each report is signed with your orchestrator hotkey, gets an id such as `orc_b1m_4x1h07ca0x`, and keeps a status and timeline you can come back to. Only confirmed **Exploit** and **Security** reports are rewarded, with a [fraud report bonus](./weights.md#fraud-report-bonuses).
+Registered orchestrators report BeamCore bugs on the dashboard at **[/bugs](https://data.b1m.ai/bugs)**, not in public Discord channels. Each report is signed with your orchestrator hotkey, gets an id such as `orc_b1m_4x1h07ca0x`, and keeps a status and timeline you can come back to. Only confirmed **Exploit** and **Security** reports are rewarded, with a [fraud report bonus](./weights.md#fraud-report-bonuses).
 
 ## Who can report
 
