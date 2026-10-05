@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/netip"
 	"regexp"
 	"strconv"
@@ -16,16 +17,16 @@ import (
 	"time"
 )
 
-// Storage probe relay (`storage.probe.relay.v1`): BeamCore opens a short-lived
+// Storage probe relay (`storage.probe.relay.v2`): BeamCore opens a short-lived
 // relay through an orchestrator to one of its workers, which splices raw bytes
-// to a storage host on port 443. BeamCore runs TLS end to end over the relay, so
-// participants only forward ciphertext. Every limit comes from a BeamCore-signed
-// intent that the worker verifies before dialing.
+// to the storage host and port named by the intent. BeamCore runs TLS end to
+// end over the relay, so participants only forward ciphertext. Every limit
+// comes from a BeamCore-signed intent that the worker verifies before dialing.
 const (
-	StorageProbeRelayCapability      = "storage.probe.relay.v1"
-	StorageProbeRelayIntentSchema    = "storage-probe-relay/v1"
-	StorageProbeRelaySignatureDomain = "beam:storage-probe-relay-intent/v1"
-	StorageProbeRelayPort            = 443
+	StorageProbeRelayCapability      = "storage.probe.relay.v2"
+	StorageProbeRelayProtocolVersion = 2
+	StorageProbeRelayIntentSchema    = "storage-probe-relay/v2"
+	StorageProbeRelaySignatureDomain = "beam:storage-probe-relay-intent/v2"
 	StorageProbeRelayMaxTTL          = 60 * time.Second
 	StorageProbeRelayMaxBytes        = 65_536
 	StorageProbeRelayMaxFrameBytes   = 16_384
@@ -166,9 +167,10 @@ func (intent StorageProbeRelayIntent) CanonicalMessage() []byte {
 	return []byte(StorageProbeRelaySignatureDomain + "\x00" + strings.Join(fields, "\n"))
 }
 
-// ValidateFields checks the intent's field formats and caps. The target (host
-// and port) and the time window are checked separately because they map to
-// their own close reasons.
+// ValidateFields checks the intent's field formats and caps, including the
+// host form and the port range. Whether the target's addresses are public and
+// the time window are checked separately because they map to their own close
+// reasons.
 func (intent StorageProbeRelayIntent) ValidateFields() error {
 	switch {
 	case intent.SchemaVersion != StorageProbeRelayIntentSchema:
@@ -180,6 +182,10 @@ func (intent StorageProbeRelayIntent) ValidateFields() error {
 		!storageProbeRelayTokenPattern.MatchString(intent.WorkerID),
 		!storageProbeRelayNoncePattern.MatchString(intent.Nonce):
 		return errors.New("malformed storage probe relay intent identity")
+	case !validStorageProbeRelayHost(intent.Host):
+		return errors.New("storage probe relay intent host must be a hostname or a canonical IP literal")
+	case intent.Port < 1 || intent.Port > math.MaxUint16:
+		return errors.New("storage probe relay intent port is out of range")
 	case intent.MaxBytesUp < 1 || intent.MaxBytesUp > StorageProbeRelayMaxBytes,
 		intent.MaxBytesDown < 1 || intent.MaxBytesDown > StorageProbeRelayMaxBytes,
 		intent.MaxFrameBytes < 1 || intent.MaxFrameBytes > StorageProbeRelayMaxFrameBytes:
@@ -257,8 +263,28 @@ func VerifyStorageProbeRelayIntent(publicKey ed25519.PublicKey, intent StoragePr
 	return ed25519.Verify(publicKey, intent.CanonicalMessage(), raw)
 }
 
+// validStorageProbeRelayHost accepts an intent host: a lowercase DNS hostname
+// or a canonical IP literal.
+func validStorageProbeRelayHost(host string) bool {
+	_, literal := StorageProbeRelayIPLiteral(host)
+	return literal || IsStorageProbeRelayHostname(host)
+}
+
+// StorageProbeRelayIPLiteral returns the address of a host written as a
+// canonical IP literal: IPv4 dotted decimal without leading zeros, or IPv6 in
+// lowercase RFC 5952 compressed form without brackets or zone. IPv4-mapped
+// IPv6 is never a literal target: BeamCore sends such a host as its IPv4
+// literal.
+func StorageProbeRelayIPLiteral(host string) (netip.Addr, bool) {
+	address, err := netip.ParseAddr(host)
+	if err != nil || address.Zone() != "" || address.String() != host || strings.HasPrefix(host, "::ffff:") {
+		return netip.Addr{}, false
+	}
+	return address, true
+}
+
 // IsStorageProbeRelayHostname accepts a lowercase DNS hostname with at least
-// two labels whose last label is not numeric. IP literals are never targets.
+// two labels whose last label is not numeric. IP literals are not hostnames.
 func IsStorageProbeRelayHostname(host string) bool {
 	if host == "" || len(host) > 253 || host != strings.ToLower(host) {
 		return false
@@ -304,9 +330,9 @@ var storageProbeRelayBlockedPrefixes = []netip.Prefix{
 
 var storageProbeRelayNAT64Prefix = netip.MustParsePrefix("64:ff9b::/96")
 
-// StorageProbeRelayAddressAllowed reports whether a resolved address is a
-// public unicast address. IPv4-mapped and NAT64-translated addresses are
-// judged by the IPv4 address they carry.
+// StorageProbeRelayAddressAllowed reports whether a target address, resolved or
+// an IP literal, is a public unicast address. IPv4-mapped and NAT64-translated
+// addresses are judged by the IPv4 address they carry.
 func StorageProbeRelayAddressAllowed(address netip.Addr) bool {
 	address = address.Unmap()
 	if storageProbeRelayNAT64Prefix.Contains(address) {

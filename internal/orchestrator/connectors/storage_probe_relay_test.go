@@ -20,12 +20,12 @@ const (
 	relayVectorHotkey  = "5F3sa2TJAWMqDhXG6jhV4N8ko9SxwGy8TpaNS1repo5EYjQX"
 	relayVectorRelayID = "6f1c2a4e-8b3d-4c5e-9f60-7a8b9c0d1e2f"
 	relayVectorKey     = "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg"
-	relayVectorSig     = "8aT13ybEmUj6vAkr-l8TraRbN00CdyIJecH3tr_Iz-0d_tUrjYSp6r_W1s4W6xqZVywlajNKtN1ZUTWHoT2fBQ"
+	relayVectorSig     = "XpeeggB4jEPxb7r5qD1zQthVOBhRZxTQPBgHN9K1qL-ztwV3R_GcugRotH8knlcWuu0fvH2dTsqE3E16nddoDw"
 )
 
 func relayVectorIntent() map[string]any {
 	return map[string]any{
-		"schema_version": "storage-probe-relay/v1", "key_id": "56475aa75463474c", "environment": "dev",
+		"schema_version": "storage-probe-relay/v2", "key_id": "56475aa75463474c", "environment": "dev",
 		"relay_id": relayVectorRelayID, "orchestrator_hotkey": relayVectorHotkey, "worker_id": "worker-7d1f",
 		"host": "example-bucket.s3.us-east-1.amazonaws.com", "port": 443,
 		"issued_at": "2026-10-01T12:00:00.000Z", "expires_at": "2026-10-01T12:00:45.000Z",
@@ -127,12 +127,17 @@ func TestStorageProbeRelayCapabilityFollowsConnectedWorkers(t *testing.T) {
 	}
 	found := false
 	for _, protocol := range manifest.Protocols {
-		if protocol.Name == contracts.StorageProbeRelayCapability {
-			found = protocol.Min == 1 && protocol.Max == 1
+		if protocol.Name == "storage.probe.relay.v2" {
+			found = protocol.Min == 2 && protocol.Max == 2
+		}
+	}
+	for _, capability := range manifest.Capabilities {
+		if capability == "storage.probe.relay.v1" {
+			t.Fatalf("relay must not advertise v1: %+v", manifest)
 		}
 	}
 	if !found || manifest.Capacity.AvailableConnections != 0 {
-		t.Fatalf("relay must advertise protocol v1 without adding room capacity: %+v", manifest)
+		t.Fatalf("relay must advertise protocol v2 without adding room capacity: %+v", manifest)
 	}
 }
 
@@ -156,31 +161,52 @@ func TestStorageProbeRelayBindSubscribesRuntimeRelaySubjects(t *testing.T) {
 }
 
 func TestStorageProbeRelayOpenForwardsTheSignedIntentUnchanged(t *testing.T) {
-	link := &fakeRelayLink{}
-	control, connection := newRelayControl(t, link)
-	payload := beamCorePayload(t, map[string]any{"type": "storage_probe_relay_open", "relay_id": relayVectorRelayID,
-		"intent": relayVectorIntent(), "signature": relayVectorSig})
-	if err := control.handleStorageProbeRelayMessage("storage_probe_relay_open", payload, relayVectorNow); err != nil {
-		t.Fatal(err)
-	}
-	if len(link.opens) != 1 || len(connection.publishedMessages()) != 0 {
-		t.Fatalf("opens=%+v published=%+v", link.opens, connection.publishedMessages())
-	}
-	forwarded := link.opens[0]
-	if forwarded.workerID != "worker-7d1f" || forwarded.open.RelayID != relayVectorRelayID || forwarded.open.Signature != relayVectorSig ||
-		!forwarded.expiresAt.Equal(time.Date(2026, 10, 1, 12, 0, 45, 0, time.UTC)) {
-		t.Fatalf("unexpected forwarded open: %+v", forwarded)
-	}
-	intent, err := contracts.ParseStorageProbeRelayIntent(forwarded.open.Intent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	key, err := contracts.ParseStorageProbeRelayPublicKey(relayVectorKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !contracts.VerifyStorageProbeRelayIntent(key, intent, forwarded.open.Signature) {
-		t.Fatal("forwarded intent no longer verifies: values changed in transit")
+	literalIntent := relayVectorIntent()
+	literalIntent["host"], literalIntent["port"] = "2606:4700:4700::1111", 9443
+	for _, vector := range []struct {
+		name      string
+		intent    map[string]any
+		signature string
+		host      string
+		port      int64
+	}{
+		{name: "hostname", intent: relayVectorIntent(), signature: relayVectorSig,
+			host: "example-bucket.s3.us-east-1.amazonaws.com", port: 443},
+		{name: "IP literal on a non-443 port", intent: literalIntent,
+			signature: "0y9syYovFinfeXrKvYGcspgWzKzEWXN2ojnOTNYbPYXp4QFeWikyCkvTX9nqfdiUdFv2BoJNeokLuPduauNtDA",
+			host:      "2606:4700:4700::1111", port: 9443},
+	} {
+		t.Run(vector.name, func(t *testing.T) {
+			link := &fakeRelayLink{}
+			control, connection := newRelayControl(t, link)
+			payload := beamCorePayload(t, map[string]any{"type": "storage_probe_relay_open", "relay_id": relayVectorRelayID,
+				"intent": vector.intent, "signature": vector.signature})
+			if err := control.handleStorageProbeRelayMessage("storage_probe_relay_open", payload, relayVectorNow); err != nil {
+				t.Fatal(err)
+			}
+			if len(link.opens) != 1 || len(connection.publishedMessages()) != 0 {
+				t.Fatalf("opens=%+v published=%+v", link.opens, connection.publishedMessages())
+			}
+			forwarded := link.opens[0]
+			if forwarded.workerID != "worker-7d1f" || forwarded.open.RelayID != relayVectorRelayID || forwarded.open.Signature != vector.signature ||
+				!forwarded.expiresAt.Equal(time.Date(2026, 10, 1, 12, 0, 45, 0, time.UTC)) {
+				t.Fatalf("unexpected forwarded open: %+v", forwarded)
+			}
+			intent, err := contracts.ParseStorageProbeRelayIntent(forwarded.open.Intent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if intent.Host != vector.host || intent.Port != vector.port || intent.ValidateFields() != nil {
+				t.Fatalf("forwarded intent target %s:%d, want %s:%d", intent.Host, intent.Port, vector.host, vector.port)
+			}
+			key, err := contracts.ParseStorageProbeRelayPublicKey(relayVectorKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !contracts.VerifyStorageProbeRelayIntent(key, intent, forwarded.open.Signature) {
+				t.Fatal("forwarded intent no longer verifies: values changed in transit")
+			}
+		})
 	}
 }
 

@@ -34,7 +34,7 @@ func advertisesStorageProbeRelay(manifest *contracts.CapabilityManifest) bool {
 }
 
 // StorageProbeRelayAvailable reports whether a connected Worker advertises
-// storage.probe.relay.v1.
+// storage.probe.relay.v2.
 func (s *Server) StorageProbeRelayAvailable() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

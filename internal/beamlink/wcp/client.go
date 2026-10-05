@@ -37,7 +37,7 @@ type ClientConfig struct {
 	CircuitEndpoint        string
 	Circuits               circuit.Controller
 	Receipts               *evidence.Recorder
-	// StorageProbeRelays serves storage.probe.relay.v1; nil refuses relays.
+	// StorageProbeRelays serves storage.probe.relay.v2; nil refuses relays.
 	StorageProbeRelays StorageProbeRelayBinder
 }
 

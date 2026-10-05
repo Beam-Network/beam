@@ -1,8 +1,9 @@
 // Package storageprobe is the worker side of the storage probe relay
-// (`storage.probe.relay.v1`). For each BeamCore-signed intent it opens one TCP
-// connection to a vetted public storage host on port 443 and copies opaque
-// bytes in sequenced, capped frames. BeamCore runs TLS end to end over the
-// relay; the worker never terminates, inspects, logs or modifies relayed bytes.
+// (`storage.probe.relay.v2`). For each BeamCore-signed intent it opens one TCP
+// connection to a vetted public address of the storage host on the intent's
+// port and copies opaque bytes in sequenced, capped frames. BeamCore runs TLS
+// end to end over the relay; the worker never terminates, inspects, logs or
+// modifies relayed bytes.
 package storageprobe
 
 import (
@@ -224,9 +225,6 @@ func (s *Service) authorize(orchestratorHotkey string, open contracts.StoragePro
 	if relaySeen || nonceSeen {
 		return intent, 0, contracts.StorageProbeRelayIntentReplayed
 	}
-	if intent.Port != contracts.StorageProbeRelayPort || !contracts.IsStorageProbeRelayHostname(intent.Host) {
-		return intent, 0, contracts.StorageProbeRelayTargetNotAllowed
-	}
 	if s.active >= s.maxConcurrent {
 		return intent, 0, contracts.StorageProbeRelayCapacityExhausted
 	}
@@ -275,13 +273,12 @@ func (r *relay) start() {
 	go r.run()
 }
 
-// run resolves the host once, vets every address, dials one vetted address
-// and then copies bytes from the storage host into sequenced frames.
+// run vets every address of the target, dials one vetted address on the
+// intent's port and then copies bytes from the storage host into sequenced
+// frames.
 func (r *relay) run() {
 	service := r.link.service
-	resolveCtx, cancelResolve := context.WithTimeout(r.ctx, connectTimeout)
-	addresses, err := service.resolve(resolveCtx, r.intent.Host)
-	cancelResolve()
+	addresses, err := r.addresses()
 	if err != nil || len(addresses) == 0 {
 		r.finish(r.failure(contracts.StorageProbeRelayDNSFailed), true)
 		return
@@ -293,7 +290,8 @@ func (r *relay) run() {
 		}
 	}
 	dialCtx, cancelDial := context.WithTimeout(r.ctx, connectTimeout)
-	conn, err := service.dial(dialCtx, netip.AddrPortFrom(preferredAddress(addresses), contracts.StorageProbeRelayPort))
+	// ValidateFields bounds the port to 1..65535.
+	conn, err := service.dial(dialCtx, netip.AddrPortFrom(preferredAddress(addresses), uint16(r.intent.Port)))
 	cancelDial()
 	if err != nil {
 		r.finish(r.failure(contracts.StorageProbeRelayDialFailed), true)
@@ -315,6 +313,17 @@ func (r *relay) run() {
 	}
 	go r.writeUpstream(conn)
 	r.readDownstream(conn)
+}
+
+// addresses returns the target's addresses: an IP literal is its own single
+// address; a hostname is resolved once.
+func (r *relay) addresses() ([]netip.Addr, error) {
+	if address, literal := contracts.StorageProbeRelayIPLiteral(r.intent.Host); literal {
+		return []netip.Addr{address}, nil
+	}
+	ctx, cancel := context.WithTimeout(r.ctx, connectTimeout)
+	defer cancel()
+	return r.link.service.resolve(ctx, r.intent.Host)
 }
 
 // failure reports timeout when the relay's lifetime ended during the step.

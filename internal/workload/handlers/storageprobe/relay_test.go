@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -129,7 +130,7 @@ func (s testSigner) intent(t *testing.T, now time.Time, change func(*contracts.S
 	intent := contracts.StorageProbeRelayIntent{
 		SchemaVersion: contracts.StorageProbeRelayIntentSchema, KeyID: s.keyID, Environment: "prod",
 		RelayID: randomRelayID(t), OrchestratorHotkey: testHotkey, WorkerID: testWorkerID, Host: testHost,
-		Port: contracts.StorageProbeRelayPort, IssuedAt: now.UTC().Format("2006-01-02T15:04:05.000Z"),
+		Port: 443, IssuedAt: now.UTC().Format("2006-01-02T15:04:05.000Z"),
 		ExpiresAt:  now.Add(30 * time.Second).UTC().Format("2006-01-02T15:04:05.000Z"),
 		MaxBytesUp: contracts.StorageProbeRelayMaxBytes, MaxBytesDown: contracts.StorageProbeRelayMaxBytes,
 		MaxFrameBytes: contracts.StorageProbeRelayMaxFrameBytes, Nonce: base64.RawURLEncoding.EncodeToString(nonce),
@@ -143,6 +144,20 @@ func (s testSigner) intent(t *testing.T, now time.Time, change func(*contracts.S
 	}
 	signature := base64.RawURLEncoding.EncodeToString(ed25519.Sign(s.privateKey, intent.CanonicalMessage()))
 	return contracts.StorageProbeRelayOpen{RelayID: intent.RelayID, Intent: raw, Signature: signature}
+}
+
+// v1Intent signs a v1 intent exactly as the v1 contract did: v1 schema and the
+// v1 signature domain.
+func (s testSigner) v1Intent(t *testing.T, now time.Time) contracts.StorageProbeRelayOpen {
+	t.Helper()
+	open := s.intent(t, now, func(intent *contracts.StorageProbeRelayIntent) { intent.SchemaVersion = "storage-probe-relay/v1" })
+	intent, err := contracts.ParseStorageProbeRelayIntent(open.Intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := "beam:storage-probe-relay-intent/v1" + strings.TrimPrefix(string(intent.CanonicalMessage()), contracts.StorageProbeRelaySignatureDomain)
+	open.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(s.privateKey, []byte(message)))
+	return open
 }
 
 // storageHost stands in for the storage host: the dial seam records the vetted
@@ -232,39 +247,101 @@ func TestBeamCorePublicKeyMatchesContractKeyID(t *testing.T) {
 	}
 }
 
-func TestRelayVerifiesContractTestVector(t *testing.T) {
-	const intent = `{"schema_version":"storage-probe-relay/v1","key_id":"56475aa75463474c","environment":"prod",` +
-		`"relay_id":"6f1c2a4e-8b3d-4c5e-9f60-7a8b9c0d1e2f","orchestrator_hotkey":"` + testHotkey + `",` +
-		`"worker_id":"worker-7d1f","host":"example-bucket.s3.us-east-1.amazonaws.com","port":443,` +
-		`"issued_at":"2026-10-01T12:00:00.000Z","expires_at":"2026-10-01T12:00:45.000Z","max_bytes_up":65536,` +
-		`"max_bytes_down":65536,"max_frame_bytes":16384,"nonce":"AAECAwQFBgcICQoLDA0ODw"}`
-	const signature = "OkwVF6_m1Bvp8yG4RPawxltiY60zxjwjPRTeEebf8Gwh5XPZdJPJ-ycmJ4zZVjpFqT0qpFqwcHaveaf7wQmhAg"
-	open := contracts.StorageProbeRelayOpen{RelayID: "6f1c2a4e-8b3d-4c5e-9f60-7a8b9c0d1e2f", Intent: json.RawMessage(intent), Signature: signature}
-	host := newStorageHost(t)
-	service, err := New(Config{
-		WorkerID: testWorkerID, PublicKey: "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
-		Now:     func() time.Time { return time.Date(2026, 10, 1, 12, 0, 10, 0, time.UTC) },
-		Resolve: func(context.Context, string) ([]netip.Addr, error) { return []netip.Addr{testPublicAddress}, nil },
-		Dial:    host.dial,
-	})
-	if err != nil {
-		t.Fatal(err)
+func TestRelayVerifiesContractTestVectors(t *testing.T) {
+	vectorIntent := func(host string, port int) json.RawMessage {
+		return json.RawMessage(`{"schema_version":"storage-probe-relay/v2","key_id":"56475aa75463474c","environment":"prod",` +
+			`"relay_id":"6f1c2a4e-8b3d-4c5e-9f60-7a8b9c0d1e2f","orchestrator_hotkey":"` + testHotkey + `",` +
+			`"worker_id":"worker-7d1f","host":"` + host + `","port":` + strconv.Itoa(port) + `,` +
+			`"issued_at":"2026-10-01T12:00:00.000Z","expires_at":"2026-10-01T12:00:45.000Z","max_bytes_up":65536,` +
+			`"max_bytes_down":65536,"max_frame_bytes":16384,"nonce":"AAECAwQFBgcICQoLDA0ODw"}`)
 	}
-	emitter := newRecordingEmitter()
-	link := service.Bind(testHotkey, emitter)
-	defer link.CloseAll()
+	for _, vector := range []struct {
+		name, host, signature string
+		port                  int
+		dialed                netip.AddrPort
+	}{
+		{name: "hostname", host: "example-bucket.s3.us-east-1.amazonaws.com", port: 443,
+			signature: "Y-47UO2ad7PXHce8W93_QYeTDDUmGn-EDgkdAzzFYrJB7p1cE0Ohxoqw9yzDbsNnrDrpTjC3zWvQ4KxgSFFiDQ",
+			dialed:    netip.AddrPortFrom(testPublicAddress, 443)},
+		{name: "IP literal", host: "2606:4700:4700::1111", port: 9443,
+			signature: "tAkRGsmw1op6UcPeofax9qspnZPYDlW4BliA5HwUr_rNu5gC3kYYeRPmBxx0QEKMtNphj9x6PofdTqfPnXFLCQ",
+			dialed:    netip.MustParseAddrPort("[2606:4700:4700::1111]:9443")},
+	} {
+		t.Run(vector.name, func(t *testing.T) {
+			open := contracts.StorageProbeRelayOpen{RelayID: "6f1c2a4e-8b3d-4c5e-9f60-7a8b9c0d1e2f",
+				Intent: vectorIntent(vector.host, vector.port), Signature: vector.signature}
+			host := newStorageHost(t)
+			service, err := New(Config{
+				WorkerID: testWorkerID, PublicKey: "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+				Now: func() time.Time { return time.Date(2026, 10, 1, 12, 0, 10, 0, time.UTC) },
+				Resolve: func(_ context.Context, name string) ([]netip.Addr, error) {
+					if name != "example-bucket.s3.us-east-1.amazonaws.com" {
+						t.Errorf("resolved %q", name)
+					}
+					return []netip.Addr{testPublicAddress}, nil
+				},
+				Dial: host.dial,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			emitter := newRecordingEmitter()
+			link := service.Bind(testHotkey, emitter)
+			defer link.CloseAll()
 
-	tampered := open
-	tampered.Signature = "9" + signature[1:]
-	link.Open(tampered)
-	emitter.expectClose(t, contracts.StorageProbeRelayIntentInvalid)
+			tampered := open
+			tampered.Signature = "9" + vector.signature[1:]
+			link.Open(tampered)
+			emitter.expectClose(t, contracts.StorageProbeRelayIntentInvalid)
 
-	link.Open(open)
-	if message := emitter.next(t); message.kind != "opened" {
-		t.Fatalf("contract test vector was not opened: %+v", message)
+			link.Open(open)
+			if message := emitter.next(t); message.kind != "opened" {
+				t.Fatalf("contract test vector was not opened: %+v", message)
+			}
+			if dialed := <-host.dialed; dialed != vector.dialed {
+				t.Fatalf("dialed %s, want %s", dialed, vector.dialed)
+			}
+		})
 	}
-	if dialed := <-host.dialed; dialed != netip.AddrPortFrom(testPublicAddress, 443) {
-		t.Fatalf("dialed %s, want the vetted address on port 443", dialed)
+}
+
+func TestRelayDialsTheVettedAddressOnTheIntentPort(t *testing.T) {
+	signer := newTestSigner(t)
+	for _, test := range []struct {
+		host   string
+		port   int64
+		dialed string
+	}{
+		{host: testHost, port: 9000, dialed: testPublicAddress.String() + ":9000"},
+		{host: testHost, port: 65535, dialed: testPublicAddress.String() + ":65535"},
+		{host: "52.216.0.20", port: 443, dialed: "52.216.0.20:443"},
+		{host: "52.216.0.20", port: 1, dialed: "52.216.0.20:1"},
+		{host: "2606:4700::1111", port: 8443, dialed: "[2606:4700::1111]:8443"},
+		{host: "64:ff9b::808:808", port: 443, dialed: "[64:ff9b::808:808]:443"},
+	} {
+		t.Run(test.host+"/"+strconv.FormatInt(test.port, 10), func(t *testing.T) {
+			host := newStorageHost(t)
+			service := newTestService(t, signer, host, func(config *Config) {
+				config.Resolve = func(_ context.Context, name string) ([]netip.Addr, error) {
+					if name != testHost {
+						t.Errorf("IP literal %q was resolved", name)
+					}
+					return []netip.Addr{testPublicAddress}, nil
+				}
+			})
+			emitter := newRecordingEmitter()
+			link := service.Bind(testHotkey, emitter)
+			defer link.CloseAll()
+			link.Open(signer.intent(t, time.Now(), func(intent *contracts.StorageProbeRelayIntent) {
+				intent.Host, intent.Port = test.host, test.port
+			}))
+			if message := emitter.next(t); message.kind != "opened" {
+				t.Fatalf("relay not opened: %+v", message)
+			}
+			if dialed := <-host.dialed; dialed != netip.MustParseAddrPort(test.dialed) {
+				t.Fatalf("dialed %s, want %s", dialed, test.dialed)
+			}
+		})
 	}
 }
 
@@ -272,12 +349,13 @@ func TestRelayRefusesInvalidIntentsWithoutDialing(t *testing.T) {
 	signer := newTestSigner(t)
 	other := newTestSigner(t)
 	now := time.Now()
-	tests := []struct {
+	type refusal struct {
 		name   string
 		open   func() contracts.StorageProbeRelayOpen
 		hotkey string
 		reason string
-	}{
+	}
+	tests := []refusal{
 		{name: "unknown key", reason: contracts.StorageProbeRelayIntentInvalid,
 			open: func() contracts.StorageProbeRelayOpen { return other.intent(t, now, nil) }},
 		{name: "environment", reason: contracts.StorageProbeRelayIntentInvalid, open: func() contracts.StorageProbeRelayOpen {
@@ -309,22 +387,57 @@ func TestRelayRefusesInvalidIntentsWithoutDialing(t *testing.T) {
 				intent.ExpiresAt = now.Add(61 * time.Second).UTC().Format("2006-01-02T15:04:05.000Z")
 			})
 		}},
-		{name: "IPv4 literal", reason: contracts.StorageProbeRelayTargetNotAllowed, open: func() contracts.StorageProbeRelayOpen {
-			return signer.intent(t, now, func(intent *contracts.StorageProbeRelayIntent) { intent.Host = "52.216.0.10" })
+		{name: "v1 intent", reason: contracts.StorageProbeRelayIntentInvalid, open: func() contracts.StorageProbeRelayOpen {
+			return signer.v1Intent(t, now)
 		}},
-		{name: "IPv6 literal", reason: contracts.StorageProbeRelayTargetNotAllowed, open: func() contracts.StorageProbeRelayOpen {
+		{name: "v1 schema signed under v2", reason: contracts.StorageProbeRelayIntentInvalid, open: func() contracts.StorageProbeRelayOpen {
+			return signer.intent(t, now, func(intent *contracts.StorageProbeRelayIntent) { intent.SchemaVersion = "storage-probe-relay/v1" })
+		}},
+		{name: "bracketed IPv6 literal", reason: contracts.StorageProbeRelayIntentInvalid, open: func() contracts.StorageProbeRelayOpen {
 			return signer.intent(t, now, func(intent *contracts.StorageProbeRelayIntent) { intent.Host = "[2606:4700::1111]" })
 		}},
-		{name: "single label", reason: contracts.StorageProbeRelayTargetNotAllowed, open: func() contracts.StorageProbeRelayOpen {
+		{name: "uncompressed IPv6 literal", reason: contracts.StorageProbeRelayIntentInvalid, open: func() contracts.StorageProbeRelayOpen {
+			return signer.intent(t, now, func(intent *contracts.StorageProbeRelayIntent) { intent.Host = "2606:4700:0:0:0:0:0:1111" })
+		}},
+		{name: "uppercase IPv6 literal", reason: contracts.StorageProbeRelayIntentInvalid, open: func() contracts.StorageProbeRelayOpen {
+			return signer.intent(t, now, func(intent *contracts.StorageProbeRelayIntent) { intent.Host = "2606:4700::ABCD" })
+		}},
+		{name: "zoned IPv6 literal", reason: contracts.StorageProbeRelayIntentInvalid, open: func() contracts.StorageProbeRelayOpen {
+			return signer.intent(t, now, func(intent *contracts.StorageProbeRelayIntent) { intent.Host = "fe80::1%eth0" })
+		}},
+		{name: "leading zero IPv4 literal", reason: contracts.StorageProbeRelayIntentInvalid, open: func() contracts.StorageProbeRelayOpen {
+			return signer.intent(t, now, func(intent *contracts.StorageProbeRelayIntent) { intent.Host = "52.216.0.010" })
+		}},
+		{name: "IPv4-mapped IPv6 literal", reason: contracts.StorageProbeRelayIntentInvalid, open: func() contracts.StorageProbeRelayOpen {
+			return signer.intent(t, now, func(intent *contracts.StorageProbeRelayIntent) { intent.Host = "::ffff:8.8.8.8" })
+		}},
+		{name: "single label", reason: contracts.StorageProbeRelayIntentInvalid, open: func() contracts.StorageProbeRelayOpen {
 			return signer.intent(t, now, func(intent *contracts.StorageProbeRelayIntent) { intent.Host = "localhost" })
 		}},
-		{name: "port", reason: contracts.StorageProbeRelayTargetNotAllowed, open: func() contracts.StorageProbeRelayOpen {
-			return signer.intent(t, now, func(intent *contracts.StorageProbeRelayIntent) { intent.Port = 8443 })
+		{name: "port zero", reason: contracts.StorageProbeRelayIntentInvalid, open: func() contracts.StorageProbeRelayOpen {
+			return signer.intent(t, now, func(intent *contracts.StorageProbeRelayIntent) { intent.Port = 0 })
 		}},
+		{name: "port above 65535", reason: contracts.StorageProbeRelayIntentInvalid, open: func() contracts.StorageProbeRelayOpen {
+			return signer.intent(t, now, func(intent *contracts.StorageProbeRelayIntent) { intent.Port = 65536 })
+		}},
+	}
+	for _, literal := range []string{
+		"10.0.0.1", "127.0.0.1", "169.254.169.254", "100.64.1.1", "192.168.0.10", "0.0.0.0", "203.0.113.7",
+		"::1", "fd00::1", "fe80::1", "::", "64:ff9b::7f00:1", "64:ff9b::a9fe:a9fe",
+	} {
+		tests = append(tests, refusal{name: "non-public literal " + literal, reason: contracts.StorageProbeRelayTargetNotAllowed,
+			open: func() contracts.StorageProbeRelayOpen {
+				return signer.intent(t, now, func(intent *contracts.StorageProbeRelayIntent) { intent.Host, intent.Port = literal, 8443 })
+			}})
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			service := newTestService(t, signer, nil, nil)
+			service := newTestService(t, signer, nil, func(config *Config) {
+				config.Resolve = func(_ context.Context, name string) ([]netip.Addr, error) {
+					t.Errorf("refused relay resolved %q", name)
+					return nil, errors.New("unexpected resolve")
+				}
+			})
 			emitter := newRecordingEmitter()
 			hotkey := test.hotkey
 			if hotkey == "" {
@@ -343,7 +456,7 @@ func TestRelayRefusesNonPublicResolvedAddresses(t *testing.T) {
 	signer := newTestSigner(t)
 	for _, resolved := range [][]string{
 		{"10.1.2.3"}, {"127.0.0.1"}, {"169.254.169.254"}, {"100.64.1.1"}, {"192.168.0.10"}, {"::1"},
-		{"fd00::1"}, {"fe80::1"}, {"::ffff:127.0.0.1"}, {"0.0.0.0"}, {"198.18.0.1"},
+		{"fd00::1"}, {"fe80::1"}, {"::ffff:127.0.0.1"}, {"64:ff9b::a00:1"}, {"0.0.0.0"}, {"198.18.0.1"},
 		{testPublicAddress.String(), "10.0.0.1"},
 	} {
 		t.Run(strings.Join(resolved, ","), func(t *testing.T) {

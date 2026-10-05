@@ -280,7 +280,7 @@ type Session struct {
 	done       chan struct{}
 	closeOnce  sync.Once
 	lastRead   atomic.Uint64
-	// storageProbeRelay reports whether the Worker's manifest advertises storage.probe.relay.v1.
+	// storageProbeRelay reports whether the Worker's manifest advertises storage.probe.relay.v2.
 	storageProbeRelay atomic.Bool
 }
 

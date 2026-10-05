@@ -25,7 +25,7 @@ type StorageProbeRelayLink interface {
 	CloseStorageProbeRelay(request contracts.StorageProbeRelayClose, notifyBeamCore bool)
 }
 
-// AttachStorageProbeRelays enables storage.probe.relay.v1 through the Workers' WCP links.
+// AttachStorageProbeRelays enables storage.probe.relay.v2 through the Workers' WCP links.
 func (s *BeamCoreConnector) AttachStorageProbeRelays(link StorageProbeRelayLink) { s.relays = link }
 
 // runStorageProbeRelays forwards BeamCore relay frames in arrival order.

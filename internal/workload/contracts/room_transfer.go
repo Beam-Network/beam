@@ -361,8 +361,11 @@ func NormalizeCapabilities(capabilities []string) []string {
 const TransferMultipartProtocolVersion = 2
 
 func CapabilityProtocolVersion(capability string) int {
-	if capability == TransferMultipartCapability {
+	switch capability {
+	case TransferMultipartCapability:
 		return TransferMultipartProtocolVersion
+	case StorageProbeRelayCapability:
+		return StorageProbeRelayProtocolVersion
 	}
 	return 1
 }

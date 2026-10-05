@@ -87,11 +87,13 @@ func newRelayTestBed(t *testing.T) *relayTestBed {
 	go func() { _ = orchestrator.Serve(ctx, listener) }()
 	bed.startWorker(t, ctx, registry, listener.Addr().String(), clientTLS, "worker-relay", base64.RawURLEncoding.EncodeToString(publicKey))
 	bed.startWorker(t, ctx, registry, listener.Addr().String(), clientTLS, "worker-plain", "")
+	// A Worker still on the v1 relay contract is not relay-capable.
+	bed.startWorker(t, ctx, registry, listener.Addr().String(), clientTLS, "worker-v1", "", "storage.probe.relay.v1")
 	return bed
 }
 
 func (b *relayTestBed) startWorker(t *testing.T, parent context.Context, registry *orchestratorregistry.Registry,
-	address string, clientTLS *tls.Config, workerID, relayKey string) {
+	address string, clientTLS *tls.Config, workerID, relayKey string, extraCapabilities ...string) {
 	t.Helper()
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -106,7 +108,7 @@ func (b *relayTestBed) startWorker(t *testing.T, parent context.Context, registr
 	capacity := domain.Resources{CPUMillis: 1000, MemoryBytes: 64 << 20, Connections: 10, Streams: 10}
 	governor, _ := resources.NewGovernor(capacity)
 	store := runtime.NewMemoryStore()
-	capabilities := []string{"action.execute"}
+	capabilities := append([]string{"action.execute"}, extraCapabilities...)
 	var binder StorageProbeRelayBinder
 	if relayKey != "" {
 		capabilities = append(capabilities, contracts.StorageProbeRelayCapability)
@@ -148,6 +150,11 @@ func (b *relayTestBed) startWorker(t *testing.T, parent context.Context, registr
 
 func (b *relayTestBed) open(t *testing.T, workerID string) (contracts.StorageProbeRelayOpen, time.Time) {
 	t.Helper()
+	return b.openTarget(t, workerID, "example.com", 443)
+}
+
+func (b *relayTestBed) openTarget(t *testing.T, workerID, host string, port int64) (contracts.StorageProbeRelayOpen, time.Time) {
+	t.Helper()
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		t.Fatal(err)
@@ -158,7 +165,7 @@ func (b *relayTestBed) open(t *testing.T, workerID string) (contracts.StoragePro
 	intent := contracts.StorageProbeRelayIntent{
 		SchemaVersion: contracts.StorageProbeRelayIntentSchema, KeyID: b.keyID, Environment: "prod",
 		RelayID:            id[0:8] + "-" + id[8:12] + "-" + id[12:16] + "-" + id[16:20] + "-" + id[20:32],
-		OrchestratorHotkey: relayTestHotkey, WorkerID: workerID, Host: "example.com", Port: 443,
+		OrchestratorHotkey: relayTestHotkey, WorkerID: workerID, Host: host, Port: port,
 		IssuedAt: now.UTC().Format("2006-01-02T15:04:05.000Z"), ExpiresAt: expiresAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 		MaxBytesUp: 65536, MaxBytesDown: 65536, MaxFrameBytes: 512, Nonce: base64.RawURLEncoding.EncodeToString(raw[16:]),
 	}
@@ -261,17 +268,34 @@ func (c *beamCoreRelayConn) SetReadDeadline(_ time.Time) error  { return nil }
 func (c *beamCoreRelayConn) SetWriteDeadline(_ time.Time) error { return nil }
 
 func TestStorageProbeRelayCarriesEndToEndTLSThroughOrchestratorAndWorker(t *testing.T) {
+	for _, target := range []struct {
+		host   string
+		port   int64
+		dialed netip.AddrPort
+	}{
+		{host: "example.com", port: 443, dialed: netip.AddrPortFrom(relayTestPublicAddress, 443)},
+		{host: "example.com", port: 9443, dialed: netip.AddrPortFrom(relayTestPublicAddress, 9443)},
+		{host: "52.216.0.20", port: 8443, dialed: netip.MustParseAddrPort("52.216.0.20:8443")},
+		{host: "2606:4700::1111", port: 443, dialed: netip.MustParseAddrPort("[2606:4700::1111]:443")},
+	} {
+		t.Run(target.dialed.String(), func(t *testing.T) {
+			testStorageProbeRelayEndToEnd(t, target.host, target.port, target.dialed)
+		})
+	}
+}
+
+func testStorageProbeRelayEndToEnd(t *testing.T, host string, port int64, wantDialed netip.AddrPort) {
 	bed := newRelayTestBed(t)
 	waitFor(t, 3*time.Second, bed.orchestrator.StorageProbeRelayAvailable)
-	open, expiresAt := bed.open(t, "worker-relay")
+	open, expiresAt := bed.openTarget(t, "worker-relay", host, port)
 	if reason := bed.orchestrator.OpenStorageProbeRelay("worker-relay", open, expiresAt); reason != "" {
 		t.Fatalf("open refused: %s", reason)
 	}
 	if event := bed.nextEvent(t); event.Type != contracts.StorageProbeRelayOpenedType || event.RelayID != open.RelayID {
 		t.Fatalf("expected opened, got %+v", event)
 	}
-	if dialed := <-bed.dialed; dialed != netip.AddrPortFrom(relayTestPublicAddress, 443) {
-		t.Fatalf("worker dialed %s, want the vetted address on 443", dialed)
+	if dialed := <-bed.dialed; dialed != wantDialed {
+		t.Fatalf("worker dialed %s, want %s", dialed, wantDialed)
 	}
 
 	relayConn := newBeamCoreRelayConn(t, bed, open.RelayID, 512)
@@ -319,6 +343,10 @@ func TestStorageProbeRelayRoutingRefusalsAndLinkLoss(t *testing.T) {
 	open, expiresAt = bed.open(t, "worker-plain")
 	if reason := bed.orchestrator.OpenStorageProbeRelay("worker-plain", open, expiresAt); reason != contracts.StorageProbeRelayUnsupported {
 		t.Fatalf("worker without the capability reason=%q", reason)
+	}
+	open, expiresAt = bed.open(t, "worker-v1")
+	if reason := bed.orchestrator.OpenStorageProbeRelay("worker-v1", open, expiresAt); reason != contracts.StorageProbeRelayUnsupported {
+		t.Fatalf("worker advertising only storage.probe.relay.v1 reason=%q", reason)
 	}
 
 	open, expiresAt = bed.open(t, "worker-relay")

@@ -108,7 +108,7 @@ endpoint capabilities come in worker pairs: `room.media` +
 `room.transfer` + `room.transfer.storage.v2`. Configure those workers as
 described in [Room Endpoint Capabilities](worker.md#room-endpoint-capabilities).
 
-`storage.probe.relay.v1` is advertised while a connected worker advertises it.
+`storage.probe.relay.v2` is advertised while a connected worker advertises it.
 See [Storage Probe Relay](worker.md#storage-probe-relay).
 
 ## NATS Connectivity and Build Provenance
