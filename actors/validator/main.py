@@ -197,11 +197,9 @@ async def get_network_analytics():
         raise HTTPException(status_code=503, detail="Validator not initialized")
 
     orchestrators = []
-    total_bandwidth = 0.0
     healthy_count = 0
 
     for orch in validator.orchestrators.values():
-        score = float(orch.last_score or 0.0)
         is_healthy = orch.is_healthy
         if is_healthy:
             healthy_count += 1
@@ -212,8 +210,8 @@ async def get_network_analytics():
                     orch.hotkey[:8] + "..." + orch.hotkey[-4:] if orch.hotkey else "unknown"
                 ),
                 "is_healthy": is_healthy,
-                "score": round(score, 4),
-                "bandwidth_mbps": 0.0,
+                "profiles": validator.orchestrator_workload_profiles.get(orch.hotkey, []),
+                "bandwidth_mbps": None,
                 "worker_count": validator._beamcore_worker_counts.get(orch.uid, 0),
                 "is_subnet_owned": orch.is_subnet_owned,
             }
@@ -248,11 +246,11 @@ async def get_network_analytics():
             "total": len(orchestrators),
             "healthy": healthy_count,
             "unhealthy": len(orchestrators) - healthy_count,
-            "total_bandwidth_mbps": round(total_bandwidth, 2),
+            "total_bandwidth_mbps": None,
         },
         "anti_gaming": sybil_stats,
         "orchestrator_list": sorted(
-            orchestrators, key=lambda item: item["score"], reverse=True
+            orchestrators, key=lambda item: item["uid"] if item["uid"] is not None else -1
         ),
     }
 
@@ -271,7 +269,7 @@ async def get_orchestrator_analytics():
             "hotkey": orch.hotkey,
             "is_subnet_owned": orch.is_subnet_owned,
             "worker_count": validator._beamcore_worker_counts.get(orch.uid, 0),
-            "score": round(float(orch.last_score or 0.0), 4),
+            "profiles": validator.orchestrator_workload_profiles.get(orch.hotkey, []),
             "sybil_multiplier": round(sybil_mults.get(orch.hotkey, 1.0), 4),
         })
 
@@ -279,23 +277,27 @@ async def get_orchestrator_analytics():
         "count": len(orchestrators),
         "orchestrators": sorted(
             orchestrators,
-            key=lambda item: item.get("score", 0),
-            reverse=True,
+            key=lambda item: item["uid"] if item["uid"] is not None else -1,
         ),
     }
 
 
 @app.get("/analytics/leaderboard")
-async def get_leaderboard():
+async def get_leaderboard(workload: str = "standard_transfers", pool: str = "qualified"):
     """Get orchestrator leaderboard sorted by performance."""
     if not validator:
         raise HTTPException(status_code=503, detail="Validator not initialized")
 
+    if workload not in ("standard_transfers", "room_transfers") or pool not in ("qualifying", "qualified"):
+        raise HTTPException(status_code=400, detail="Invalid workload or pool")
     leaderboard = []
     for orch in validator.orchestrators.values():
         if orch.is_subnet_owned:
             continue
-        score = float(orch.last_score or 0.0)
+        profile = next((p for p in validator.orchestrator_workload_profiles.get(orch.hotkey, [])
+                        if p.get("workload") == workload and p.get("pool") == pool and p.get("active")), None)
+        if profile is None:
+            continue
         leaderboard.append(
             {
                 "rank": 0,
@@ -303,19 +305,19 @@ async def get_leaderboard():
                 "hotkey_short": (
                     orch.hotkey[:8] + "..." + orch.hotkey[-4:] if orch.hotkey else "unknown"
                 ),
-                "score": round(score * 100, 2),
-                "bandwidth_mbps": 0.0,
+                "profile": profile,
+                "bandwidth_mbps": None,
                 "worker_count": validator._beamcore_worker_counts.get(orch.uid, 0),
             }
         )
 
-    leaderboard.sort(key=lambda item: item["score"], reverse=True)
+    leaderboard.sort(key=lambda item: item["profile"]["prismFinalScore"], reverse=True)
     for index, entry in enumerate(leaderboard):
         entry["rank"] = index + 1
 
     return {
         "updated_at": datetime.utcnow().isoformat(),
-        "leaderboard": leaderboard[:50],
+        "workload": workload, "pool": pool, "leaderboard": leaderboard[:50],
     }
 
 

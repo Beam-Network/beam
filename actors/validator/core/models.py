@@ -16,7 +16,6 @@ class OrchestratorInfo:
     registered_at: Optional[datetime] = None
     is_healthy: bool = True
     is_subnet_owned: bool = False
-    last_score: float = 0.0
 
 
 @dataclass

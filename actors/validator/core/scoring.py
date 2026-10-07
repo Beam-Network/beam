@@ -1,5 +1,6 @@
 """Local validator scoring and UID lookup behavior."""
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -9,52 +10,23 @@ logger = logging.getLogger(__name__)
 
 
 async def _update_scores(validator) -> None:
-    """Update local orchestrator scores from work, challenge, fraud, and payment signals."""
-    logger.debug(
-        f"_update_scores: scoring {len(validator.orchestrators)} orchestrators, {len(validator.work_summaries)} with summaries"
-    )
-
-    _baseline_multiplier = 0.1
+    """Read workload ratings from Core; local claims do not create PRISM ratings."""
     if validator.subnet_core_client:
-        try:
-            net_config = await validator.subnet_core_client.get_network_config()
-            if net_config and "validator_baseline_multiplier" in net_config:
-                _baseline_multiplier = float(net_config["validator_baseline_multiplier"])
-        except Exception as e:
-            logger.warning(f"Could not fetch baseline multiplier from SubnetCore: {e}")
-
-    for hotkey, info in validator.orchestrators.items():
-        summary = validator.work_summaries.get(hotkey)
-
-        if not summary:
-            final_score = 1.0 if info.is_subnet_owned else _baseline_multiplier
-            validator.orchestrator_scores[hotkey] = final_score
-            info.last_score = final_score
-            logger.debug(
-                f"_update_scores: {hotkey[:16]}... UID={info.uid} "
-                f"no work summary - baseline score={final_score:.4f}"
-            )
-            continue
-
-        throughput_score = min(max(summary.avg_bandwidth_mbps / 1000.0, 0.0), 1.0)
-        reliability_score = min(max(summary.success_rate, 0.0), 1.0)
-        work_score = (throughput_score * 0.6) + (reliability_score * 0.4)
-        payment_multiplier = validator.payment_penalty_multipliers.get(hotkey, 1.0)
-        challenge_multiplier = validator._calculate_challenge_multiplier(hotkey)
-        fraud_multiplier = validator._calculate_fraud_multiplier(hotkey)
-        final_score = work_score * challenge_multiplier * fraud_multiplier * payment_multiplier
-
-        validator.orchestrator_scores[hotkey] = final_score
-        info.last_score = final_score
-
-        logger.info(
-            f"_update_scores: {hotkey[:16]}... UID={info.uid} "
-            f"work_score={work_score:.4f} "
-            f"challenge_mult={challenge_multiplier:.4f} "
-            f"fraud_mult={fraud_multiplier:.4f} "
-            f"payment_mult={payment_multiplier:.4f} "
-            f"final_score={final_score:.6f}"
-        )
+        semaphore = asyncio.Semaphore(8)
+        async def fetch(hotkey, info):
+            if info.uid is None:
+                return None
+            try:
+                async with semaphore:
+                    response = await validator.subnet_core_client.get_workload_prism_profiles(info.uid)
+                if response.get("orch_uid") != info.uid or response.get("orch_hotkey") != hotkey:
+                    return None
+                return hotkey, response.get("profiles", [])
+            except Exception:
+                logger.debug("Workload profiles unavailable for UID %s", info.uid)
+                return None
+        results = await asyncio.gather(*(fetch(hotkey, info) for hotkey, info in validator.orchestrators.items()))
+        validator.orchestrator_workload_profiles = dict(result for result in results if result is not None)
 
     # Refresh the connection score view.
     for uid in validator.connections:

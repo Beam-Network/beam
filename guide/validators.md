@@ -53,7 +53,7 @@ The validator waits until its configured weight interval has elapsed before call
 
 ## PRISM And Epoch Summaries
 
-BeamCore computes PRISM from verified throughput, reliability, readiness, and penalty inputs for routing. Validator epoch summaries use completed qualified production uploaded MiB for emissions.
+BeamCore computes workload-specific PRISM from assignment-duel points, readiness and independent penalties for routing. Validator epoch summaries use completed qualified production uploaded MiB for emissions.
 
 Validators consume the already-materialized epoch summary:
 

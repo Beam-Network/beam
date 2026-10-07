@@ -120,6 +120,12 @@ class SubnetCoreClient:
         response.raise_for_status()
         return response.json()
 
+    async def get_workload_prism_profiles(self, orch_uid: int) -> Dict[str, Any]:
+        """Validator-authorized workload ratings; never derive ratings locally."""
+        response = await self._request("GET", f"/orchestrators/prism-scores/{orch_uid}", action="prism_scores")
+        response.raise_for_status()
+        return response.json()
+
     async def get_uid_ranges(self) -> Optional[UIDRanges]:
         client = await self._get_client()
         headers: Dict[str, str] = {}

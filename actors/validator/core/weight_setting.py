@@ -1,6 +1,7 @@
 """Chain weight publication using BeamCore's persisted vectors."""
 
 import logging
+import math
 from datetime import datetime
 from typing import List, Optional, Tuple
 
@@ -142,6 +143,7 @@ async def _set_weights(validator, subnet_core_available: bool) -> None:
                     "formula_version": formula_version,
                     "source": source,
                     "reward_evaluated_at": reward_evaluated_at,
+                    "workload_scoring": getattr(validator, "workload_scoring_snapshot", []),
                 }
             )
 
@@ -198,7 +200,35 @@ async def _get_persisted_weight_snapshot(
     if not uids or len(uids) != len(weights):
         logger.warning("BeamCore epoch summary missing uids/weights vectors")
         return None
-    fv = str(snapshot.get("formula_version") or "prism_final_x_task_done_count")
+    fv = snapshot.get("formula_version")
+    if not isinstance(fv, str) or not fv:
+        logger.warning("BeamCore epoch summary missing formula identity")
+        return None
+    if any(not isinstance(uid, int) or uid < 0 for uid in uids) or len(set(uids)) != len(uids):
+        logger.warning("BeamCore epoch summary has invalid recipients")
+        return None
+    if any(not isinstance(w, (int, float)) or not math.isfinite(w) or w < 0 for w in weights):
+        logger.warning("BeamCore epoch summary has invalid weights")
+        return None
+    scoring = snapshot.get("workload_scoring", [])
+    if not isinstance(scoring, list):
+        logger.warning("BeamCore epoch summary has invalid workload evidence")
+        return None
+    for item in scoring:
+        if not isinstance(item, dict) or not isinstance(item.get("profiles"), list):
+            return None
+        if item.get("performance_model") == "assignment_wave_duels_v1":
+            if any(not isinstance(p, dict) or p.get("workload") not in ("standard_transfers", "room_transfers")
+                   or p.get("pool") != "qualified" for p in item["profiles"]):
+                return None
+            aggregate = item.get("emission_prism_tiebreak_score")
+            try:
+                valid = 0 <= float(aggregate) <= 1 and math.isfinite(float(aggregate))
+            except (TypeError, ValueError):
+                valid = False
+            if not valid:
+                return None
+    validator.workload_scoring_snapshot = scoring
     ph = snapshot.get("params_hash")
     if isinstance(ph, str):
         params_hash: Optional[str] = ph

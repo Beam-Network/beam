@@ -59,7 +59,7 @@ def initialize_validator_state(validator, settings: Optional[Settings] = None) -
     validator.reassignment_manager = ReassignmentManager(validator.worker_registry)
 
     # Local score cache; BeamCore Prism remains authoritative.
-    validator.orchestrator_scores: Dict[str, float] = {}  # hotkey -> final score
+    validator.orchestrator_workload_profiles: Dict[str, List[dict]] = {}
     validator.payment_penalty_multipliers: Dict[str, float] = (
         {}
     )  # hotkey -> multiplier (1.0 = no penalty)

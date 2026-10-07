@@ -44,7 +44,7 @@ def get_orchestrator_scores(validator) -> Dict[str, dict]:
         uid = validator._get_uid_for_hotkey(hotkey)
         result[hotkey] = {
             "uid": uid,
-            "score": round(validator.orchestrator_scores.get(hotkey, 0), 4),
+            "profiles": validator.orchestrator_workload_profiles.get(hotkey, []),
             "url": info.url,
             "is_healthy": info.is_healthy,
             "is_subnet_owned": info.is_subnet_owned,

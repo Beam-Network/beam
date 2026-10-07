@@ -69,81 +69,32 @@ API keys are scoped by role (`client`, `orchestrator`, `worker`, `validator`). E
 
 Validator routes are the exception: they authenticate with a hotkey signature rather than a key, and a validator obtains its key from the heartbeat response. See [Validators](./validators.md) for the header format and the issuance flow.
 
-## Base URL
+## Supported APIs
 
-```
-http://<host>:8000
-```
+Participant operations and transfer control use [BeamCore](https://beamcore.b1m.ai). Its [OpenAPI schema](https://beamcore.b1m.ai/openapi.json) describes the supported role-scoped contracts.
 
-The OpenAPI schema is also available as JSON at <a href="https://beamcore.b1m.ai/openapi.json"><code>/openapi.json</code></a>.
+Delayed telemetry uses `https://api.b1m.ai`. Supply a customer organization key with `telemetry:read` permission in `x-api-key`. Reads use credits and the applicable API limits. Responses are private and must not be cached.
 
-## Dashboard Audit Routes
+Find request fields, response examples and errors in the [supported API reference](https://docs.b1m.ai/api).
 
-These dashboard routes expose audit evidence for verifying transfer behavior: database rows grouped by table, with sensitive credentials and signatures redacted. They are intended for data verification and operator investigation, not for public client API use.
+| Read | Route |
+| --- | --- |
+| Orchestrator profiles | `/v1/telemetry/participants/orchestrator` |
+| Details and history | `/v1/telemetry/participants/orchestrator/{id}` and `/{id}/history` |
+| Network and history | `/v1/telemetry/network` and `/network/history` |
+| Transfers | `/v1/telemetry/transfers` and `/transfers/{id}` |
+| Tasks and participant performance | `/v1/telemetry/tasks?transferId={id}` and `/v1/telemetry/transfers/{id}/participants` |
+| Assignment and event evidence | `/v1/telemetry/transfers/{id}/assignments` and `/events` |
+| Scoring and audit evidence | `/v1/telemetry/audit/{kind}/{id}` |
+| Published emission epochs | `/v1/telemetry/epochs` |
+| An epoch's orchestrator ranks and shares | `/v1/telemetry/epochs/{epoch}/orchestrators` |
+| Scoped public transfer proof | `/v1/audit/transfers/{id}/assignment-plan` |
+| Scoped public scoring proof | `/v1/audit/scoring/{epoch}/{kind}/{id}` |
 
-Audit routes are served from the dashboard domain:
+Transfer IDs may be UUIDs or room publication IDs beginning with `btr_pub_`. Lists, histories, task, participant-performance and assignment reads support a `workload` filter. Detail reads return all profiles. Keep the same filters while following `nextCursor`; use the returned snapshot identity to pin a version where supported.
 
-```http
-https://data.b1m.ai
-```
+Epoch reads use the history price tier. Their pages belong to one complete published version; filtering by workload keeps the recorded global ranks and emission shares.
 
-### Orchestrator transfer raw data
+Telemetry releases after one subnet epoch, or after 60 minutes when the clock is unavailable. Snapshot metadata identifies the version, observation and publication times, and evidence cutoff. Corrections produce a new delayed version. Published telemetry snapshots are available for up to 30 days from their observation time. Public audit reads are narrowly scoped and rate limited.
 
-```http
-GET https://data.b1m.ai/api/audit/orchestrator/{orchestratorId}/transfers/{transferId}?limit=100&offset=0
-```
-
-Returns raw rows for one orchestrator on one transfer, grouped by table:
-
-- `transfer_assignment_plans`
-- `task_offer_batches`
-- `tasks`
-- `task_attempts`
-- `task_results`
-- `overseer_interventions`
-
-`orchestratorId` may be an orchestrator UUID, UID, or hotkey. `transferId` must be a transfer UUID.
-
-### Worker transfer raw data
-
-```http
-GET https://data.b1m.ai/api/audit/worker/{workerId}/transfers/{transferId}?limit=100&offset=0
-```
-
-Returns raw rows for one worker on one transfer, grouped by table:
-
-- `workers`
-- `transfer_assignment_plans`
-- `tasks`
-- `task_attempts`
-- `task_results`
-- `overseer_interventions`
-
-`workerId` may be a worker ID or hotkey. `transferId` must be a transfer UUID.
-
-### Pagination
-
-Both routes accept:
-
-- `limit`: number of rows per table, default `1000`, max `5000`
-- `offset`: row offset per table, default `0`
-
-Responses include per-table pagination metadata:
-
-```json
-{
-  "pagination": {
-    "limit": 100,
-    "offset": 0,
-    "tables": {
-      "tasks": {
-        "limit": 100,
-        "offset": 0,
-        "returned": 100,
-        "has_more": true,
-        "next_offset": 100
-      }
-    }
-  }
-}
-```
+See [PRISM scoring](./prism) for a friendly explanation of points and workload profiles.

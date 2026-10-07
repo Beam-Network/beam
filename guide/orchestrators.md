@@ -7,7 +7,7 @@ sidebar_position: 4
 
 # Orchestrators
 
-Orchestrators operate worker pools, connect to BeamCore over NATS, route executable task and Room transfer offers to workers, and report worker outcomes back to BeamCore. PRISM uses BeamCore-verified throughput and reliability to determine routing share.
+Orchestrators operate worker pools, connect to BeamCore over NATS, route executable task and Room transfer offers to workers, and report worker outcomes back to BeamCore. PRISM uses verified assignment duels and separate workload profiles to determine routing share.
 
 ## Role
 
@@ -26,6 +26,8 @@ An orchestrator is responsible for:
 | ---------- | --------------------------- |
 | Qualifying | Calibration transfers       |
 | Qualified  | Production client transfers |
+
+Each workload has its own pool and confidence score. Standard transfers use a 120-task confidence target; room transfers use 40. Both graduate at confidence >= 0.9 with the existing success-rate and 24-hour maturity calculation. You can receive production standard transfers while receiving only qualifying room transfers, or the reverse. Recovery does not advance qualification.
 
 ## Worker Sessions
 
@@ -165,26 +167,26 @@ In production, `$CORE_SERVER_URL` is `https://beamcore.b1m.ai`.
 
 Complete [Registration](#registration) first, then set `CORE_SERVER_URL`, `BEAM_ENV=prod`, `BEAMCORE_NATS_URL`, `BEAMCORE_NATS_USER`, `BEAMCORE_NATS_PASSWORD`, `BEAMCORE_GATEWAY_URL`, `BEAM_WCP_LISTEN_ADDR`, `BEAM_WCP_TLS_CERT`, `BEAM_WCP_TLS_KEY`, and wallet settings. Set production `BEAMCORE_NATS_URL` to `tls://orch-gateway.b1m.ai:4222`. Workers connect with `BEAM_WCP_ADDRESS`, `BEAM_WCP_CA`, `BEAM_WCP_SERVER_NAME`, and their orchestrator membership. Keep the NATS control connection and WCP worker sessions healthy so BeamCore can deliver batches.
 
-## Dashboard
+## Scores and history
 
-The dashboard shows orchestrator readiness, NATS control connection state, PRISM score, transfer batches, task results, and BeamCore-verified throughput. Each recent transfer summarizes winning results as `completed/assigned`, together with worker, failure, superseded-attempt, recovery, and batch-status context.
+Read workload profiles, transfer results and assignment history through the [supported telemetry APIs](./api-reference). See [PRISM scoring](./prism) for how reliability, speed and performance points work together.
 
 ## History Reset
 
-Orchestrators can wipe their entire transfer history, task records, PRISM scoring evidence, and penalty history in a single call. The result depends on the orchestrator's current pool:
+Orchestrators can reset their task history and workload profiles in a single call. Each active profile returns to the qualifying pool; its confidence and performance points start again.
 
 | Current pool | After reset |
 |---|---|
 | Qualified | Demoted to qualifying pool; must re-accumulate confidence and evidence to graduate again |
-| Qualifying | Stays in qualifying; reset to newly-registered state (age clock and scores zeroed) |
+| Qualifying | Stays in qualifying; confidence and point total reset |
 
 **What is deleted:**
-- All transfers and their associated tasks, task results, task events, and task attempts
+- Your operational task and batch history
 - Fraud penalties attributed to this orchestrator
-- All PRISM evidence (hourly buckets, lifetime totals) and all PRISM metric snapshots (qualifying and qualified history)
+- Your active workload profiles and qualification progress are reset; opponents' valid points and published audit snapshots remain intact
 
 **What is preserved:**
-- Epoch weight history — past per-epoch weight and score records remain visible on the dashboard
+- Published scoring and audit history — earlier snapshots retain their original evidence
 - Identity fields (hotkey, UID, name, region)
 - Worker registrations
 - On-chain weight submissions
@@ -193,13 +195,13 @@ Orchestrators can wipe their entire transfer history, task records, PRISM scorin
 
 ```
 DELETE /orchestrators/history
-Authorization: Bearer <orchestrator-api-key>
+x-api-key: YOUR_ORCHESTRATOR_KEY
 Content-Type: application/json
 
 { "confirm": true }
 ```
 
-The `confirm: true` body field is required to prevent accidental deletion. The call returns `409` if any transfers are currently active (`pending`, `planning`, or `in_progress`) — wait for active work to complete before wiping.
+The `confirm: true` body field is required to prevent accidental deletion. The call returns `409` while you have active standard or room assignments. Wait for that work to finish before resetting.
 
 **Example response:**
 
@@ -207,12 +209,11 @@ The `confirm: true` body field is required to prevent accidental deletion. The c
 {
   "success": true,
   "orchestrator_id": "...",
-  "previous_pool": "qualified",
-  "new_pool": "qualifying",
-  "demoted": true,
+  "previous_pools": { "standard_transfers": "qualified", "room_transfers": "qualifying" },
+  "new_pools": { "standard_transfers": "qualifying", "room_transfers": "qualifying" },
+  "demoted_workloads": ["standard_transfers"],
   "history_deleted_at": "2026-06-19T12:00:00.000Z",
   "deleted": {
-    "transfers": 42,
     "tasks": 187
   }
 }

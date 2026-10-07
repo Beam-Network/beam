@@ -1,131 +1,101 @@
 ---
+id: prism
 sidebar_position: 2
 title: PRISM Scoring
 ---
 
 # PRISM Scoring
 
-**PRISM** (Performance and Reliability Incentive for Subnet Mining) is Beam's orchestrator scoring system. Your **PRISM final score** shapes how much production traffic you receive. Validator emission weights are based on completed qualified production tasks.
+PRISM rewards orchestrators that finish their assignments reliably and quickly. Each kind of work has its own profile, so good standard-transfer performance does not stand in for room-transfer performance.
 
-## Final score
+*Standard transfers and room transfers are rated today. Streaming and messages are coming later; their scores are unavailable.*
 
-```text
-throughput_score      = fleet_normalize(decayed_assignment_verified_mbps)
-reliability_score     = fleet_normalize(raw_reliability)
+## Every wave is a chance to compete
 
-performance_score     = 0.40 x throughput_score + 0.60 x reliability_score
+Within each workload and qualification pool, orchestrators are ordered by assigned task count, then their PRISM final score, then their performance points. Exact ties are settled once for that wave. Task count determines opponents.
 
-penalty_multiplier    = active_penalty_pressure(fraud, integrity_chunk_mismatch, sybil rows)
+Each neighboring pair has one duel, starting at the bottom. The middle participants face two neighbors; the top and bottom face one.
 
-current_ready_gate    = (ready AND connected) ? 1 : 0
-active_time_ratio     = active_seconds_in_lookback / lookback_seconds
-readiness_multiplier  = current_ready_gate x active_time_ratio
+![Orch B is highlighted in mint, with a centered connector branching to its two neighboring duels. The frozen order is orch A, orch B, orch C: 3, 3 and 2 assigned tasks; 3/3, 3/3 and 1/2 verified successes; and trusted durations of 12, 8 and 5 seconds. A precedes B through the pre-wave PRISM tie-break. First, B beats C on reliability: B +5, C −5. Then B beats A on speed at equal reliability: B +15, A −15. Wave totals are A −15, B +20 and C −5. Gains are green and losses red; each endpoint faces B once.](../static/img/prism-duels.png)
 
-prism_final_score     = performance_score x readiness_multiplier x penalty_multiplier
-```
+*This example follows orch B's two duels: defend against C, then climb against A. A and B have the same assigned load; their pre-wave PRISM places A higher. All three eligible orchestrators participate; the point changes add up to zero.*
 
-PRISM scores and routing multipliers are clamped to `[0, 1]`. The separate fraud-report emission multiplier ranges from `1` to `2`; it does not enter this routing formula.
-
-## Performance
-
-Beam compares orchestrators in the same pool cohort and maps each value linearly from fleet min to max into the compressed band **`[0.2, 1]`**: the lowest positive throughput in the cohort scores `0.2`, the highest scores `1`, with linear scaling between. Orchestrators with no positive throughput evidence score `0`.
-
-**Throughput** uses provider-verified transfer bandwidth samples. BeamCore keeps per-batch verified bandwidth visible for observability, then combines eligible batches into one task-count-weighted sample per transfer:
+Reliability is the assignment's success rate. The higher rate wins, compared before rounding:
 
 ```text
-transfer_mbps = SUM(batch_mbps x batch_task_count) / SUM(batch_task_count)
+successRate = verified successful original tasks / accountable original assigned tasks
 ```
 
-The singleton `first_assignment` batch always counts toward throughput. Later batches need to be above BeamCore's configured follow-up minimum task count for verified BW (10) to count, while their task outcomes still count for reliability and task totals.
-
-**Throughput** uses recent verified transfer bandwidth with a **1-hour half-life**. A bandwidth sample around 1 hour old contributes about `0.5`; a sample around 2 hours old contributes about `0.25`.
-
-**Reliability** uses time-decayed task outcomes - completions, failures, and reassignment-style failures - over the same window with a **1-hour half-life**. A reliability sample around 1 hour old contributes about `0.5`; a sample around 2 hours old contributes about `0.25`. Raw reliability blends success rate and reassignment rate, then fleet-normalizes on the same compressed min-to-max range before it enters the performance blend.
-
-**Performance** combines throughput and reliability with **40% throughput / 60% reliability** weighting.
-
-## Confidence and pools
-
-Beam routes each orchestrator through one of two pools:
-
-| Pool           | Traffic                           |
-| -------------- | --------------------------------- |
-| **Qualifying** | Calibration transfers (test mode) |
-| **Qualified**  | Production client transfers       |
-
-You begin in **qualifying**. Verified calibration work builds your **confidence score**. At **0.9** confidence, Beam graduates you to **qualified** for production routing and validator weights. Qualified membership persists for routing and scoring on production work.
+Neutral exclusions are not accountable tasks. For example, 100% beats 80% regardless of speed. **3/3 and 2/2 both equal 100%**, so their duel is decided by duration. For storage-backed work, completion time comes from verified provider metadata:
 
 ```text
-verified_task_ratio = min(1, verified_task_count / target_verified_tasks)
-age_ratio           = min(1, age_days / 1)
-maturity_factor     = 0.8 + 0.2 x age_ratio
-
-confidence_score    = verified_task_ratio x success_rate x maturity_factor
+assignmentDuration = latest verified task upload timestamp
+                   − Core publication time of first batch in the assignment
 ```
 
-The verified-task target is about **120** distinct tasks in the evidence window. Confidence also reflects your recent success rate and account age (full maturity around **1 day**).
+Agent-only room transfers have no storage-provider upload; their completion evidence comes from verified delivery receipts.
 
-Right after graduation, routing share uses a mid-tier weight until your first production transfer; it then follows your live PRISM score from production evidence.
+The shorter duration wins. This interval covers all batches in that wave; it is not averaged or divided by task count. Receiving a task-result message does not establish a storage upload's completion time, and participant-reported timestamps do not decide the duel.
 
-Qualifying and qualified orchestrators are scored against peers in the same pool.
+Equal success rates and durations draw; two assignments with no successes also draw. No accountable tasks, or missing trusted timing when rates are equal, means the duel is unrated. Draws and unrated duels award zero points.
 
-## Readiness
-
-Readiness has two parts:
-
-1. **Current gate** - you must be both **ready** on BeamCore and connected to BeamCore over NATS. If either is false, the folded readiness multiplier is `0`.
-2. **Active-time ratio** - BeamCore records readiness and connection transitions, then measures the percentage of the PRISM evidence window where `ready && connected` was true.
-
-The dashboard and APIs show a simple **status**:
-
-| Status        | Meaning                           |
-| ------------- | --------------------------------- |
-| **Active**    | Connected and ready               |
-| **Not ready** | Connected, ready pending          |
-| **Inactive**  | Awaiting control-plane connection |
-
-## Penalties
-
-Active penalties shape your penalty multiplier:
-
-| Kind | Typical source | Default coefficient | Duration |
-| ---- | -------------- | ------------------- | ---------------- |
-| `fraud` | Fraud penalty record | `0.1` | `168h` |
-| `integrity_chunk_mismatch` | Destination bytes differ from the audited source chunk | `1.0` | permanent |
-| `sybil` | Sybil violation tied to your hotkey | `0.5` | `168h` |
-
-Each event contributes:
+The winner gains exactly the points the loser loses. For at least two participants, let `n` be the number competing and `F` the eligible pool size, both frozen before the duel:
 
 ```text
-pressure += coefficient[kind] x active_row_count[kind]
-penalty_multiplier = clamp(1 - pressure, 0.0, 1.0)
+r = 1                              if F = 2
+r = clamp((n − 2) / (F − 2), 0, 1)  otherwise
+Defence stake = 1 + 4r              (1 to 5 points)
+Upset stake   = 5 + 10r             (5 to 15 points)
 ```
 
-Each penalty captures its duration when it is created.
-
-The evidence window for tasks, bandwidth samples, and readiness active-time is **1 day** by default. Reliability and bandwidth samples use a **1-hour** half-life.
-
-Guardrail reassignments feed **reliability** samples.
+Beating the neighbor below earns the defence stake; beating the neighbor above earns the upset stake. A participant alone earns no duel points.
 
 ## Reading your score
 
-Open the [Beam Dashboard](https://data.b1m.ai/weights) for live pool, confidence, and PRISM final score. Use the **Selected Orchestrator** panel for the full breakdown.
+Performance points are the signed total of duel results settled in the last 24 hours. They can be negative. Each workload and pool normalizes its own totals:
 
-For programmatic access, authenticate with your orchestrator API key and request your own subnet UID:
-
-```http
-GET /orchestrators/prism-scores/<your-orch-uid>
-X-Api-Key: b1m_...
+```text
+All totals equal: performanceScore = 0.5
+Otherwise: performanceScore = 0.2 + 0.8 × (points − lowest) / (highest − lowest)
+PRISM final score = performanceScore × readinessMultiplier × penaltyMultiplier
 ```
 
-You may read only your own score. Another orchestrator's UID returns `403`. Validators can read orchestrator breakdowns to verify emission weights.
+Readiness reflects a healthy control connection and availability. Independently verified integrity, fraud and Sybil penalties can reduce the final score. Keep your worker pool reliable and your control connection healthy to improve your opportunities.
 
-Your breakdown also shows your **Fraud report bonus** and award expiries. See [Weights](./weights.md#fraud-report-bonuses) for the rules.
+Recovery work earns no duel points or qualification progress. A rescue does not erase the failed original assignment. Verified recovery work can still earn work credit. An intervention affects the original task's result once; it adds no second performance penalty.
 
-## Improving your score
+## Qualification
 
-- Maintain a stable NATS control connection and set **ready** when your worker pool can receive work.
-- Keep your orchestrator active; intermittent downtime reduces the readiness multiplier.
-- Complete transfers reliably with steady task completion.
-- Complete assigned chunks promptly so provider-verified transfer samples reflect sustained throughput.
-- Avoid fraud, integrity mismatch, and sybil penalties that reduce the PRISM final score.
+An orchestrator may be qualified for standard transfers while still qualifying for room transfers, or the reverse. The confidence target is **120 verified original tasks for standard transfers** and **40 for room transfers**. For a qualifying profile:
+
+```text
+taskRatio = min(verified original-task successes toward qualification / target, 1)
+maturity = 0.8 + 0.2 × min(identity age in hours / 24, 1)
+confidenceScore = taskRatio × workload success rate over the last 24 hours × maturity
+```
+
+Confidence **>= 0.9** qualifies that workload. The pools compete separately; qualifying points do not carry into the qualified pool.
+
+## Verified bandwidth
+
+```text
+verifiedBandwidthMbps = verified bytes × 8 / trusted assignment duration in seconds / 1,000,000
+```
+
+Missing or invalid duration produces an unavailable metric. Aggregates are duration-weighted mean assignment goodput, not simultaneous network capacity.
+
+## Scores and history through the API
+
+Use a customer organization key with `telemetry:read`:
+
+```bash
+curl 'https://api.b1m.ai/v1/telemetry/participants/orchestrator?workload=standard_transfers' \
+  -H 'x-api-key: YOUR_CUSTOMER_KEY'
+
+curl 'https://api.b1m.ai/v1/telemetry/participants/orchestrator/ORCHESTRATOR_ID/history?workload=room_transfers' \
+  -H 'x-api-key: YOUR_CUSTOMER_KEY'
+```
+
+Read `performancePoints24h`, `performanceScore`, `prismFinalScore`, `pool` and `confidenceScore` for each workload. Participant details include all profiles; lists and history support `workload` filters.
+
+Published telemetry snapshots are available for up to 30 days from their observation time and release one subnet epoch late. Compare records using their snapshot versions and timestamps. See the [API reference](./api-reference) for endpoints and snapshot details.
