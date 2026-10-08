@@ -17,6 +17,7 @@ import (
 	workloadcheckpoint "github.com/Beam-Network/beam/internal/workload/checkpoint"
 	"github.com/Beam-Network/beam/internal/workload/contracts"
 	"github.com/Beam-Network/beam/internal/workload/domain"
+	"github.com/Beam-Network/beam/internal/workload/storagehttp"
 )
 
 const defaultResponseBodyLimit = 64 << 10
@@ -39,7 +40,7 @@ type Handler struct {
 
 func NewHandler(client *http.Client) *Handler {
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Minute}
+		client = storagehttp.NewClient(30 * time.Minute)
 	}
 	return &Handler{client: client}
 }

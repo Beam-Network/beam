@@ -268,9 +268,9 @@ func TestStorageProbeRelayHostAcceptsOnlyCanonicalIPLiterals(t *testing.T) {
 	}
 }
 
-func TestStorageProbeRelayAddressVetting(t *testing.T) {
+func TestPublicAddressAllowed(t *testing.T) {
 	for _, address := range []string{"8.8.8.8", "52.216.0.1", "2606:4700::1111", "64:ff9b::808:808", "::ffff:8.8.8.8"} {
-		if !StorageProbeRelayAddressAllowed(netip.MustParseAddr(address)) {
+		if !PublicAddressAllowed(netip.MustParseAddr(address)) {
 			t.Fatalf("public address %s rejected", address)
 		}
 	}
@@ -282,7 +282,7 @@ func TestStorageProbeRelayAddressVetting(t *testing.T) {
 		"3fff::1", "fec0::1", "::ffff:127.0.0.1", "::ffff:10.0.0.1", "::ffff:169.254.169.254", "::127.0.0.1",
 		"64:ff9b::7f00:1", "64:ff9b::a00:1", "64:ff9b:1::1", "::ffff:0:a00:1", "100::1",
 	} {
-		if StorageProbeRelayAddressAllowed(netip.MustParseAddr(address)) {
+		if PublicAddressAllowed(netip.MustParseAddr(address)) {
 			t.Fatalf("non-public address %s accepted", address)
 		}
 	}

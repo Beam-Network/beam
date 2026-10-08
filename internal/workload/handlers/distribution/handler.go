@@ -18,6 +18,7 @@ import (
 	"github.com/Beam-Network/beam/internal/workload/contracts"
 	"github.com/Beam-Network/beam/internal/workload/domain"
 	workloadprogress "github.com/Beam-Network/beam/internal/workload/progress"
+	"github.com/Beam-Network/beam/internal/workload/storagehttp"
 )
 
 const distributionCheckpointSchema = "beam.transfer.distribute/1"
@@ -46,7 +47,7 @@ type Handler struct {
 
 func NewHandler(transport Provider, client *http.Client) *Handler {
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Minute}
+		client = storagehttp.NewClient(30 * time.Minute)
 	}
 	return &Handler{transport: transport, client: client}
 }

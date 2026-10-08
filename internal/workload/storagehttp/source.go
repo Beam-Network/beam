@@ -1,4 +1,4 @@
-// Package storagehttp supplies source-only provider transport restrictions.
+// Package storagehttp supplies storage transport restrictions.
 package storagehttp
 
 import (

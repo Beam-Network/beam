@@ -60,7 +60,7 @@ func TestFanoutReadsOnceAcrossDestinationBatchesAndRetry(t *testing.T) {
 	}
 	payload, _ := json.Marshal(group)
 	spec := domain.Spec{Resources: domain.Resources{MemoryBytes: (4 << 20) + 8}, Payload: payload}
-	handler := NewHandler(nil)
+	handler := NewHandler(http.DefaultClient)
 	if err := handler.Validate(spec); err != nil {
 		t.Fatal(err)
 	}
@@ -124,12 +124,12 @@ func TestFanoutCheckpointsCompletedDestinationsBeforeTheOfferFinishes(t *testing
 		}
 		return nil
 	})
-	result, err := NewHandler(nil).Execute(ctx, spec)
+	result, err := NewHandler(http.DefaultClient).Execute(ctx, spec)
 	if err == nil || !observed || result.Outputs["part.0.state"] != "completed" {
 		t.Fatalf("checkpoint=%v result=%+v err=%v", observed, result, err)
 	}
 	restarted := workloadcheckpoint.WithManager(context.Background(), durable, func(domain.Checkpoint) error { return nil })
-	result, err = NewHandler(nil).Execute(restarted, spec)
+	result, err = NewHandler(http.DefaultClient).Execute(restarted, spec)
 	if err == nil || err.Error() != "fanout_worker_restarted" || result.Outputs["part.0.state"] != "completed" || reads.Load() != 1 {
 		t.Fatalf("restart reread or lost coverage: reads=%d result=%+v err=%v", reads.Load(), result, err)
 	}
@@ -146,7 +146,7 @@ func TestFanoutFailsBeforeUploadOnChangedSource(t *testing.T) {
 	defer server.Close()
 	group := contracts.MultipartTransfer{Fanout: true, Parts: []contracts.TransferPart{{Length: 8, Source: contracts.HTTPEndpoint{URL: server.URL}, Destination: contracts.HTTPEndpoint{URL: server.URL}}}}
 	payload, _ := json.Marshal(group)
-	_, err := NewHandler(nil).Execute(context.Background(), domain.Spec{Resources: domain.Resources{MemoryBytes: (4 << 20) + 8}, Payload: payload})
+	_, err := NewHandler(http.DefaultClient).Execute(context.Background(), domain.Spec{Resources: domain.Resources{MemoryBytes: (4 << 20) + 8}, Payload: payload})
 	if err == nil || err.Error() != "room_source_changed" || writes.Load() != 0 {
 		t.Fatalf("err=%v uploads=%d", err, writes.Load())
 	}
@@ -173,7 +173,7 @@ func TestFanoutCancellationInterruptsDestinationAndRetainedBuffer(t *testing.T) 
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, err := NewHandler(nil).Execute(ctx, domain.Spec{Resources: domain.Resources{MemoryBytes: (4 << 20) + 8}, Payload: payload})
+		_, err := NewHandler(http.DefaultClient).Execute(ctx, domain.Spec{Resources: domain.Resources{MemoryBytes: (4 << 20) + 8}, Payload: payload})
 		done <- err
 	}()
 	select {

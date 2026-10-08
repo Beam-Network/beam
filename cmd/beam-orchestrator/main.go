@@ -11,11 +11,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/Beam-Network/beam/internal/beamlink/wcp"
 	workerevidence "github.com/Beam-Network/beam/internal/evidence"
+	"github.com/Beam-Network/beam/internal/localauth"
 	"github.com/Beam-Network/beam/internal/orchestrator/connectors"
 	"github.com/Beam-Network/beam/internal/orchestrator/dispatch"
 	orchestratordomain "github.com/Beam-Network/beam/internal/orchestrator/domain"
@@ -52,6 +55,7 @@ func serve(arguments []string) {
 	hotkey := flags.String("hotkey", os.Getenv("BEAM_BITTENSOR_HOTKEY"), "optional Bittensor hotkey association")
 	netuid := flags.Uint("netuid", 0, "Bittensor subnet netuid")
 	addr := flags.String("addr", "127.0.0.1:8781", "owner-local Orchestrator API listen address")
+	controlTokenFlag := flags.String("control-token", os.Getenv("BEAM_ORCHESTRATOR_CONTROL_TOKEN"), "bearer token for the Orchestrator API; generated next to the registry state when empty")
 	statePath := flags.String("state", "data/orchestrator/registry.json", "durable Orchestrator registry path")
 	wcpAddr := flags.String("wcp-addr", os.Getenv("BEAM_WCP_LISTEN_ADDR"), "TLS WCP listen address; empty disables WCP")
 	wcpCert := flags.String("wcp-tls-cert", os.Getenv("BEAM_WCP_TLS_CERT"), "WCP TLS certificate")
@@ -79,6 +83,14 @@ func serve(arguments []string) {
 	flags.StringVar(&tunnelNATS.ProvisionSubject, "tunnel-nats-provision-subject", "beam.workloads.tunnel.provision", "Tunnel coordinator room lease request/reply subject")
 	_ = flags.Parse(arguments)
 	beamCoreNATS.Hotkey = *hotkey
+	controlTokenPath := filepath.Join(filepath.Dir(*statePath), "control-token")
+	controlToken, err := localauth.ResolveToken(*controlTokenFlag, controlTokenPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if strings.TrimSpace(*controlTokenFlag) == "" {
+		log.Printf("Orchestrator API token: %s", controlTokenPath)
+	}
 	registryStore := registry.FileStateStore{Path: *statePath}
 	resolvedOrchestratorID, generated, err := registry.ResolveOrchestratorID(*orchestratorID, registryStore)
 	if err != nil {
@@ -156,7 +168,7 @@ func serve(arguments []string) {
 	} else {
 		server = orchestratorserver.New(orchestrator.OrchestratorID, orchestratorRegistry)
 	}
-	httpServer := &http.Server{Addr: *addr, Handler: server.Handler(), ReadHeaderTimeout: 5 * time.Second}
+	httpServer := &http.Server{Addr: *addr, Handler: localauth.Require(controlToken, server.Handler()), ReadHeaderTimeout: 5 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if tasks == nil && (beamCoreNATS.Enabled() || studioNATS.Enabled() || tunnelNATS.Enabled()) {

@@ -306,7 +306,7 @@ func IsStorageProbeRelayHostname(host string) bool {
 
 // Address ranges that are never relay targets beyond what netip classifies:
 // shared, reserved, benchmark, documentation and translation ranges.
-var storageProbeRelayBlockedPrefixes = []netip.Prefix{
+var publicAddressBlockedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),
 	netip.MustParsePrefix("100.64.0.0/10"),
 	netip.MustParsePrefix("192.0.0.0/24"),
@@ -328,21 +328,21 @@ var storageProbeRelayBlockedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("fec0::/10"),
 }
 
-var storageProbeRelayNAT64Prefix = netip.MustParsePrefix("64:ff9b::/96")
+var publicAddressNAT64Prefix = netip.MustParsePrefix("64:ff9b::/96")
 
-// StorageProbeRelayAddressAllowed reports whether a target address, resolved or
+// PublicAddressAllowed reports whether a target address, resolved or
 // an IP literal, is a public unicast address. IPv4-mapped and NAT64-translated
 // addresses are judged by the IPv4 address they carry.
-func StorageProbeRelayAddressAllowed(address netip.Addr) bool {
+func PublicAddressAllowed(address netip.Addr) bool {
 	address = address.Unmap()
-	if storageProbeRelayNAT64Prefix.Contains(address) {
+	if publicAddressNAT64Prefix.Contains(address) {
 		embedded := address.As16()
 		address = netip.AddrFrom4([4]byte{embedded[12], embedded[13], embedded[14], embedded[15]})
 	}
 	if !address.IsValid() || address.Zone() != "" || !address.IsGlobalUnicast() || address.IsPrivate() {
 		return false
 	}
-	for _, prefix := range storageProbeRelayBlockedPrefixes {
+	for _, prefix := range publicAddressBlockedPrefixes {
 		if prefix.Contains(address) {
 			return false
 		}

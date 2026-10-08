@@ -87,6 +87,7 @@ The startup log and `data/orchestrator/registry.json` contain the local `orchest
 
 ```bash
 curl -X POST http://127.0.0.1:8781/v1/orchestrator/memberships \
+  -H "Authorization: Bearer $(cat data/orchestrator/control-token)" \
   -H 'Content-Type: application/json' \
   -d '{"OrchestratorID":"orchestrator-id","WorkerID":"worker-id","NodeID":"worker-node-id","Status":"active"}'
 ```
@@ -143,5 +144,8 @@ go build -trimpath -o bin/beam-orchestrator ./cmd/beam-orchestrator
 ## Health
 
 ```bash
-curl http://127.0.0.1:8781/v1/orchestrator/health
+curl http://127.0.0.1:8781/healthz
 ```
+
+Other API routes need the token in `data/orchestrator/control-token`, created on first start
+(or set `BEAM_ORCHESTRATOR_CONTROL_TOKEN`).

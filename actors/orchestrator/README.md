@@ -73,8 +73,12 @@ export BEAM_ROOM_TUNNEL_COORDINATOR_URL=https://coordinator.b1m.ai
 
 ## Worker Membership
 
+`BEAM_ORCHESTRATOR_TOKEN` is the Orchestrator API token stored in `control-token` in
+the Orchestrator state directory (`/var/lib/beam` in the container).
+
 ```bash
 curl -X POST http://127.0.0.1:8781/v1/orchestrator/memberships \
+  -H "Authorization: Bearer $BEAM_ORCHESTRATOR_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"OrchestratorID":"orchestrator-id","WorkerID":"worker-id","NodeID":"worker-node-id","Status":"active"}'
 ```

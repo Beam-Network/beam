@@ -2,7 +2,6 @@ package server
 
 import (
 	"bufio"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -11,10 +10,10 @@ import (
 	"net"
 	"net/http"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/Beam-Network/beam/internal/beamlink/circuit"
+	"github.com/Beam-Network/beam/internal/localauth"
 	"github.com/Beam-Network/beam/internal/resources"
 	"github.com/Beam-Network/beam/internal/workload/domain"
 	"github.com/Beam-Network/beam/internal/workload/runtime"
@@ -55,7 +54,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/circuits", s.circuitPlans)
 	mux.HandleFunc("POST /v1/circuits/dial", s.dialCircuit)
 	mux.HandleFunc("POST /v1/circuits/accept", s.acceptCircuit)
-	return s.authorize(mux)
+	return localauth.Require(s.token, mux)
 }
 
 type circuitSummary struct {
@@ -184,24 +183,6 @@ func bridgeConnections(left, right net.Conn) {
 	}()
 	_, _ = io.Copy(right, left)
 	closeBoth()
-}
-
-func (s *Server) authorize(next http.Handler) http.Handler {
-	if s.token == "" {
-		return next
-	}
-	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/healthz" {
-			next.ServeHTTP(response, request)
-			return
-		}
-		got := strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")
-		if len(got) != len(s.token) || subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) != 1 {
-			writeJSON(response, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-			return
-		}
-		next.ServeHTTP(response, request)
-	})
 }
 
 func (s *Server) health(response http.ResponseWriter, _ *http.Request) {

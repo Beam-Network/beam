@@ -53,6 +53,7 @@ export BEAM_ROOM_TUNNEL_COORDINATOR_URL=https://coordinator.b1m.ai
 
 ```bash
 curl -X POST http://127.0.0.1:8781/v1/orchestrator/memberships \
+  -H "Authorization: Bearer $(cat data/orchestrator/control-token)" \
   -H 'Content-Type: application/json' \
   -d '{"OrchestratorID":"orchestrator-id","WorkerID":"worker-id","NodeID":"worker-node-id","Status":"active"}'
 ```

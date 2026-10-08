@@ -284,7 +284,7 @@ func (r *relay) run() {
 		return
 	}
 	for _, address := range addresses {
-		if !contracts.StorageProbeRelayAddressAllowed(address) {
+		if !contracts.PublicAddressAllowed(address) {
 			r.finish(contracts.StorageProbeRelayTargetNotAllowed, true)
 			return
 		}

@@ -60,6 +60,7 @@ Register the worker membership on the orchestrator:
 
 ```bash
 curl -X POST http://127.0.0.1:8781/v1/orchestrator/memberships \
+  -H "Authorization: Bearer $(cat data/orchestrator/control-token)" \
   -H 'Content-Type: application/json' \
   -d '{"OrchestratorID":"orchestrator-id","WorkerID":"worker-id","NodeID":"worker-node-id","Status":"active"}'
 ```
@@ -138,5 +139,8 @@ between BeamCore and the host, so the worker carries only ciphertext.
 
 ```bash
 ./bin/beam-worker doctor --worker-id "$BEAM_WORKER_ID"
-curl http://127.0.0.1:8780/health
+curl http://127.0.0.1:8780/healthz
 ```
+
+Other control API routes need the token in `data/worker/control-token`, created on first start
+(or set `BEAM_WORKER_CONTROL_TOKEN`).

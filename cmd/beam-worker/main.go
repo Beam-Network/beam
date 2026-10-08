@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -22,6 +23,7 @@ import (
 	"github.com/Beam-Network/beam/internal/beamlink/circuit"
 	"github.com/Beam-Network/beam/internal/beamlink/wcp"
 	"github.com/Beam-Network/beam/internal/evidence"
+	"github.com/Beam-Network/beam/internal/localauth"
 	"github.com/Beam-Network/beam/internal/resources"
 	versioninfo "github.com/Beam-Network/beam/internal/version"
 	"github.com/Beam-Network/beam/internal/worker/server"
@@ -70,7 +72,7 @@ func serve(arguments []string) {
 	orchestratorID := flags.String("orchestrator-id", os.Getenv("BEAM_ORCHESTRATOR_ID"), "Orchestrator membership id")
 	nodeID := flags.String("node-id", os.Getenv("BEAM_NODE_ID"), "BeamLink node identity")
 	addr := flags.String("addr", "127.0.0.1:8780", "owner-local control listen address")
-	token := flags.String("control-token", os.Getenv("BEAM_WORKER_CONTROL_TOKEN"), "optional bearer token for the local control API")
+	token := flags.String("control-token", os.Getenv("BEAM_WORKER_CONTROL_TOKEN"), "bearer token for the local control API; generated in the state directory when empty")
 	memory := flags.Int64("memory-bytes", 512<<20, "reservable memory")
 	scratch := flags.Int64("scratch-bytes", 10<<30, "reservable scratch bytes")
 	bandwidth := flags.Int64("bandwidth-mbps", 100, "reservable bandwidth")
@@ -117,6 +119,14 @@ func serve(arguments []string) {
 	region := flags.String("region", os.Getenv("BEAM_REGION"), "Worker region")
 	delegation := flags.String("orchestrator-delegation", os.Getenv("BEAM_ORCHESTRATOR_DELEGATION"), "base64url Orchestrator delegation")
 	_ = flags.Parse(arguments)
+	controlTokenPath := filepath.Join(filepath.Dir(*statePath), "control-token")
+	controlToken, err := localauth.ResolveToken(*token, controlTokenPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if strings.TrimSpace(*token) == "" {
+		log.Printf("local control API token: %s", controlTokenPath)
+	}
 	if *mediaUDPPortMin > 65535 || *mediaUDPPortMax > 65535 {
 		log.Fatal("media UDP ports must be between 1 and 65535")
 	}
@@ -158,7 +168,7 @@ func serve(arguments []string) {
 		ActionPermissions: splitList(*actionPermissions), ActionRegistryHosts: splitList(*actionRegistryHosts),
 		ActionControlHosts: splitList(*actionControlHosts), ActionPublisherKeys: splitList(*actionPublisherKeys),
 		RequirePublisherSignature: *actionPublisherSignature, AllowLegacyNode: *actionLegacyNode,
-		AllowPublicListeners: *allowPublicNetwork, ControlAddress: controlAddress, ControlToken: *token,
+		AllowPublicListeners: *allowPublicNetwork, ControlAddress: controlAddress, ControlToken: controlToken,
 		MediaListenAddress: *mediaAddr, MediaAdvertiseURL: *mediaAdvertiseURL, MediaPublicIP: *mediaPublicIP,
 		MediaUDPPortMin: uint16(*mediaUDPPortMin), MediaUDPPortMax: uint16(*mediaUDPPortMax),
 		MediaICEServers: splitList(*mediaICEServers), MediaTURNSecret: *mediaTURNSecret,
@@ -292,7 +302,7 @@ func serve(arguments []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	workerServer, err := server.New(identity, capabilities, engine, governor, store, *token)
+	workerServer, err := server.New(identity, capabilities, engine, governor, store, controlToken)
 	if err != nil {
 		log.Fatal(err)
 	}
