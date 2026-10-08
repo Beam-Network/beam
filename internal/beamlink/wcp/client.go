@@ -7,7 +7,9 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -41,11 +43,22 @@ type ClientConfig struct {
 	StorageProbeRelays StorageProbeRelayBinder
 }
 
+// maxReceiptsPerReplay bounds how many receipts one replay pass sends so a
+// large backlog cannot monopolise the session.
+const maxReceiptsPerReplay = 256
+
 type Client struct {
 	config      ClientConfig
 	planVersion atomic.Uint64
 	eventCursor atomic.Uint64
 	draining    atomic.Bool
+
+	// Receipt acknowledgements are queued by the read loop and persisted in
+	// batches. Persisting each one inline rewrites the whole receipt journal,
+	// which stalls reads, back-pressures the Orchestrator and starves
+	// heartbeats.
+	acksMu      sync.Mutex
+	pendingAcks map[string]time.Time
 }
 
 func NewClient(config ClientConfig) (*Client, error) {
@@ -74,7 +87,7 @@ func NewClient(config ClientConfig) (*Client, error) {
 	config.TLSConfig = config.TLSConfig.Clone()
 	config.TLSConfig.MinVersion = tls.VersionTLS13
 	config.TLSConfig.NextProtos = []string{ALPN}
-	return &Client{config: config}, nil
+	return &Client{config: config, pendingAcks: make(map[string]time.Time)}, nil
 }
 
 func (c *Client) Run(ctx context.Context) error {
@@ -83,6 +96,9 @@ func (c *Client) Run(ctx context.Context) error {
 		err := c.runSession(ctx)
 		if ctx.Err() != nil {
 			return nil
+		}
+		if err != nil {
+			log.Printf("WCP session ended worker_id=%s address=%s retry_in=%s: %v", c.config.Identity.WorkerID, c.config.Address, backoff, err)
 		}
 		if err == nil {
 			backoff = c.config.ReconnectMinimum
@@ -202,6 +218,7 @@ func (c *Client) runSession(ctx context.Context) error {
 		case err := <-heartbeatError:
 			return err
 		case <-resultTicker.C:
+			c.flushReceiptAcks()
 			if err := c.replayCheckpoints(framed, sentCheckpoints); err != nil {
 				return err
 			}
@@ -311,9 +328,9 @@ func (c *Client) readLoop(ctx context.Context, framed *framedConn, initialSequen
 			if c.config.Receipts == nil {
 				return errors.New("Orchestrator acknowledged a receipt while receipt recording is disabled")
 			}
-			if err := c.config.Receipts.Acknowledge(acknowledgement.ReceiptID, acknowledgement.AcknowledgedAt); err != nil {
-				return err
-			}
+			c.acksMu.Lock()
+			c.pendingAcks[acknowledgement.ReceiptID] = acknowledgement.AcknowledgedAt
+			c.acksMu.Unlock()
 		case TypeCircuitUpsert:
 			plan, err := decodePayload[circuit.Plan](envelope)
 			if err != nil {
@@ -357,7 +374,9 @@ func (c *Client) readLoop(ctx context.Context, framed *framedConn, initialSequen
 		case TypeStorageProbeRelayOpen, TypeStorageProbeRelayData, TypeStorageProbeRelayClose:
 			handleStorageProbeRelay(relays, relayEmitter, envelope)
 		case TypeError:
-			continue
+			message, _ := decodePayload[ErrorMessage](envelope)
+			log.Printf("Orchestrator rejected WCP message worker_id=%s reply_to=%s code=%s: %s",
+				c.config.Identity.WorkerID, envelope.ReplyTo, message.Code, message.Message)
 		default:
 			return fmt.Errorf("unsupported Orchestrator message type %q", envelope.Type)
 		}
@@ -417,7 +436,20 @@ func (c *Client) replayReceipts(framed *framedConn, sent map[string]time.Time) e
 		return nil
 	}
 	now := time.Now()
+	c.acksMu.Lock()
+	acknowledged := make(map[string]struct{}, len(c.pendingAcks))
+	for receiptID := range c.pendingAcks {
+		acknowledged[receiptID] = struct{}{}
+	}
+	c.acksMu.Unlock()
+	written := 0
 	for _, receipt := range c.config.Receipts.Pending() {
+		if written >= maxReceiptsPerReplay {
+			break
+		}
+		if _, ok := acknowledged[receipt.ReceiptID]; ok {
+			continue
+		}
 		if last, exists := sent[receipt.ReceiptID]; exists && now.Sub(last) < 2*time.Second {
 			continue
 		}
@@ -425,6 +457,33 @@ func (c *Client) replayReceipts(framed *framedConn, sent map[string]time.Time) e
 			return err
 		}
 		sent[receipt.ReceiptID] = now
+		written++
 	}
 	return nil
+}
+
+// flushReceiptAcks persists queued acknowledgements with one journal write.
+// Failed batches stay queued and are retried on the next tick.
+func (c *Client) flushReceiptAcks() {
+	if c.config.Receipts == nil {
+		return
+	}
+	c.acksMu.Lock()
+	if len(c.pendingAcks) == 0 {
+		c.acksMu.Unlock()
+		return
+	}
+	batch := c.pendingAcks
+	c.pendingAcks = make(map[string]time.Time)
+	c.acksMu.Unlock()
+	if err := c.config.Receipts.AcknowledgeMany(batch); err != nil {
+		c.acksMu.Lock()
+		for receiptID, at := range batch {
+			if _, exists := c.pendingAcks[receiptID]; !exists {
+				c.pendingAcks[receiptID] = at
+			}
+		}
+		c.acksMu.Unlock()
+		log.Printf("WCP receipt acknowledgements not persisted worker_id=%s count=%d: %v", c.config.Identity.WorkerID, len(batch), err)
+	}
 }

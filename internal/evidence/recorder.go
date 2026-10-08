@@ -99,28 +99,51 @@ func (r *Recorder) RecordCircuit(plan circuit.Plan, event string, observedAt tim
 func (r *Recorder) Pending() []Receipt { return r.journal.Pending() }
 
 func (r *Recorder) Acknowledge(receiptID string, at time.Time) error {
+	if err := r.commitWorkload(receiptID, at); err != nil {
+		return err
+	}
+	return r.journal.Acknowledge(receiptID, at)
+}
+
+// AcknowledgeMany commits each receipt's workload and then records every
+// acknowledgement with a single journal write. Receipts the journal no longer
+// holds are skipped. On error nothing in the journal is marked, so the
+// Orchestrator's idempotent acknowledgement of a resent receipt retries it.
+func (r *Recorder) AcknowledgeMany(acknowledgements map[string]time.Time) error {
+	known := make(map[string]time.Time, len(acknowledgements))
+	for receiptID, at := range acknowledgements {
+		if err := r.commitWorkload(receiptID, at); err != nil {
+			if errors.Is(err, ErrReceiptNotFound) {
+				continue
+			}
+			return err
+		}
+		known[receiptID] = at
+	}
+	return r.journal.AcknowledgeMany(known)
+}
+
+func (r *Recorder) commitWorkload(receiptID string, at time.Time) error {
 	record, err := r.journal.Get(receiptID)
 	if err != nil {
 		return err
 	}
-	if record.Receipt.WorkloadID == "" || record.Receipt.AttemptID == "" {
-		return r.journal.Acknowledge(receiptID, at)
+	if !record.AcknowledgedAt.IsZero() || record.Receipt.WorkloadID == "" || record.Receipt.AttemptID == "" {
+		return nil
 	}
 	workload, err := r.workloads.Get(record.Receipt.WorkloadID + "/" + record.Receipt.AttemptID)
 	if err != nil {
 		if errors.Is(err, runtime.ErrRecordNotFound) {
-			return r.journal.Acknowledge(receiptID, at)
+			return nil
 		}
 		return err
 	}
 	if workload.State != domain.StateReceiptCommitted && domain.CanTransition(workload.State, domain.StateReceiptCommitted) {
 		workload.State = domain.StateReceiptCommitted
 		workload.UpdatedAt = at.UTC()
-		if err := r.workloads.Save(workload); err != nil {
-			return err
-		}
+		return r.workloads.Save(workload)
 	}
-	return r.journal.Acknowledge(receiptID, at)
+	return nil
 }
 
 func (r *Recorder) Journal() Journal { return r.journal }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -44,15 +45,23 @@ func (s *Server) handle(parent context.Context, connection net.Conn) {
 		return
 	}
 	hello, err := decodePayload[Hello](envelope)
-	if err != nil || VerifyHello(hello, challenge) != nil {
+	if err != nil {
+		log.Printf("WCP hello rejected remote=%s: %v", connection.RemoteAddr(), err)
+		return
+	}
+	if err := VerifyHello(hello, challenge); err != nil {
+		log.Printf("WCP hello rejected worker_id=%s remote=%s: %v", hello.Identity.WorkerID, connection.RemoteAddr(), err)
 		return
 	}
 	membership, exists := s.registry.Membership(hello.Identity.WorkerID)
 	if !exists || membership.Status != "active" || membership.NodeID != hello.Identity.NodeID {
+		log.Printf("WCP hello rejected worker_id=%s node_id=%s: membership exists=%t status=%q node_id=%q",
+			hello.Identity.WorkerID, hello.Identity.NodeID, exists, membership.Status, membership.NodeID)
 		return
 	}
 	if len(membership.Delegation) > 0 &&
 		(len(membership.Delegation) != len(hello.OrchestratorDelegation) || subtle.ConstantTimeCompare(membership.Delegation, hello.OrchestratorDelegation) != 1) {
+		log.Printf("WCP hello rejected worker_id=%s: Orchestrator delegation does not match membership", hello.Identity.WorkerID)
 		return
 	}
 	welcome, err := s.control.Accept(orchestratorcontrol.WorkerHello{
@@ -63,6 +72,7 @@ func (s *Server) handle(parent context.Context, connection net.Conn) {
 		LastPlanVersion: hello.LastPlanVersion, LastEventCursor: hello.LastEventCursor,
 	})
 	if err != nil {
+		log.Printf("WCP hello rejected worker_id=%s: %v", hello.Identity.WorkerID, err)
 		return
 	}
 	session := &Session{
@@ -110,6 +120,7 @@ func (s *Server) handle(parent context.Context, connection net.Conn) {
 		session.lastRead.Store(envelope.Sequence)
 		_ = connection.SetReadDeadline(time.Now().Add(3 * welcome.HeartbeatInterval))
 		if err := s.handleEnvelope(session, envelope); err != nil {
+			log.Printf("WCP message rejected worker_id=%s type=%s message_id=%s: %v", session.workerID, envelope.Type, envelope.MessageID, err)
 			_, _ = session.send(TypeError, envelope.MessageID, ErrorMessage{Code: "invalid_message", Message: err.Error()})
 		}
 	}
