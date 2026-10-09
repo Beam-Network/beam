@@ -83,6 +83,8 @@ the TLS handshake before the NATS `INFO` exchange whenever the URL uses the
 
 The startup log and `data/orchestrator/registry.json` contain the local `orchestrator_id`.
 
+Run it under a supervisor that always restarts it, such as systemd with `Restart=always`: the orchestrator exits with an error when its BeamCore connection fails.
+
 ## 5. Register Worker Membership
 
 ```bash

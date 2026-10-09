@@ -167,6 +167,8 @@ In production, `$CORE_SERVER_URL` is `https://beamcore.b1m.ai`.
 
 Complete [Registration](#registration) first, then set `CORE_SERVER_URL`, `BEAM_ENV=prod`, `BEAMCORE_NATS_URL`, `BEAMCORE_NATS_USER`, `BEAMCORE_NATS_PASSWORD`, `BEAMCORE_GATEWAY_URL`, `BEAM_WCP_LISTEN_ADDR`, `BEAM_WCP_TLS_CERT`, `BEAM_WCP_TLS_KEY`, and wallet settings. Set production `BEAMCORE_NATS_URL` to `tls://orch-gateway.b1m.ai:4222`. Workers connect with `BEAM_WCP_ADDRESS`, `BEAM_WCP_CA`, `BEAM_WCP_SERVER_NAME`, and their orchestrator membership. Keep the NATS control connection and WCP worker sessions healthy so BeamCore can deliver batches.
 
+Run the orchestrator under a supervisor that always restarts it, such as systemd with `Restart=always`: it exits with an error when its BeamCore connection fails.
+
 ## Scores and history
 
 Read workload profiles, transfer results and assignment history through the [supported telemetry APIs](./api-reference). See [PRISM scoring](./prism) for how reliability, speed and performance points work together.

@@ -151,7 +151,7 @@ func (s *Service) Dispatch(ctx context.Context, request DispatchRequest) (Record
 		now := s.config.Now().UTC()
 		var disconnected []string
 		for workerID == "" {
-			placement, err := s.scheduler.Select(scheduling.Request{RequiredCapabilities: record.Spec.RequiredCapabilities,
+			placement, err := s.scheduler.Reserve(key, scheduling.Request{RequiredCapabilities: record.Spec.RequiredCapabilities,
 				Resources: record.Spec.Resources, MaxObservationAge: s.config.MaxObservationAge, ExcludedWorkerIDs: disconnected}, now)
 			if err != nil && len(disconnected) > 0 {
 				return record, errors.New("every compatible Worker is disconnected; dispatch will be retried")
@@ -160,6 +160,7 @@ func (s *Service) Dispatch(ctx context.Context, request DispatchRequest) (Record
 				return s.terminal(record, StateRejected, "no compatible connected Worker: "+err.Error(), err)
 			}
 			if !s.control.Connected(placement.WorkerID) {
+				s.scheduler.Release(key)
 				disconnected = append(disconnected, placement.WorkerID)
 				continue
 			}
@@ -168,7 +169,11 @@ func (s *Service) Dispatch(ctx context.Context, request DispatchRequest) (Record
 		}
 	}
 	if !s.control.Connected(workerID) {
+		s.scheduler.Release(key)
 		return record, errors.New("selected Worker is disconnected; dispatch will be retried")
+	}
+	if request.WorkerID != "" {
+		s.scheduler.Hold(workerID, key, record.Spec.Resources, s.config.Now().UTC())
 	}
 	record.WorkerID = workerID
 	record.Spec.Identity = domain.Identity{OrchestratorID: s.config.OrchestratorID, WorkerID: workerID, NodeID: nodeID}
@@ -179,6 +184,9 @@ func (s *Service) Dispatch(ctx context.Context, request DispatchRequest) (Record
 		return record, err
 	}
 	decision, err := s.control.Offer(ctx, workerID, record.Spec)
+	if err != nil || !decision.Accepted {
+		s.scheduler.Release(key)
+	}
 	if err != nil {
 		record.UpstreamError = "WCP offer failed: " + err.Error()
 		record.UpdatedAt = s.config.Now().UTC()

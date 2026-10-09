@@ -145,6 +145,14 @@ func serve(arguments []string) {
 	httpServer := &http.Server{Addr: *addr, Handler: localauth.Require(controlToken, server.Handler()), ReadHeaderTimeout: 5 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	failures := make(chan error, 1)
+	fail := func(err error) {
+		select {
+		case failures <- err:
+		default:
+		}
+		stop()
+	}
 	if tasks == nil && (beamCoreNATS.Enabled() || studioNATS.Enabled() || tunnelNATS.Enabled()) {
 		log.Fatal("WCP must be enabled when a NATS workload connector is configured")
 	}
@@ -160,7 +168,7 @@ func serve(arguments []string) {
 		beamCoreNATS.EnsureStream = *ensureStreams
 		studioNATS.EnsureStream = *ensureStreams
 		tunnelNATS.EnsureStream = *ensureStreams
-		startConnectors(ctx, stop, tasks, rooms, roomWorkloads, wcpServer, *beamCoreNATS, *studioNATS, *tunnelNATS)
+		startConnectors(ctx, fail, tasks, rooms, roomWorkloads, wcpServer, *beamCoreNATS, *studioNATS, *tunnelNATS)
 		go replayDurable(ctx, tasks, rooms, roomWorkloads)
 	}
 	if wcpServer != nil {
@@ -178,7 +186,7 @@ func serve(arguments []string) {
 		go func() {
 			if err := wcpServer.Serve(ctx, tlsListener); err != nil && ctx.Err() == nil {
 				log.Printf("WCP server stopped: %v", err)
-				stop()
+				fail(fmt.Errorf("WCP server stopped: %w", err))
 			}
 		}()
 		go func() {
@@ -224,6 +232,11 @@ func serve(arguments []string) {
 	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+	select {
+	case err := <-failures:
+		log.Fatalf("Beam Orchestrator exiting after failure: %v", err)
+	default:
+	}
 }
 
 func removeRetiredPaymentState(stateDir string) {
@@ -241,7 +254,7 @@ type connectorRunner interface {
 	Run(context.Context) error
 }
 
-func startConnectors(ctx context.Context, stop context.CancelFunc, tasks *dispatch.Service, rooms *roomtransfer.Service,
+func startConnectors(ctx context.Context, fail func(error), tasks *dispatch.Service, rooms *roomtransfer.Service,
 	roomWorkloads *roomworkloads.Manager, relays connectors.StorageProbeRelayLink,
 	configs ...connectors.NATSConfig) {
 	for index, config := range configs {
@@ -277,7 +290,7 @@ func startConnectors(ctx context.Context, stop context.CancelFunc, tasks *dispat
 			log.Printf("starting %s NATS connector", name)
 			if err := current.Run(ctx); err != nil && ctx.Err() == nil {
 				log.Printf("%s NATS connector stopped: %v", name, err)
-				stop()
+				fail(fmt.Errorf("%s NATS connector stopped: %w", name, err))
 			}
 		}(config.Name, runner)
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"sync"
 	"time"
 
 	orchestratordomain "github.com/Beam-Network/beam/internal/orchestrator/domain"
@@ -35,11 +36,94 @@ type Placement struct {
 
 type Scheduler struct {
 	registry *registry.Registry
+
+	mu      sync.Mutex
+	pending map[string][]reservation
 }
 
-func New(registry *registry.Registry) *Scheduler { return &Scheduler{registry: registry} }
+type reservation struct {
+	key       string
+	resources workload.Resources
+	at        time.Time
+}
+
+const reservationSettle = 2 * time.Second
+
+const maxReservationAge = time.Minute
+
+func New(registry *registry.Registry) *Scheduler {
+	return &Scheduler{registry: registry, pending: make(map[string][]reservation)}
+}
 
 func (s *Scheduler) Select(request Request, now time.Time) (Placement, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.selectCountingPending(request, now)
+}
+
+func (s *Scheduler) selectCountingPending(request Request, now time.Time) (Placement, error) {
+	placement, err := s.selectLocked(request, now, true)
+	if errors.Is(err, ErrNoCandidate) {
+		return s.selectLocked(request, now, false)
+	}
+	return placement, err
+}
+
+func (s *Scheduler) Reserve(key string, request Request, now time.Time) (Placement, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.forgetLocked(key, now)
+	placement, err := s.selectCountingPending(request, now)
+	if err == nil {
+		s.pending[placement.WorkerID] = append(s.pending[placement.WorkerID],
+			reservation{key: key, resources: request.Resources, at: now})
+	}
+	return placement, err
+}
+
+func (s *Scheduler) Hold(workerID, key string, resources workload.Resources, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.forgetLocked(key, now)
+	s.pending[workerID] = append(s.pending[workerID], reservation{key: key, resources: resources, at: now})
+}
+
+func (s *Scheduler) Release(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.forgetLocked(key, time.Time{})
+}
+
+func (s *Scheduler) forgetLocked(key string, now time.Time) {
+	for workerID, reservations := range s.pending {
+		reservations = slices.DeleteFunc(reservations, func(current reservation) bool {
+			return current.key == key || (!now.IsZero() && now.Sub(current.at) > maxReservationAge)
+		})
+		if len(reservations) == 0 {
+			delete(s.pending, workerID)
+		} else {
+			s.pending[workerID] = reservations
+		}
+	}
+}
+
+func (s *Scheduler) unreported(observation orchestratordomain.WorkerObservation, now time.Time) workload.Resources {
+	reservations := slices.DeleteFunc(s.pending[observation.WorkerID], func(current reservation) bool {
+		return observation.ObservedAt.After(current.at.Add(reservationSettle)) || now.Sub(current.at) > maxReservationAge
+	})
+	if len(reservations) == 0 {
+		delete(s.pending, observation.WorkerID)
+		return workload.Resources{}
+	}
+	s.pending[observation.WorkerID] = reservations
+	var total workload.Resources
+	for _, current := range reservations {
+		total = total.Add(current.resources)
+	}
+	return total
+}
+
+func (s *Scheduler) selectLocked(request Request, now time.Time, countPending bool) (Placement, error) {
 	if request.MaxObservationAge <= 0 {
 		request.MaxObservationAge = 30 * time.Second
 	}
@@ -50,6 +134,9 @@ func (s *Scheduler) Select(request Request, now time.Time) (Placement, error) {
 	var candidates []candidate
 	placement := Placement{}
 	for _, observation := range s.registry.Observations() {
+		if countPending {
+			observation.Available = observation.Available.SubFloor(s.unreported(observation, now))
+		}
 		reason := rejectionReason(observation, request, now)
 		if reason != "" {
 			placement.Rejected = append(placement.Rejected, Rejection{WorkerID: observation.WorkerID, Reason: reason})
