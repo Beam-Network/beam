@@ -1,6 +1,7 @@
 package contracts
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,47 @@ const (
 	RoomWorkloadRuntimeType        = "room_workload_runtime"
 	RoomMessageDirectCapability    = "room.message.direct.v1"
 	RoomMessageRuntimeSchema       = "room-message-runtime/v1"
+	RoomStreamDirectCapability     = "room.stream.direct.v1"
+	RoomStreamRuntimeSchema        = "room-stream-runtime/v1"
+	RoomStreamProtectionProtocol   = "beam-mls-stream-v1"
+	RoomWorkerHTTPSTransport       = "worker_https"
+)
+
+// Bounds of a Worker-served room stream lease.
+const (
+	RoomStreamMaxFrameBytes         = 65_536
+	RoomStreamMaxTargets            = 64
+	RoomStreamMinBufferBytes        = 131_072
+	RoomStreamMaxBufferBytes        = 67_108_864
+	RoomStreamMinHeartbeatTimeoutMS = 3_000
+	RoomStreamMaxHeartbeatTimeoutMS = 300_000
+)
+
+// Worker-side states of one stream target.
+const (
+	RoomStreamTargetJoining   = "joining"
+	RoomStreamTargetActive    = "active"
+	RoomStreamTargetCompleted = "completed"
+	RoomStreamTargetDropped   = "dropped"
+	RoomStreamTargetFailed    = "failed"
+)
+
+// Terminal reasons of a stream result.
+const (
+	RoomStreamEnded         = "ended"
+	RoomStreamSourceAborted = "source_aborted"
+	RoomStreamSourceLost    = "source_lost"
+	RoomStreamWorkerFailed  = "worker_failed"
+	RoomStreamExpired       = "expired"
+)
+
+// Destination reasons the Worker assigns to stream targets.
+const (
+	RoomStreamReasonTargetJoinTimeout      = "target_join_timeout"
+	RoomStreamReasonTargetHeartbeatTimeout = "target_heartbeat_timeout"
+	RoomStreamReasonSlowTargetOverrun      = "slow_target_overrun"
+	RoomStreamReasonSourceAborted          = "source_aborted"
+	RoomStreamReasonSourceLost             = "source_lost"
 )
 
 type RoomLifecycleState string
@@ -490,35 +532,146 @@ type RoomMessageRuntime struct {
 	ExpiresAt            time.Time `json:"expires_at"`
 }
 
-type RoomMessageRuntimeWire struct {
-	Type          string             `json:"type"`
-	SchemaVersion string             `json:"schema_version"`
-	Kind          domain.Kind        `json:"kind"`
-	WorkloadID    string             `json:"workload_id"`
-	UnitID        string             `json:"unit_id"`
-	Epoch         uint64             `json:"epoch"`
-	Attempt       uint64             `json:"attempt"`
-	WorkerID      string             `json:"worker_id"`
-	Runtime       RoomMessageRuntime `json:"runtime"`
-	ReportedAt    time.Time          `json:"reported_at"`
+// RoomWorkloadRuntimeWire announces the private runtime of one Worker attempt
+// on room_workload_runtime. Runtime holds room-message-runtime/v1 for
+// room.message and room-stream-runtime/v1 for room.stream.
+type RoomWorkloadRuntimeWire struct {
+	Type          string          `json:"type"`
+	SchemaVersion string          `json:"schema_version"`
+	Kind          domain.Kind     `json:"kind"`
+	WorkloadID    string          `json:"workload_id"`
+	UnitID        string          `json:"unit_id"`
+	Epoch         uint64          `json:"epoch"`
+	Attempt       uint64          `json:"attempt"`
+	WorkerID      string          `json:"worker_id"`
+	Runtime       json.RawMessage `json:"runtime"`
+	ReportedAt    time.Time       `json:"reported_at"`
+}
+
+// NewRoomWorkloadRuntimeWire builds the announcement for an attempt identity.
+func NewRoomWorkloadRuntimeWire(identity RoomWorkloadIdentity, runtime any, reportedAt time.Time) (RoomWorkloadRuntimeWire, error) {
+	encoded, err := json.Marshal(runtime)
+	if err != nil {
+		return RoomWorkloadRuntimeWire{}, err
+	}
+	return RoomWorkloadRuntimeWire{Type: RoomWorkloadRuntimeType, SchemaVersion: RoomWorkloadSchema, Kind: identity.Kind,
+		WorkloadID: identity.WorkloadID, UnitID: identity.UnitID, Epoch: identity.Epoch, Attempt: identity.Attempt,
+		WorkerID: identity.WorkerID, Runtime: encoded, ReportedAt: reportedAt.UTC()}, nil
 }
 
 func (runtime RoomMessageRuntime) Validate(identity RoomWorkloadIdentity, now time.Time) error {
-	parsed, err := url.Parse(runtime.BaseURL)
 	if runtime.SchemaVersion != RoomMessageRuntimeSchema || runtime.WorkloadID != identity.WorkloadID ||
 		runtime.UnitID != identity.UnitID || runtime.Epoch != identity.Epoch || runtime.Attempt != identity.Attempt ||
 		runtime.WorkerID != identity.WorkerID || runtime.Capability != RoomMessageDirectCapability ||
-		runtime.Transport != "worker_https" || runtime.AccessToken == "" || len(runtime.TLSCertificateSHA256) != 64 ||
-		runtime.ExpiresAt.IsZero() || !now.Before(runtime.ExpiresAt) || err != nil || parsed.Scheme != "https" ||
-		parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		runtime.Transport != RoomWorkerHTTPSTransport || runtime.AccessToken == "" ||
+		runtime.ExpiresAt.IsZero() || !now.Before(runtime.ExpiresAt) || !cleanHTTPSURL(runtime.BaseURL) {
 		return errors.New("invalid direct room message runtime")
 	}
-	for _, character := range runtime.TLSCertificateSHA256 {
-		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
-			return errors.New("invalid direct room message TLS fingerprint")
-		}
+	if !lowerHexSHA256(runtime.TLSCertificateSHA256) {
+		return errors.New("invalid direct room message TLS fingerprint")
 	}
 	return nil
+}
+
+// RoomStreamRuntime is room-stream-runtime/v1: the private endpoint of one
+// Worker stream attempt with one source token and one token per target.
+type RoomStreamRuntime struct {
+	SchemaVersion        string                  `json:"schema_version"`
+	WorkloadID           string                  `json:"workload_id"`
+	UnitID               string                  `json:"unit_id"`
+	Epoch                uint64                  `json:"epoch"`
+	Attempt              uint64                  `json:"attempt"`
+	WorkerID             string                  `json:"worker_id"`
+	Capability           string                  `json:"capability"`
+	Transport            string                  `json:"transport"`
+	BaseURL              string                  `json:"base_url"`
+	TLSCertificateSHA256 string                  `json:"tls_certificate_sha256"`
+	ExpiresAt            time.Time               `json:"expires_at"`
+	SourceAccessToken    string                  `json:"source_access_token"`
+	TargetAccessTokens   []RoomStreamTargetToken `json:"target_access_tokens"`
+}
+
+type RoomStreamTargetToken struct {
+	TargetMemberID string `json:"target_member_id"`
+	AccessToken    string `json:"access_token"`
+}
+
+// Validate checks the runtime against the attempt identity and the attempt's
+// destination member IDs.
+func (runtime RoomStreamRuntime) Validate(identity RoomWorkloadIdentity, targetMemberIDs []string, now time.Time) error {
+	if runtime.SchemaVersion != RoomStreamRuntimeSchema || runtime.WorkloadID != identity.WorkloadID ||
+		runtime.UnitID != identity.UnitID || runtime.Epoch != identity.Epoch || runtime.Attempt != identity.Attempt ||
+		runtime.WorkerID != identity.WorkerID || runtime.Capability != RoomStreamDirectCapability ||
+		runtime.Transport != RoomWorkerHTTPSTransport || !cleanHTTPSURL(runtime.BaseURL) {
+		return errors.New("invalid direct room stream runtime")
+	}
+	if !lowerHexSHA256(runtime.TLSCertificateSHA256) {
+		return errors.New("invalid direct room stream TLS fingerprint")
+	}
+	if runtime.ExpiresAt.IsZero() || !now.Before(runtime.ExpiresAt) || runtime.ExpiresAt.After(identity.ExpiresAt) {
+		return errors.New("direct room stream runtime expiry is outside the workload lease")
+	}
+	if len(runtime.TargetAccessTokens) == 0 || len(runtime.TargetAccessTokens) > RoomStreamMaxTargets ||
+		len(runtime.TargetAccessTokens) != len(targetMemberIDs) {
+		return errors.New("direct room stream runtime target tokens do not match the attempt")
+	}
+	if !ValidRoomWorkerAccessToken(runtime.SourceAccessToken) {
+		return errors.New("invalid direct room stream source token")
+	}
+	expected := make(map[string]struct{}, len(targetMemberIDs))
+	for _, member := range targetMemberIDs {
+		expected[member] = struct{}{}
+	}
+	members := make(map[string]struct{}, len(runtime.TargetAccessTokens))
+	tokens := map[string]struct{}{runtime.SourceAccessToken: {}}
+	for _, target := range runtime.TargetAccessTokens {
+		if _, ok := expected[target.TargetMemberID]; !ok {
+			return fmt.Errorf("direct room stream runtime names unknown target %s", target.TargetMemberID)
+		}
+		if _, duplicate := members[target.TargetMemberID]; duplicate {
+			return fmt.Errorf("duplicate direct room stream target %s", target.TargetMemberID)
+		}
+		members[target.TargetMemberID] = struct{}{}
+		if !ValidRoomWorkerAccessToken(target.AccessToken) {
+			return errors.New("invalid direct room stream target token")
+		}
+		if _, reused := tokens[target.AccessToken]; reused {
+			return errors.New("direct room stream tokens must be distinct")
+		}
+		tokens[target.AccessToken] = struct{}{}
+	}
+	if len(members) != len(expected) {
+		return errors.New("direct room stream runtime target tokens do not match the attempt")
+	}
+	return nil
+}
+
+// ValidRoomWorkerAccessToken reports whether token encodes 32 random bytes
+// with unpadded base64url, the form Workers issue for direct room runtimes.
+func ValidRoomWorkerAccessToken(token string) bool {
+	if len(token) != 43 {
+		return false
+	}
+	decoded, err := base64.RawURLEncoding.Strict().DecodeString(token)
+	return err == nil && len(decoded) == 32
+}
+
+func cleanHTTPSURL(value string) bool {
+	parsed, err := url.Parse(value)
+	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil &&
+		parsed.RawQuery == "" && !parsed.ForceQuery && parsed.Fragment == ""
+}
+
+func lowerHexSHA256(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 type MessageStatusDetails struct {
@@ -595,20 +748,109 @@ type StreamUnitDetails struct {
 	Protocol           string `json:"protocol"`
 	BackpressurePolicy string `json:"backpressure_policy"`
 	MaxBufferBytes     int64  `json:"max_buffer_bytes"`
+	HeartbeatTimeoutMS int64  `json:"heartbeat_timeout_ms"`
 }
+
+// Validate applies the room.stream.direct.v1 rules: a protected
+// beam-mls-stream-v1 session that never replays, block or drop_oldest
+// backpressure, a bounded replay window, and a bounded heartbeat timeout.
+func (v StreamUnitDetails) Validate() error {
+	if v.SessionID == "" || v.Replay || v.Protocol != RoomStreamProtectionProtocol ||
+		(v.BackpressurePolicy != "block" && v.BackpressurePolicy != "drop_oldest") ||
+		v.MaxBufferBytes < RoomStreamMinBufferBytes || v.MaxBufferBytes > RoomStreamMaxBufferBytes {
+		return errors.New("invalid room.stream details")
+	}
+	if v.HeartbeatTimeoutMS < RoomStreamMinHeartbeatTimeoutMS || v.HeartbeatTimeoutMS > RoomStreamMaxHeartbeatTimeoutMS {
+		return errors.New("invalid room.stream heartbeat_timeout_ms")
+	}
+	return nil
+}
+
+func (v StreamDefinitionDetails) Validate() error {
+	return StreamUnitDetails{SessionID: v.SessionID, Protocol: v.Protocol, BackpressurePolicy: v.BackpressurePolicy,
+		MaxBufferBytes: v.MaxBufferBytes, HeartbeatTimeoutMS: v.HeartbeatTimeoutMS}.Validate()
+}
+
+// RoomStreamTargetState is one target's Worker-side delivery state.
+type RoomStreamTargetState struct {
+	TargetMemberID   string  `json:"target_member_id"`
+	State            string  `json:"state"`
+	DeliveredThrough uint64  `json:"delivered_through"`
+	Reason           *string `json:"reason"`
+}
+
+// ValidateRoomStreamTargets checks 1..64 unique targets with known states and
+// bounded reasons.
+func ValidateRoomStreamTargets(targets []RoomStreamTargetState) error {
+	if len(targets) == 0 || len(targets) > RoomStreamMaxTargets {
+		return errors.New("room.stream requires between 1 and 64 targets")
+	}
+	seen := make(map[string]struct{}, len(targets))
+	for _, target := range targets {
+		switch target.State {
+		case RoomStreamTargetJoining, RoomStreamTargetActive, RoomStreamTargetCompleted,
+			RoomStreamTargetDropped, RoomStreamTargetFailed:
+		default:
+			return errors.New("invalid room.stream target state")
+		}
+		if target.TargetMemberID == "" || (target.Reason != nil && (*target.Reason == "" || len(*target.Reason) > 512)) {
+			return errors.New("invalid room.stream target")
+		}
+		if _, duplicate := seen[target.TargetMemberID]; duplicate {
+			return fmt.Errorf("duplicate room.stream target %s", target.TargetMemberID)
+		}
+		seen[target.TargetMemberID] = struct{}{}
+	}
+	return nil
+}
+
+// StreamProgressDetails is either runtime-only ({"runtime":…}) or counters
+// with per-target state, never both.
 type StreamProgressDetails struct {
-	Sequence      uint64 `json:"sequence"`
-	Bytes         int64  `json:"bytes"`
-	BufferedBytes int64  `json:"buffered_bytes"`
-	Dropped       int64  `json:"dropped"`
+	Sequence      uint64                  `json:"sequence"`
+	Bytes         int64                   `json:"bytes"`
+	BufferedBytes int64                   `json:"buffered_bytes"`
+	Dropped       int64                   `json:"dropped"`
+	Targets       []RoomStreamTargetState `json:"targets,omitempty"`
+	Runtime       *RoomStreamRuntime      `json:"runtime,omitempty"`
 }
+
+func (v StreamProgressDetails) MarshalJSON() ([]byte, error) {
+	if v.Runtime != nil {
+		return json.Marshal(struct {
+			Runtime *RoomStreamRuntime `json:"runtime"`
+		}{v.Runtime})
+	}
+	targets := v.Targets
+	if targets == nil {
+		targets = []RoomStreamTargetState{}
+	}
+	return json.Marshal(struct {
+		Sequence      uint64                  `json:"sequence"`
+		Bytes         int64                   `json:"bytes"`
+		BufferedBytes int64                   `json:"buffered_bytes"`
+		Dropped       int64                   `json:"dropped"`
+		Targets       []RoomStreamTargetState `json:"targets"`
+	}{v.Sequence, v.Bytes, v.BufferedBytes, v.Dropped, targets})
+}
+
 type StreamResultDetails struct {
-	Sequence       uint64 `json:"sequence"`
-	Bytes          int64  `json:"bytes"`
-	BufferedBytes  int64  `json:"buffered_bytes"`
-	Dropped        int64  `json:"dropped"`
-	TerminalReason string `json:"terminal_reason"`
+	Sequence       uint64                  `json:"sequence"`
+	Bytes          int64                   `json:"bytes"`
+	BufferedBytes  int64                   `json:"buffered_bytes"`
+	Dropped        int64                   `json:"dropped"`
+	Targets        []RoomStreamTargetState `json:"targets"`
+	TerminalReason string                  `json:"terminal_reason"`
 }
+
+func (v StreamResultDetails) MarshalJSON() ([]byte, error) {
+	type wire StreamResultDetails
+	if v.Targets == nil {
+		v.Targets = []RoomStreamTargetState{}
+	}
+	return json.Marshal(wire(v))
+}
+
 type StreamStatusDetails struct {
 	Sequence           uint64 `json:"sequence"`
 	Bytes              int64  `json:"bytes"`

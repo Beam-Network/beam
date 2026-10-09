@@ -33,7 +33,6 @@ func NewMessageHandler(client *http.Client) *Handler {
 func NewCommandHandler(client *http.Client) *Handler {
 	return newHandler(domain.KindRoomCommand, client)
 }
-func NewStreamHandler(client *http.Client) *Handler { return newHandler(domain.KindRoomStream, client) }
 
 func newHandler(kind domain.Kind, client *http.Client) *Handler {
 	if client == nil {
@@ -74,15 +73,6 @@ func (h *Handler) Validate(spec domain.Spec) error {
 			value.Details.TimeoutMS <= 0 || value.Details.TimeoutMS > 3_600_000 {
 			return errors.New("invalid room.command details")
 		}
-	case domain.KindRoomStream:
-		value, err := decodeSpec[contracts.StreamUnitDetails](spec)
-		if err != nil {
-			return err
-		}
-		if value.Details.SessionID == "" || value.Details.Replay || value.Details.Protocol == "" || value.Details.MaxBufferBytes <= 0 ||
-			(value.Details.BackpressurePolicy != "drop_oldest" && value.Details.BackpressurePolicy != "drop_newest" && value.Details.BackpressurePolicy != "block") {
-			return errors.New("invalid room.stream details")
-		}
 	default:
 		return errors.New("unsupported logical room workload kind")
 	}
@@ -100,8 +90,6 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 		return h.executeMessage(ctx, spec)
 	case domain.KindRoomCommand:
 		return h.executeCommand(ctx, spec)
-	case domain.KindRoomStream:
-		return h.executeStream(ctx, spec)
 	default:
 		return domain.Result{}, errors.New("unsupported logical room workload kind")
 	}
@@ -164,11 +152,6 @@ func (h *Handler) readSource(ctx context.Context, lease contracts.RoomPathLease,
 }
 
 func (h *Handler) send(ctx context.Context, lease contracts.RoomPathLease, payload []byte, maximumResponse int64, decoded any) error {
-	return h.sendWithHeaders(ctx, lease, payload, maximumResponse, decoded, nil)
-}
-
-func (h *Handler) sendWithHeaders(ctx context.Context, lease contracts.RoomPathLease, payload []byte,
-	maximumResponse int64, decoded any, headers map[string]string) error {
 	var failures []error
 	for _, endpoint := range lease.Endpoints {
 		method := endpoint.Method
@@ -181,7 +164,6 @@ func (h *Handler) sendWithHeaders(ctx context.Context, lease contracts.RoomPathL
 			continue
 		}
 		copyHeaders(request.Header, endpoint.Headers)
-		copyHeaders(request.Header, headers)
 		request.Header.Set("Content-Type", "application/json")
 		response, err := h.client.Do(request)
 		if err != nil {

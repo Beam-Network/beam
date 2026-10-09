@@ -57,7 +57,7 @@ func (c Config) ForKind(kind domain.Kind) Config {
 	case domain.KindTransferDistribute:
 		return Config{ControlAddress: c.ControlAddress, ControlToken: c.ControlToken}
 	case domain.KindTransferMultipart, domain.KindRoomDatagram,
-		domain.KindRoomMessage, domain.KindRoomCommand, domain.KindRoomStream:
+		domain.KindRoomMessage, domain.KindRoomCommand:
 		return Config{}
 	case domain.KindActionExecute:
 		return Config{
@@ -140,8 +140,6 @@ func BuildHandler(kind domain.Kind, config Config) (runtime.Handler, error) {
 		return roomworkloadhandlers.NewMessageHandler(nil), nil
 	case domain.KindRoomCommand:
 		return roomworkloadhandlers.NewCommandHandler(nil), nil
-	case domain.KindRoomStream:
-		return roomworkloadhandlers.NewStreamHandler(nil), nil
 	default:
 		return nil, errors.New("workload kind has no isolated subsystem implementation")
 	}

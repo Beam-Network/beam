@@ -57,7 +57,8 @@ func (s progressSink[T, R]) DeliverRoomWorkloadProgress(ctx context.Context, val
 	if sink == nil {
 		return nil
 	}
-	if value.Identity.Kind == domain.KindRoomMessage {
+	switch value.Identity.Kind {
+	case domain.KindRoomMessage:
 		var details contracts.MessageProgressDetails
 		if err := json.Unmarshal(value.Details, &details); err != nil {
 			return err
@@ -66,12 +67,7 @@ func (s progressSink[T, R]) DeliverRoomWorkloadProgress(ctx context.Context, val
 			if err := details.Runtime.Validate(value.Identity, s.manager.now().UTC()); err != nil {
 				return err
 			}
-			announcement := contracts.RoomMessageRuntimeWire{Type: contracts.RoomWorkloadRuntimeType,
-				SchemaVersion: contracts.RoomWorkloadSchema, Kind: value.Identity.Kind,
-				WorkloadID: value.Identity.WorkloadID, UnitID: value.Identity.UnitID, Epoch: value.Identity.Epoch,
-				Attempt: value.Identity.Attempt, WorkerID: value.Identity.WorkerID,
-				Runtime: *details.Runtime, ReportedAt: value.At.UTC()}
-			if err := sink.SubmitRoomMessageRuntime(ctx, announcement); err != nil {
+			if err := announceRuntime(ctx, sink, value, details.Runtime); err != nil {
 				return err
 			}
 			details.Runtime = nil
@@ -84,8 +80,26 @@ func (s progressSink[T, R]) DeliverRoomWorkloadProgress(ctx context.Context, val
 			}
 			value.Details = encoded
 		}
+	case domain.KindRoomStream:
+		// StreamStrategy.ValidateProgress has checked the runtime against the
+		// attempt; a runtime-only report is an announcement, not progress.
+		var details contracts.StreamProgressDetails
+		if err := json.Unmarshal(value.Details, &details); err != nil {
+			return err
+		}
+		if details.Runtime != nil {
+			return announceRuntime(ctx, sink, value, details.Runtime)
+		}
 	}
 	return sink.SubmitRoomWorkloadProgress(ctx, value)
+}
+
+func announceRuntime(ctx context.Context, sink Sink, value contracts.RoomGenericProgress, runtime any) error {
+	announcement, err := contracts.NewRoomWorkloadRuntimeWire(value.Identity, runtime, value.At)
+	if err != nil {
+		return err
+	}
+	return sink.SubmitRoomWorkloadRuntime(ctx, announcement)
 }
 
 func (m *Manager) publishResultStatus(ctx context.Context, value contracts.RoomGenericResult) error {
@@ -193,8 +207,43 @@ func (m *Manager) streamResultStatus(status resultStatus, value contracts.RoomGe
 	}
 	status.details = contracts.StreamStatusDetails{Sequence: result.Sequence, Bytes: result.Bytes,
 		BufferedBytes: result.BufferedBytes, Dropped: result.Dropped, BackpressurePolicy: policy}
-	status.state = terminalState(status.state, result.TerminalReason)
+	completed := 0
+	for _, target := range result.Targets {
+		destination := streamDestinationState(target.State)
+		if destination == contracts.DestinationCompleted {
+			completed++
+		}
+		status.destinations = append(status.destinations, contracts.RoomDestinationStatusWire{
+			TargetMemberID: target.TargetMemberID, Status: destination, Reason: target.Reason})
+	}
+	switch {
+	case status.state != contracts.RoomCompleted:
+	case result.TerminalReason == contracts.RoomStreamSourceAborted || result.TerminalReason == contracts.RoomStreamSourceLost:
+		status.state = contracts.RoomFailed
+	case result.TerminalReason == contracts.RoomStreamEnded && completed == 0:
+		status.state = contracts.RoomFailed
+	case result.TerminalReason == contracts.RoomStreamEnded && result.Dropped > 0:
+		status.state = contracts.RoomPartial
+	default:
+		status.state = terminalState(status.state, result.TerminalReason)
+	}
 	return status
+}
+
+// streamDestinationState maps a Worker stream target state to its destination.
+func streamDestinationState(state string) contracts.RoomDestinationState {
+	switch state {
+	case contracts.RoomStreamTargetJoining:
+		return contracts.DestinationReady
+	case contracts.RoomStreamTargetActive:
+		return contracts.DestinationActive
+	case contracts.RoomStreamTargetCompleted:
+		return contracts.DestinationCompleted
+	case contracts.RoomStreamTargetDropped:
+		return contracts.DestinationDropped
+	default:
+		return contracts.DestinationFailed
+	}
 }
 
 func mediaResultStatus(status resultStatus, encoded json.RawMessage) resultStatus {

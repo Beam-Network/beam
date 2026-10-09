@@ -114,9 +114,27 @@ fails closed when a pair is incomplete or its HTTPS advertise URL is missing:
 | --- | --- |
 | `room.media` + `room.media.webrtc.v1` | `--media-addr` (`BEAM_MEDIA_LISTEN_ADDR`), `--media-advertise-url` (`BEAM_MEDIA_ADVERTISE_URL`), `--media-public-ip` (`BEAM_MEDIA_PUBLIC_IP`), `--media-udp-port-min` / `--media-udp-port-max` (`BEAM_MEDIA_UDP_PORT_MIN` / `BEAM_MEDIA_UDP_PORT_MAX`) |
 | `room.message` + `room.message.direct.v1` | `--room-message-addr` (`BEAM_ROOM_MESSAGE_LISTEN_ADDR`), `--room-message-advertise-url` (`BEAM_ROOM_MESSAGE_ADVERTISE_URL`) |
+| `room.stream` + `room.stream.direct.v1` | `--room-message-addr` (`BEAM_ROOM_MESSAGE_LISTEN_ADDR`), `--room-message-advertise-url` (`BEAM_ROOM_MESSAGE_ADVERTISE_URL`) |
 | `room.transfer` + `room.transfer.storage.v2` | `--room-storage-addr` (`BEAM_ROOM_STORAGE_LISTEN_ADDR`), `--room-storage-advertise-url` (`BEAM_ROOM_STORAGE_ADVERTISE_URL`) |
 
-Room messages are placed only on workers that enable `room.message.direct.v1`.
+Room messages are placed only on workers that enable `room.message.direct.v1`,
+and room streams only on workers that enable `room.stream.direct.v1`.
+
+Direct room messages and streams share one listener: `--room-message-addr`
+serves both `/v1/room-messages/` and `/v1/room-streams/` under one pinned
+certificate. Workers serve `room.stream` only directly, so the Worker refuses to
+start with `room.stream` or `room.stream.direct.v1` alone.
+
+A stream session runs for one workload attempt. The source agent posts numbered
+frames of its end-to-end encrypted `beam-mls-stream-v1` byte stream and names
+the attempt's first sequence in `X-Beam-Stream-Base-Sequence`; each target agent
+long-polls frame batches and acknowledges what it has delivered. The Worker
+keeps a frame until every live target has acknowledged it, holding at most the
+workload's `max_buffer_bytes`. Under `block` the slowest live target paces the
+source; under `drop_oldest` a target that holds a full window back for more than
+a second is dropped. A target that makes no request within the workload's
+`heartbeat_timeout_ms` is dropped; a source that makes none before ending the
+stream fails the session. The Worker never sees plaintext.
 
 Advertise URLs use `https://` without credentials, query, or fragment; `{port}`
 expands to the bound listener port. These listeners serve short-lived
