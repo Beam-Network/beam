@@ -76,6 +76,4 @@ class AgentServer:
             return self.policy.sign_enrollment(params)
         if method == "bind_node_key":
             return self.policy.bind_node_key(params)
-        if method == "sign_payment_evidence":
-            return self.policy.sign_payment_evidence(params)
         raise RequestError(f"unsupported method {method!r}")

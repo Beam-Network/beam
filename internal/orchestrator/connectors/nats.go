@@ -22,7 +22,6 @@ type NATSConfig struct {
 	Stream           string
 	TaskSubject      string
 	ResultSubject    string
-	EvidenceSubject  string
 	ProvisionSubject string
 	Durable          string
 	EnsureStream     bool

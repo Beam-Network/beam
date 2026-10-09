@@ -182,10 +182,10 @@ Orchestrators can reset their task history and workload profiles in a single cal
 
 **What is deleted:**
 - Your operational task and batch history
-- Fraud penalties attributed to this orchestrator
 - Your active workload profiles and qualification progress are reset; opponents' valid points and published audit snapshots remain intact
 
 **What is preserved:**
+- Active penalties — they stay attributed to this orchestrator and expire on their own schedule
 - Published scoring and audit history — earlier snapshots retain their original evidence
 - Identity fields (hotkey, UID, name, region)
 - Worker registrations

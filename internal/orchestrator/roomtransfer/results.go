@@ -154,6 +154,9 @@ func (s *Service) verifyReceipts(batch contracts.RoomTaskOfferBatch, offer contr
 		return err
 	}
 	for _, failure := range result.Failures {
+		if err := verifyTargetFailure(batch, offer, lane, failure, now); err != nil {
+			return err
+		}
 		receipt := failure.SourceFailureReceipt
 		terminalSourceClaim := failure.Origin == "source_agent" &&
 			(failure.Code == "source_file_mutated" || failure.Code == "source_integrity_failed" || !failure.Retryable)
@@ -204,6 +207,25 @@ func (s *Service) verifyReceipts(batch contracts.RoomTaskOfferBatch, offer contr
 	return nil
 }
 
+// verifyTargetFailure accepts a target agent's signed persist failure only for
+// a member, lease and chunk of this lane, signed with that member's lease key.
+func verifyTargetFailure(batch contracts.RoomTaskOfferBatch, offer contracts.RoomSourceLane, lane LaneRecord,
+	failure contracts.RoomFailure, now time.Time) error {
+	receipt := failure.TargetFailureReceipt
+	if receipt == nil {
+		return nil
+	}
+	lease, ok := lane.TargetLeases[receipt.TargetMemberID]
+	if !ok || failure.Origin != "target_agent" || failure.Code != receipt.Code || failure.TargetMemberID != receipt.TargetMemberID ||
+		receipt.TransferID != batch.TransferID || receipt.LaneID != offer.LaneID ||
+		receipt.ChunkIndex < offer.ChunkStart || receipt.ChunkIndex > offer.ChunkEnd ||
+		!slices.Contains(failure.ChunkIndices, receipt.ChunkIndex) || receipt.LeaseID != lease.LeaseID ||
+		receipt.Verify(lease.AgentPublicKey, now) != nil {
+		return errors.New("target failure receipt does not match the room lane")
+	}
+	return nil
+}
+
 func batchCapabilities(batch contracts.RoomTaskOfferBatch) []string {
 	if batch.SchemaVersion == contracts.RoomStorageSchemaVersion {
 		return []string{contracts.RoomTransferCapability, contracts.RoomStorageCapability}
@@ -242,7 +264,7 @@ func verifyStorageEvidence(batch contracts.RoomTaskOfferBatch, offer contracts.R
 			evidence.CompletedAt.IsZero() || evidence.CompletedAt.After(now.Add(time.Minute)) || evidence.CompletedAt.After(lease.ExpiresAt) {
 			return errors.New("storage result does not match its worker assignment")
 		}
-		if evidence.Role == contracts.TunnelLeaseRoleTargetWrite && (evidence.ETag == "" || evidence.UploadID == "" || evidence.PartNumber != contracts.MultipartAttemptPartNumber(evidence.ChunkIndex, offer.Attempt)) {
+		if evidence.Role == contracts.TunnelLeaseRoleTargetWrite && (evidence.ETag == "" || evidence.UploadID == "" || evidence.PartNumber != contracts.MultipartPartNumber(evidence.ChunkIndex)) {
 			return errors.New("storage result lacks multipart evidence")
 		}
 		if evidence.Role == contracts.TunnelLeaseRoleSourceRead {

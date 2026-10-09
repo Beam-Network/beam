@@ -27,7 +27,6 @@ class Identity:
 
 
 SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
-HEX_SHA256 = re.compile(r"^[a-fA-F0-9]{64}$")
 
 
 class SigningPolicy:
@@ -68,26 +67,6 @@ class SigningPolicy:
                 node_public_key,
                 expires_at,
                 nonce,
-            ]
-        )
-        return signed_response(self._signer, message)
-
-    def sign_payment_evidence(self, params: dict[str, Any]) -> dict[str, str]:
-        """Preserve the existing BeamCore payment-evidence canonical message."""
-
-        worker_id = required_identifier(params, "worker_id")
-        task_id = required_identifier(params, "task_id")
-        offer_id = required_identifier(params, "offer_id")
-        chunk_hash = str(params.get("chunk_hash") or "")
-        if chunk_hash and not HEX_SHA256.fullmatch(chunk_hash):
-            raise RequestError("chunk_hash must be an empty value or hexadecimal SHA-256")
-        message = ":".join(
-            [
-                "beam-worker-payment-evidence",
-                worker_id,
-                task_id,
-                offer_id,
-                chunk_hash,
             ]
         )
         return signed_response(self._signer, message)

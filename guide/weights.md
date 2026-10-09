@@ -60,6 +60,8 @@ A sale is any SN105 alpha leaving your coldkey's stake on this subnet, on any ho
 
 A sale from a miner hotkey counts for that hotkey. A sale from any other hotkey of your coldkey, or from a miner hotkey set as your auto-stake destination, counts as one sale for each of your miner hotkeys, with the amount split in proportion to their emission.
 
+Each sale is checked when it happens: its allowance is 80% of the hotkey's base emissions over the previous 7 days (50,400 blocks), minus earlier sales in those 7 days. Sales at least 50,400 blocks apart never share a window, so one sale every 7 days of up to 80% of the previous 7 days' base emissions always keeps these multipliers at 1.00.
+
 Selling more, or more often, lowers your weight:
 
 ```text
@@ -68,7 +70,11 @@ frequency_multiplier = max(0.10, 1 / (1 + 1.5 x (sales in 7 days - 1)))   1.00 w
 multiplier           = max(0.10, sell_multiplier x frequency_multiplier)
 ```
 
-Each α sold above the 80% threshold costs 2 α of emission. Up to 100% sold, this is paid within 7 days. Beyond that, the sell multiplier stays at 0.60 until 2 α of emission per α sold above the 80% threshold has been removed.
+Each α sold above the 80% threshold costs 2 α of emission. Up to 100% sold, this is paid within 7 days. Beyond that, the sell multiplier stays at 0.60 until 2 α of emission per α sold above the 80% threshold has been removed. At 0.60, 40% of your emission repays it, so each week of base emissions sold above the threshold keeps the multiplier at 0.60 for about 5 weeks.
+
+| Sales in 7 days | 1 | 2 | 3 | 4 | 5 | 6 | 7 or more |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `frequency_multiplier` | 1.00 | 0.40 | 0.25 | 0.18 | 0.14 | 0.12 | 0.10 |
 
 | Last 7 days | Multiplier |
 | --- | ---: |
@@ -79,11 +85,53 @@ Each α sold above the 80% threshold costs 2 α of emission. Up to 100% sold, th
 | Two sales, up to 80% in total | 0.40 |
 | A sale every day | 0.10 |
 
+### Examples
+
+A hotkey with base emissions of 100 α per 7 days may sell 80 α in one sale:
+
+| Sales | Multiplier | Why |
+| --- | --- | --- |
+| 80 α every 7 days | 1.00 | Within the allowance; it keeps 20 α a week |
+| 90 α once | 0.80 for 7 days | 10 α above the threshold costs 20 α |
+| 100 α once | 0.60 for 7 days | 20 α above the threshold costs 40 α |
+| 180 α once | 0.60 for 5 weeks | 100 α above the threshold costs 200 α |
+| 380 α once, after 15 weeks of selling 80 α (300 α kept) | 0.60 for 15 weeks | 300 α above the threshold costs 600 α: selling savings costs twice their amount |
+| 40 α, then 40 α within 7 days | 0.40 until the first sale is 7 days old | Within the allowance, but two sales |
+| 40 α, then 60 α within 7 days | 0.24 (0.60 × 0.40) until the first sale is 7 days old, then 0.60 until the second is | The second sale is 20 α above the allowance left |
+| All of its emission, every day | 0.10 | 7 sales in 7 days, and once 80% is used, each sale is entirely above the threshold |
+
+### Redistribution
+
 The weight removed from a hotkey goes to hotkeys of other coldkeys whose multiplier is 1.00, in proportion to the share of their emission they kept.
+
+The share kept is 1 − sales ÷ base emissions over the last 7 days, never below 0. It does not depend on how much a hotkey earns, so a small miner that keeps all of its emission receives as much as a large one that does. Nothing is burned. When most miners sell, a holder can receive many times its own emission.
+
+### New hotkeys and debt
 
 The sell-pressure adjustment applies to an orchestrator once it is qualified, from its first emission: the multiplier starts at 0.10 and reaches 1.00 after 7 days, and starts again after 7 days without emission. Orchestrators still qualifying are outside it and receive none of the removed weight.
 
+The multiplier rises evenly: 0.55 after 3.5 days, 1.00 after 7 days.
+
 Alpha still owed for selling above the 80% threshold stays with your coldkey: if the hotkey deregisters or stops qualifying, it passes to your coldkey's other miner hotkeys, including a new registration.
+
+For example, if hotkey A owes 600 α and deregisters, a new hotkey registered by the same coldkey owes the 600 α and starts at 0.10, so it stays at 0.60 or below until the debt is repaid.
+
+### Getting back to 1.00
+
+Once you stop selling, or sell only within the allowance, each reduction ends on its own:
+
+| Reduction | Ends |
+| --- | --- |
+| New hotkey | 7 days after its first emission |
+| More than one sale | When only one sale is left in the last 7 days |
+| One sale up to 100% | 7 days after the sale |
+| One sale above 100%, or debt | When the debt is repaid, at 0.60: about 5 weeks per week of base emissions sold above the threshold |
+
+A sale within the allowance does not slow repayment. A hotkey that sold all of its emission every day returns to 0.60 within 7 days of its last sale, then stays there until its debt is repaid, often several weeks.
+
+### Checking your state
+
+`GET https://api.b1m.ai/v1/audit/sell-allowance/{hotkey}` returns your hotkey's multipliers, remaining allowance, 7-day sales and debt for the latest published epoch.
 
 ## Inputs
 

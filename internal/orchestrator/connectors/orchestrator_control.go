@@ -349,14 +349,15 @@ func (control *roomControl) handleTaskOfferBatch(ctx context.Context, encoded []
 		}
 		specs = append(specs, spec)
 	}
+	var failures []error
 	for _, spec := range specs {
 		if _, err := control.tasks.Dispatch(ctx, dispatch.DispatchRequest{
 			Source: dispatch.SourceBeamCore, ExternalID: spec.AttemptID, BatchID: batch.BatchID, Spec: spec,
 		}); err != nil {
-			return err
+			failures = append(failures, fmt.Errorf("offer %s: %w", spec.AttemptID, err))
 		}
 	}
-	return nil
+	return errors.Join(failures...)
 }
 
 func (control *roomControl) handleCancel(ctx context.Context, encoded []byte) error {

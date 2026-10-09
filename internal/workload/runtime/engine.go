@@ -41,6 +41,7 @@ type Engine struct {
 	mu          sync.Mutex
 	cancels     map[string]context.CancelFunc
 	results     chan domain.Result
+	resultSaved chan struct{}
 	progress    chan domain.Progress
 	checkpoints chan domain.Checkpoint
 }
@@ -62,7 +63,7 @@ func NewEngine(workerID string, capabilities []string, registry *Registry, gover
 	return &Engine{
 		workerID: workerID, capabilities: capabilitySet, registry: registry,
 		governor: governor, store: store, now: time.Now,
-		cancels: make(map[string]context.CancelFunc), results: make(chan domain.Result, 64),
+		cancels: make(map[string]context.CancelFunc), results: make(chan domain.Result, 64), resultSaved: make(chan struct{}, 1),
 		progress: make(chan domain.Progress, 128), checkpoints: make(chan domain.Checkpoint, 128),
 	}, nil
 }
@@ -70,6 +71,8 @@ func NewEngine(workerID string, capabilities []string, registry *Registry, gover
 func (e *Engine) Results() <-chan domain.Result         { return e.results }
 func (e *Engine) Progress() <-chan domain.Progress      { return e.progress }
 func (e *Engine) Checkpoints() <-chan domain.Checkpoint { return e.checkpoints }
+
+func (e *Engine) ResultSaved() <-chan struct{} { return e.resultSaved }
 
 func (e *Engine) Reconcile(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
@@ -176,29 +179,25 @@ func (e *Engine) Offer(ctx context.Context, spec domain.Spec) (Decision, error) 
 		return Decision{WorkloadID: spec.WorkloadID, AttemptID: spec.AttemptID, Reason: err.Error()}, err
 	}
 
-	record := Record{Spec: spec, State: domain.StateOffered, CreatedAt: now, UpdatedAt: now}
-	if err := e.store.Create(record); err != nil {
-		if !errors.Is(err, ErrRecordExists) {
-			return Decision{}, err
-		}
-		existing, getErr := e.store.Get(spec.Key())
-		if getErr != nil {
-			return Decision{}, getErr
-		}
+	if existing, getErr := e.store.Get(spec.Key()); getErr == nil {
 		return decisionFor(existing), nil
+	} else if !errors.Is(getErr, ErrRecordNotFound) {
+		return Decision{}, getErr
 	}
 
 	if err := e.governor.Reserve(spec.Key(), spec.Resources); err != nil {
-		record.State = domain.StateRejected
-		record.Reason = err.Error()
-		record.UpdatedAt = e.now()
-		_ = e.store.Save(record)
-		return decisionFor(record), err
+		return Decision{WorkloadID: spec.WorkloadID, AttemptID: spec.AttemptID, Reason: err.Error()}, err
 	}
-	record.State = domain.StateReserved
-	record.UpdatedAt = e.now()
-	if err := e.store.Save(record); err != nil {
+	record := Record{Spec: spec, State: domain.StateReserved, CreatedAt: now, UpdatedAt: e.now()}
+	if err := e.store.Create(record); err != nil {
 		e.governor.Release(spec.Key())
+		if errors.Is(err, ErrRecordExists) {
+			existing, getErr := e.store.Get(spec.Key())
+			if getErr != nil {
+				return Decision{}, getErr
+			}
+			return decisionFor(existing), nil
+		}
 		return Decision{}, err
 	}
 	return decisionFor(record), nil
@@ -285,11 +284,8 @@ func (e *Engine) execute(ctx context.Context, record Record) {
 	}()
 
 	started := e.now()
-	record.State = domain.StateStarting
-	record.UpdatedAt = started
-	_ = e.store.Save(record)
 	record.State = domain.StateRunning
-	record.UpdatedAt = e.now()
+	record.UpdatedAt = started
 	_ = e.store.Save(record)
 
 	handler, err := e.registry.Handler(record.Spec.Kind)
@@ -315,7 +311,8 @@ func (e *Engine) execute(ctx context.Context, record Record) {
 		if errors.Is(ctx.Err(), context.Canceled) {
 			result.State = domain.StateCancelled
 			result.ErrorCode = "cancelled"
-		} else if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		} else if errors.Is(ctx.Err(), context.DeadlineExceeded) ||
+			(!record.Spec.Lease.AssignmentExpiresAt.IsZero() && !result.CompletedAt.Before(record.Spec.Lease.AssignmentExpiresAt)) {
 			result.State = domain.StateExpired
 			result.ErrorCode = "lease_expired"
 		} else {
@@ -334,6 +331,10 @@ func (e *Engine) execute(ctx context.Context, record Record) {
 	}
 	record.UpdatedAt = result.CompletedAt
 	_ = e.store.Save(record)
+	select {
+	case e.resultSaved <- struct{}{}:
+	default:
+	}
 	select {
 	case e.results <- result:
 	default:
@@ -383,13 +384,11 @@ func (e *Engine) reportProgress(key string, outputs map[string]string) {
 	}
 	record.Progress = &progress
 	record.UpdatedAt = progress.ObservedAt
-	if e.store.Save(record) != nil {
-		return
-	}
 	select {
 	case e.progress <- progress:
 	default:
 	}
+	_ = e.store.Save(record)
 }
 
 func decisionFor(record Record) Decision {

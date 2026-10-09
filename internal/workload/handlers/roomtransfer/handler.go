@@ -71,7 +71,10 @@ type session struct {
 	expected      int64
 	readingSource bool
 	failure       *contracts.SourceFailureReceipt
-	changed       chan struct{}
+	// targetFailures holds each member's signed persist failure; that member's
+	// delivery stops for this attempt while the other members continue.
+	targetFailures map[string]contracts.TargetFailureReceipt
+	changed        chan struct{}
 }
 
 type chunk struct {
@@ -176,7 +179,7 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 	sessionID := fmt.Sprintf("%s-%s-%d", transfer.TransferID, transfer.LaneID, transfer.Attempt)
 	active := &session{transfer: transfer, token: runtimeToken, now: h.now,
 		chunks: make(map[int64]*chunk), completed: make(map[int64]*completedChunk),
-		expected: transfer.ChunkStart, changed: make(chan struct{}, 1)}
+		targetFailures: make(map[string]contracts.TargetFailureReceipt), expected: transfer.ChunkStart, changed: make(chan struct{}, 1)}
 	active.restoreCompleted(resume)
 	if err := shared.add(sessionID, active); err != nil {
 		return domain.Result{}, err
@@ -211,10 +214,13 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 		if allTargetsDelivered(resume, transfer.Targets, chunkIndex) {
 			continue
 		}
+		if active.allTargetsFailed() {
+			break
+		}
 		if transfer.SourceLease.Storage != nil {
 			payload, evidence, err := readStorageChunk(ctx, h.storageClient, transfer, spec.Identity.WorkerID, chunkIndex, h.now)
 			if err != nil {
-				return result(transfer, resume, []contracts.RoomFailure{{Origin: "storage_provider", Code: storageFailureCode(err), Retryable: storageFailureCode(err) != "room_storage_source_mutated", ChunkIndices: []int64{chunkIndex}}}, bytesProcessed)
+				return result(transfer, resume, active.withTargetFailures([]contracts.RoomFailure{{Origin: "storage_provider", Code: storageFailureCode(err), Retryable: storageFailureCode(err) != "room_storage_source_mutated", ChunkIndices: []int64{chunkIndex}, Detail: storageFailureClass(err)}}), bytesProcessed)
 			}
 			resume.StorageResults[storageResultKey(evidence)] = evidence
 			active.mu.Lock()
@@ -227,7 +233,7 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 		}
 		current, waitErr := active.waitForSource(ctx, chunkIndex)
 		if waitErr != nil {
-			return result(transfer, resume, sourceFailure(waitErr, chunkIndex), bytesProcessed)
+			return result(transfer, resume, active.withTargetFailures(sourceFailure(waitErr, chunkIndex)), bytesProcessed)
 		}
 		if transfer.SourceLease.Storage == nil {
 			resume.SourceReceipts[chunkIndex] = current.source
@@ -244,11 +250,11 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 			return domain.Result{}, deliveryErr
 		}
 		if len(failures) != 0 {
-			return result(transfer, resume, failures, bytesProcessed)
+			return result(transfer, resume, active.withTargetFailures(failures), bytesProcessed)
 		}
 		active.release(chunkIndex)
 	}
-	return result(transfer, resume, nil, bytesProcessed)
+	return result(transfer, resume, active.withTargetFailures(nil), bytesProcessed)
 }
 
 // PrepareStorageListener binds the TLS endpoint before the worker advertises
@@ -391,6 +397,10 @@ func (s *session) ServeHTTP(response http.ResponseWriter, request *http.Request,
 	}
 	if len(parts) == 5 && parts[0] == "targets" && parts[2] == "chunks" && parts[4] == "receipt" && request.Method == http.MethodPost {
 		s.acceptTargetReceipt(response, request, parts[1], parts[3])
+		return
+	}
+	if len(parts) == 4 && parts[0] == "targets" && parts[2] == "failures" && request.Method == http.MethodPost {
+		s.acceptTargetFailure(response, request, parts[1], parts[3])
 		return
 	}
 	http.NotFound(response, request)
@@ -575,6 +585,30 @@ func (s *session) acceptTargetReceipt(response http.ResponseWriter, request *htt
 	response.WriteHeader(http.StatusNoContent)
 }
 
+// acceptTargetFailure records a target agent's signed persist failure. Only the
+// first receipt per member counts; that member receives nothing further.
+func (s *session) acceptTargetFailure(response http.ResponseWriter, request *http.Request, rawMember, rawIndex string) {
+	memberID, index, target, err := s.authorizeTarget(request, rawMember, rawIndex)
+	if err != nil {
+		http.Error(response, err.Error(), http.StatusForbidden)
+		return
+	}
+	var receipt contracts.TargetFailureReceipt
+	if err := decodeJSON(request, &receipt); err != nil || target.Lease.Storage != nil || receipt.TransferID != s.transfer.TransferID ||
+		receipt.LaneID != s.transfer.LaneID || receipt.ChunkIndex != index || receipt.TargetMemberID != memberID ||
+		receipt.LeaseID != target.Lease.LeaseID || receipt.Verify(target.Lease.AgentPublicKey, s.now().UTC()) != nil {
+		http.Error(response, "invalid signed target failure", http.StatusBadRequest)
+		return
+	}
+	s.mu.Lock()
+	if _, exists := s.targetFailures[memberID]; !exists {
+		s.targetFailures[memberID] = receipt
+		s.signalLocked()
+	}
+	s.mu.Unlock()
+	response.WriteHeader(http.StatusNoContent)
+}
+
 func (s *session) authorizeSource(request *http.Request, rawIndex string) (int64, error) {
 	index, err := strconv.ParseInt(rawIndex, 10, 64)
 	if err != nil || index < s.transfer.ChunkStart || index > s.transfer.ChunkEnd ||
@@ -664,6 +698,51 @@ type sourceFailureError struct {
 }
 
 func (e *sourceFailureError) Error() string { return e.receipt.Code }
+
+func (s *session) targetFailed(memberID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, failed := s.targetFailures[memberID]
+	return failed
+}
+
+func (s *session) allTargetsFailed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, target := range s.transfer.Targets {
+		if _, failed := s.targetFailures[target.MemberID]; !failed {
+			return false
+		}
+	}
+	return true
+}
+
+// withTargetFailures reports each signed target failure once, replacing any
+// failure the Worker inferred for the same member.
+func (s *session) withTargetFailures(failures []contracts.RoomFailure) []contracts.RoomFailure {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.targetFailures) == 0 {
+		return failures
+	}
+	result := make([]contracts.RoomFailure, 0, len(failures)+len(s.targetFailures))
+	for _, failure := range failures {
+		if _, signed := s.targetFailures[failure.TargetMemberID]; !signed {
+			result = append(result, failure)
+		}
+	}
+	members := make([]string, 0, len(s.targetFailures))
+	for memberID := range s.targetFailures {
+		members = append(members, memberID)
+	}
+	sort.Strings(members)
+	for _, memberID := range members {
+		receipt := s.targetFailures[memberID]
+		result = append(result, contracts.RoomFailure{Origin: "target_agent", Code: receipt.Code, Retryable: true,
+			TargetMemberID: memberID, ChunkIndices: []int64{receipt.ChunkIndex}, TargetFailureReceipt: &receipt})
+	}
+	return result
+}
 
 func sourceFailure(err error, index int64) []contracts.RoomFailure {
 	failure := contracts.RoomFailure{Origin: "source_agent", Code: "source_disconnected", Retryable: true,
@@ -761,7 +840,7 @@ func verifyCheckpoint(transfer contracts.RoomTransfer, resume checkpointValue, n
 			key != storageResultKey(evidence) || evidence.LeaseID != lease.LeaseID || evidence.ChunkIndex < transfer.ChunkStart ||
 			evidence.ChunkIndex > transfer.ChunkEnd || evidence.Offset != offset || evidence.Length != length ||
 			evidence.CompletedAt.IsZero() || evidence.CompletedAt.After(now.Add(time.Minute)) || len(evidence.RangeSHA256) != 64 ||
-			(evidence.Role == contracts.TunnelLeaseRoleTargetWrite && (evidence.UploadID == "" || evidence.ETag == "" || evidence.PartNumber != contracts.MultipartAttemptPartNumber(evidence.ChunkIndex, transfer.Attempt))) {
+			(evidence.Role == contracts.TunnelLeaseRoleTargetWrite && (evidence.UploadID == "" || evidence.ETag == "" || evidence.PartNumber != contracts.MultipartPartNumber(evidence.ChunkIndex))) {
 			return errors.New("storage checkpoint evidence does not match the assignment")
 		}
 	}

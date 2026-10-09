@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/Beam-Network/beam/internal/orchestrator/dispatch"
-	"github.com/Beam-Network/beam/internal/orchestrator/payment"
 	"github.com/Beam-Network/beam/internal/orchestrator/roomtransfer"
 	"github.com/Beam-Network/beam/internal/orchestrator/roomworkloads"
 	"github.com/Beam-Network/beam/internal/workload/contracts"
@@ -22,7 +21,6 @@ type BeamCoreConnector struct {
 	config        NATSConfig
 	orchestrator  *dispatch.Service
 	nats          *natsConnector
-	payments      *payment.Service
 	rooms         *roomtransfer.Service
 	roomWorkloads *roomworkloads.Manager
 	roomControl   *roomControl
@@ -30,21 +28,14 @@ type BeamCoreConnector struct {
 	running       atomic.Bool
 }
 
-func NewBeamCoreConnector(config NATSConfig, orchestrator *dispatch.Service, payments ...*payment.Service) (*BeamCoreConnector, error) {
+func NewBeamCoreConnector(config NATSConfig, orchestrator *dispatch.Service) (*BeamCoreConnector, error) {
 	if orchestrator == nil {
 		return nil, errors.New("Orchestrator orchestration service is required")
 	}
 	if config.Name == "" {
 		config.Name = "beam-orchestrator-beamcore"
 	}
-	connector := &BeamCoreConnector{config: config, orchestrator: orchestrator}
-	if len(payments) > 0 {
-		connector.payments = payments[0]
-	}
-	if connector.payments != nil && config.TaskSubject != "" && config.EvidenceSubject == "" {
-		return nil, errors.New("BeamCore payment evidence NATS subject is required")
-	}
-	return connector, nil
+	return &BeamCoreConnector{config: config, orchestrator: orchestrator}, nil
 }
 
 func (s *BeamCoreConnector) AttachRoomTransfers(service *roomtransfer.Service) { s.rooms = service }
@@ -76,9 +67,6 @@ func (s *BeamCoreConnector) Run(ctx context.Context) error {
 	s.nats = session
 	s.roomControl = control
 	s.orchestrator.RegisterSink(dispatch.SourceBeamCore, s)
-	if s.payments != nil && s.config.TaskSubject != "" {
-		s.payments.RegisterSink(s)
-	}
 	if s.rooms != nil {
 		s.rooms.RegisterSink(s)
 	}
@@ -87,9 +75,6 @@ func (s *BeamCoreConnector) Run(ctx context.Context) error {
 	}
 	defer func() {
 		s.orchestrator.RegisterSink(dispatch.SourceBeamCore, nil)
-		if s.payments != nil && s.config.TaskSubject != "" {
-			s.payments.RegisterSink(nil)
-		}
 		if s.rooms != nil {
 			s.rooms.RegisterSink(nil)
 		}
@@ -104,9 +89,6 @@ func (s *BeamCoreConnector) Run(ctx context.Context) error {
 		session.close()
 	}()
 	go s.orchestrator.ReplayResults(ctx)
-	if s.payments != nil && s.config.TaskSubject != "" {
-		go s.payments.Replay(ctx)
-	}
 	if s.rooms != nil {
 		go s.rooms.Replay(ctx)
 	}
@@ -126,42 +108,6 @@ func (s *BeamCoreConnector) Run(ctx context.Context) error {
 		s.roomWorkloads.Replay(ctx)
 	}
 	return session.consume(ctx, s.handle)
-}
-
-func (s *BeamCoreConnector) SubmitPaymentEvidence(ctx context.Context, proof payment.Proof) error {
-	if err := proof.Verify(); err != nil {
-		return err
-	}
-	payload, err := json.Marshal(struct {
-		Type string `json:"type"`
-		payment.Proof
-	}{Type: "worker_payment_evidence", Proof: proof})
-	if err != nil {
-		return err
-	}
-	response, err := s.nats.request(ctx, s.config.EvidenceSubject, payload)
-	if err != nil {
-		return err
-	}
-	if len(response) == 0 {
-		return errors.New("BeamCore returned an empty payment evidence acknowledgement")
-	}
-	var acknowledgement struct {
-		Accepted   bool   `json:"accepted"`
-		Received   bool   `json:"received"`
-		EvidenceID string `json:"evidence_id"`
-		Reason     string `json:"reason"`
-	}
-	if err := json.Unmarshal(response, &acknowledgement); err != nil {
-		return err
-	}
-	if !acknowledgement.Accepted && !acknowledgement.Received {
-		return errors.New(fallback(acknowledgement.Reason, "BeamCore rejected payment evidence"))
-	}
-	if acknowledgement.EvidenceID != "" && acknowledgement.EvidenceID != proof.EvidenceID {
-		return errors.New("BeamCore acknowledged another payment evidence id")
-	}
-	return nil
 }
 
 func (s *BeamCoreConnector) handle(ctx context.Context, encoded []byte) error {

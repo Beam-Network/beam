@@ -206,6 +206,21 @@ type SourceFailureReceipt struct {
 	AgentSignature string    `json:"agent_signature"`
 }
 
+// TargetFailureReceipt is the target agent's signed attestation that it could
+// not persist a delivered chunk locally.
+type TargetFailureReceipt struct {
+	ReceiptID      string    `json:"receipt_id"`
+	TransferID     string    `json:"transfer_id"`
+	LaneID         string    `json:"lane_id"`
+	ChunkIndex     int64     `json:"chunk_index"`
+	TargetMemberID string    `json:"target_member_id"`
+	Code           string    `json:"code"`
+	LeaseID        string    `json:"lease_id"`
+	ObservedAt     time.Time `json:"observed_at"`
+	AgentPublicKey string    `json:"agent_public_key"`
+	AgentSignature string    `json:"agent_signature"`
+}
+
 type TargetRangeReceipt struct {
 	SourceRangeReceipt
 	TargetMemberID string `json:"target_member_id"`
@@ -235,6 +250,7 @@ type RoomFailure struct {
 	ChunkIndices         []int64               `json:"chunk_indices,omitempty"`
 	Detail               string                `json:"detail,omitempty"`
 	SourceFailureReceipt *SourceFailureReceipt `json:"source_failure_receipt,omitempty"`
+	TargetFailureReceipt *TargetFailureReceipt `json:"target_failure_receipt,omitempty"`
 }
 
 type RoomTaskResult struct {
@@ -517,6 +533,17 @@ func (receipt SourceFailureReceipt) Verify(expectedKey string, now time.Time) er
 	return verifyReceiptSignature(expectedKey, receipt.AgentSignature, receiptMessage("beam:room-source-failure-receipt",
 		receipt.ReceiptID, receipt.TransferID, receipt.LaneID, fmt.Sprint(receipt.ChunkIndex), receipt.Code, receipt.LeaseID,
 		receipt.ObservedAt.Format(time.RFC3339Nano), receipt.AgentPublicKey))
+}
+
+func (receipt TargetFailureReceipt) Verify(expectedKey string, now time.Time) error {
+	if receipt.ReceiptID == "" || receipt.TransferID == "" || receipt.LaneID == "" || receipt.ChunkIndex < 0 ||
+		receipt.TargetMemberID == "" || receipt.LeaseID == "" || receipt.ObservedAt.IsZero() || receipt.ObservedAt.After(now.Add(5*time.Minute)) ||
+		receipt.AgentPublicKey != expectedKey || (receipt.Code != "target_write_failed" && receipt.Code != "target_storage_full") {
+		return errors.New("target failure receipt is invalid")
+	}
+	return verifyReceiptSignature(expectedKey, receipt.AgentSignature, receiptMessage("beam:room-target-failure-receipt",
+		receipt.ReceiptID, receipt.TransferID, receipt.LaneID, fmt.Sprint(receipt.ChunkIndex), receipt.TargetMemberID, receipt.Code,
+		receipt.LeaseID, receipt.ObservedAt.Format(time.RFC3339Nano), receipt.AgentPublicKey))
 }
 
 func (receipt TargetRangeReceipt) Verify(expectedKey string, now time.Time) error {

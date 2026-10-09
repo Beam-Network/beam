@@ -103,11 +103,9 @@ type StorageRangeResult struct {
 	CompletedAt time.Time `json:"completed_at"`
 }
 
-// MultipartAttemptPartNumber follows the standard transfer part-slot contract.
-// Room attempt numbers are one-based; each logical chunk reserves three slots.
-func MultipartAttemptPartNumber(chunkIndex, attempt int64) int64 {
-	if chunkIndex < 0 || chunkIndex >= 10000/3 || attempt < 1 {
+func MultipartPartNumber(chunkIndex int64) int64 {
+	if chunkIndex < 0 || chunkIndex >= 10000 {
 		return 0
 	}
-	return chunkIndex*3 + (attempt-1)%3 + 1
+	return chunkIndex + 1
 }

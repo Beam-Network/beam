@@ -62,7 +62,7 @@ func (r *Recorder) Run(ctx context.Context, results <-chan domain.Result) error 
 
 func (r *Recorder) ReconcileWorkloads() error {
 	for _, record := range r.workloads.List() {
-		if record.Result == nil {
+		if record.Result == nil || record.State == domain.StateReceiptCommitted {
 			continue
 		}
 		if _, err := r.RecordWorkload(record.Spec, *record.Result); err != nil {

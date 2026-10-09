@@ -29,7 +29,7 @@ successRate = verified successful original tasks / accountable original assigned
 Neutral exclusions are not accountable tasks. For example, 100% beats 80% regardless of speed. **3/3 and 2/2 both equal 100%**, so their duel is decided by duration. For storage-backed work, completion time comes from verified provider metadata:
 
 ```text
-assignmentDuration = latest verified task upload timestamp
+assignmentDuration = latest verified original-task upload timestamp from provider metadata
                    − Core publication time of first batch in the assignment
 ```
 

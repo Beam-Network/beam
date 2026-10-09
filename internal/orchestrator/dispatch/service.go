@@ -149,13 +149,23 @@ func (s *Service) Dispatch(ctx context.Context, request DispatchRequest) (Record
 	}
 	if workerID == "" {
 		now := s.config.Now().UTC()
-		placement, err := s.scheduler.Select(scheduling.Request{RequiredCapabilities: record.Spec.RequiredCapabilities,
-			Resources: record.Spec.Resources, MaxObservationAge: s.config.MaxObservationAge}, now)
-		if err != nil {
-			return s.terminal(record, StateRejected, "no compatible connected Worker: "+err.Error(), err)
+		var disconnected []string
+		for workerID == "" {
+			placement, err := s.scheduler.Select(scheduling.Request{RequiredCapabilities: record.Spec.RequiredCapabilities,
+				Resources: record.Spec.Resources, MaxObservationAge: s.config.MaxObservationAge, ExcludedWorkerIDs: disconnected}, now)
+			if err != nil && len(disconnected) > 0 {
+				return record, errors.New("every compatible Worker is disconnected; dispatch will be retried")
+			}
+			if err != nil {
+				return s.terminal(record, StateRejected, "no compatible connected Worker: "+err.Error(), err)
+			}
+			if !s.control.Connected(placement.WorkerID) {
+				disconnected = append(disconnected, placement.WorkerID)
+				continue
+			}
+			workerID = placement.WorkerID
+			nodeID = placement.NodeID
 		}
-		workerID = placement.WorkerID
-		nodeID = placement.NodeID
 	}
 	if !s.control.Connected(workerID) {
 		return record, errors.New("selected Worker is disconnected; dispatch will be retried")

@@ -17,17 +17,14 @@ import (
 	"time"
 
 	"github.com/Beam-Network/beam/internal/beamlink/wcp"
-	workerevidence "github.com/Beam-Network/beam/internal/evidence"
 	"github.com/Beam-Network/beam/internal/localauth"
 	"github.com/Beam-Network/beam/internal/orchestrator/connectors"
 	"github.com/Beam-Network/beam/internal/orchestrator/dispatch"
 	orchestratordomain "github.com/Beam-Network/beam/internal/orchestrator/domain"
-	"github.com/Beam-Network/beam/internal/orchestrator/payment"
 	"github.com/Beam-Network/beam/internal/orchestrator/registry"
 	"github.com/Beam-Network/beam/internal/orchestrator/roomtransfer"
 	"github.com/Beam-Network/beam/internal/orchestrator/roomworkloads"
 	orchestratorserver "github.com/Beam-Network/beam/internal/orchestrator/server"
-	platformbittensor "github.com/Beam-Network/beam/internal/platform/bittensor"
 	versioninfo "github.com/Beam-Network/beam/internal/version"
 )
 
@@ -64,9 +61,6 @@ func serve(arguments []string) {
 	taskState := flags.String("task-state", "data/orchestrator/tasks.json", "durable external task orchestration state")
 	roomTransferState := flags.String("room-transfer-state", "data/orchestrator/room-transfers.json", "durable room transfer orchestration state")
 	roomWorkloadState := flags.String("room-workload-state", "data/orchestrator/room-workloads", "durable generic room workload state directory")
-	paymentState := flags.String("payment-state", "data/orchestrator/payment-evidence.json", "durable BeamCore payment evidence journal")
-	paymentKey := flags.String("payment-key", "data/orchestrator/payment-attestation.key", "persistent Ed25519 payment attestation key")
-	bittensorSocket := flags.String("bittensor-agent-socket", os.Getenv("BEAM_BITTENSOR_AGENT_SOCKET"), "optional Python Bittensor agent socket for legacy BeamCore signatures")
 	ensureStreams := flags.Bool("nats-ensure-streams", false, "create missing JetStream task streams (development only)")
 	beamCoreNATS := natsFlags(flags, "beamcore", "BEAMCORE", "", "", "", "")
 	flags.StringVar(&beamCoreNATS.Environment, "beamcore-environment", envOrDefault("BEAM_ENV", "prod"), "BeamCore control environment")
@@ -74,7 +68,6 @@ func serve(arguments []string) {
 	flags.StringVar(&beamCoreNATS.GatewayURL, "beamcore-gateway-url", os.Getenv("BEAMCORE_GATEWAY_URL"), "public orchestrator URL registered with BeamCore")
 	flags.StringVar(&beamCoreNATS.PublicAPIURL, "beamcore-public-api-url", os.Getenv("BEAM_PUBLIC_API_URL"), "BeamCore Public API URL used to classify duplicate control-session denials")
 	beamCoreNATS.SoftwareVersion = version
-	flags.StringVar(&beamCoreNATS.EvidenceSubject, "beamcore-nats-evidence-subject", "beam.workloads.beamcore.payment-evidence", "BeamCore payment evidence request/reply subject")
 	roomTunnelCoordinatorURL := flags.String("room-tunnel-coordinator-url", os.Getenv("BEAM_ROOM_TUNNEL_COORDINATOR_URL"), "room tunnel coordinator HTTPS URL")
 	studioNATS := natsFlags(flags, "studio", "BEAM_STUDIO", "BEAM_WORKFLOW_TASKS", "beam.workloads.studio.tasks",
 		"beam.workloads.studio.results", "beam-orchestrator-studio")
@@ -91,6 +84,7 @@ func serve(arguments []string) {
 	if strings.TrimSpace(*controlTokenFlag) == "" {
 		log.Printf("Orchestrator API token: %s", controlTokenPath)
 	}
+	removeRetiredPaymentState(filepath.Dir(*statePath))
 	registryStore := registry.FileStateStore{Path: *statePath}
 	resolvedOrchestratorID, generated, err := registry.ResolveOrchestratorID(*orchestratorID, registryStore)
 	if err != nil {
@@ -120,7 +114,6 @@ func serve(arguments []string) {
 	}
 	var server *orchestratorserver.Server
 	var tasks *dispatch.Service
-	var payments *payment.Service
 	var rooms *roomtransfer.Service
 	var roomWorkloads *roomworkloads.Manager
 	if wcpServer != nil {
@@ -146,25 +139,6 @@ func serve(arguments []string) {
 		if roomErr != nil {
 			log.Fatal(roomErr)
 		}
-		attestationKey, keyErr := payment.LoadOrCreateKey(*paymentKey)
-		if keyErr != nil {
-			log.Fatal(keyErr)
-		}
-		paymentStore, paymentErr := payment.OpenFileStore(*paymentState)
-		if paymentErr != nil {
-			log.Fatal(paymentErr)
-		}
-		var legacySigner payment.LegacySigner
-		if *bittensorSocket != "" {
-			legacySigner, paymentErr = platformbittensor.NewClient(*bittensorSocket)
-			if paymentErr != nil {
-				log.Fatal(paymentErr)
-			}
-		}
-		payments, paymentErr = payment.NewService(orchestrator.OrchestratorID, attestationKey, legacySigner, paymentStore, tasks)
-		if paymentErr != nil {
-			log.Fatal(paymentErr)
-		}
 	} else {
 		server = orchestratorserver.New(orchestrator.OrchestratorID, orchestratorRegistry)
 	}
@@ -186,23 +160,10 @@ func serve(arguments []string) {
 		beamCoreNATS.EnsureStream = *ensureStreams
 		studioNATS.EnsureStream = *ensureStreams
 		tunnelNATS.EnsureStream = *ensureStreams
-		startConnectors(ctx, stop, tasks, payments, rooms, roomWorkloads, wcpServer, *beamCoreNATS, *studioNATS, *tunnelNATS)
-		go replayDurable(ctx, tasks, payments, rooms, roomWorkloads)
+		startConnectors(ctx, stop, tasks, rooms, roomWorkloads, wcpServer, *beamCoreNATS, *studioNATS, *tunnelNATS)
+		go replayDurable(ctx, tasks, rooms, roomWorkloads)
 	}
 	if wcpServer != nil {
-		if payments != nil {
-			events := wcpServer.Journal().Events()
-			for _, circuitFirst := range []bool{true, false} {
-				for _, event := range events {
-					if event.Receipt == nil || (event.Receipt.Type == workerevidence.ReceiptCircuit) != circuitFirst {
-						continue
-					}
-					if err := payments.Observe(ctx, *event.Receipt); err != nil {
-						log.Printf("restore Worker receipt for payment: %v", err)
-					}
-				}
-			}
-		}
 		certificate, err := tls.LoadX509KeyPair(*wcpCert, *wcpKey)
 		if err != nil {
 			log.Fatal(err)
@@ -247,11 +208,6 @@ func serve(arguments []string) {
 		}()
 		go func() {
 			for event := range wcpServer.Receipts() {
-				if payments != nil {
-					if err := payments.Observe(ctx, event.Receipt); err != nil {
-						log.Printf("aggregate Worker receipt for payment: %v", err)
-					}
-				}
 				log.Printf("Worker receipt worker_id=%s receipt_id=%s type=%s event=%s", event.WorkerID,
 					event.Receipt.ReceiptID, event.Receipt.Type, event.Receipt.Event)
 			}
@@ -270,12 +226,23 @@ func serve(arguments []string) {
 	}
 }
 
+func removeRetiredPaymentState(stateDir string) {
+	for _, name := range []string{"payment-evidence.json", "payment-attestation.key"} {
+		path := filepath.Join(stateDir, name)
+		if err := os.Remove(path); err == nil {
+			log.Printf("removed retired payment state %s", path)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			log.Printf("remove retired payment state %s: %v", path, err)
+		}
+	}
+}
+
 type connectorRunner interface {
 	Run(context.Context) error
 }
 
-func startConnectors(ctx context.Context, stop context.CancelFunc, tasks *dispatch.Service, payments *payment.Service,
-	rooms *roomtransfer.Service, roomWorkloads *roomworkloads.Manager, relays connectors.StorageProbeRelayLink,
+func startConnectors(ctx context.Context, stop context.CancelFunc, tasks *dispatch.Service, rooms *roomtransfer.Service,
+	roomWorkloads *roomworkloads.Manager, relays connectors.StorageProbeRelayLink,
 	configs ...connectors.NATSConfig) {
 	for index, config := range configs {
 		if !config.Enabled() {
@@ -286,7 +253,7 @@ func startConnectors(ctx context.Context, stop context.CancelFunc, tasks *dispat
 		switch index {
 		case 0:
 			var connector *connectors.BeamCoreConnector
-			connector, err = connectors.NewBeamCoreConnector(config, tasks, payments)
+			connector, err = connectors.NewBeamCoreConnector(config, tasks)
 			if connector != nil {
 				connector.AttachRoomTransfers(rooms)
 				connector.AttachRoomWorkloads(roomWorkloads)
@@ -316,8 +283,7 @@ func startConnectors(ctx context.Context, stop context.CancelFunc, tasks *dispat
 	}
 }
 
-func replayDurable(ctx context.Context, tasks *dispatch.Service, payments *payment.Service, rooms *roomtransfer.Service,
-	roomWorkloads *roomworkloads.Manager) {
+func replayDurable(ctx context.Context, tasks *dispatch.Service, rooms *roomtransfer.Service, roomWorkloads *roomworkloads.Manager) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -326,9 +292,6 @@ func replayDurable(ctx context.Context, tasks *dispatch.Service, payments *payme
 			return
 		case <-ticker.C:
 			tasks.ReplayResults(ctx)
-			if payments != nil {
-				payments.Replay(ctx)
-			}
 			if rooms != nil {
 				rooms.Replay(ctx)
 			}

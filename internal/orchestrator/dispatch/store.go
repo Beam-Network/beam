@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 )
 
 type Store interface {
@@ -56,7 +57,9 @@ type snapshot struct {
 	Records map[string]Record `json:"records"`
 }
 
-const maxRetainedDeliveredTasks = 256
+const maxRetainedSettledTasks = 256
+
+const expiredOfferRetention = 10 * time.Minute
 
 func OpenFileStore(path string) (*FileStore, error) {
 	if path == "" {
@@ -141,7 +144,7 @@ func (s *FileStore) persistLocked() error {
 		file.Close()
 		return err
 	}
-	compacted := compactDeliveredTasks(s.records, maxRetainedDeliveredTasks)
+	compacted := compactSettledTasks(s.records, maxRetainedSettledTasks, time.Now())
 	if err := json.NewEncoder(file).Encode(snapshot{Version: 1, Records: compacted}); err != nil {
 		file.Close()
 		return err
@@ -165,14 +168,24 @@ func (s *FileStore) persistLocked() error {
 	return handle.Sync()
 }
 
-func compactDeliveredTasks(records map[string]Record, limit int) map[string]Record {
+func settledTask(record Record, now time.Time) bool {
+	switch record.State {
+	case StateCompleted, StateFailed, StateCancelled, StateRejected:
+		return record.UpstreamDelivered || record.Result == nil
+	case StateReceived, StateOffered:
+		expires := record.Spec.Lease.OfferExpiresAt
+		return !expires.IsZero() && now.Sub(expires) > expiredOfferRetention
+	}
+	return false
+}
+
+func compactSettledTasks(records map[string]Record, limit int, now time.Time) map[string]Record {
 	if limit < 0 {
 		limit = 0
 	}
 	delivered := make([]string, 0)
 	for key, record := range records {
-		if record.UpstreamDelivered && (record.State == StateCompleted || record.State == StateFailed ||
-			record.State == StateCancelled || record.State == StateRejected) {
+		if settledTask(record, now) {
 			delivered = append(delivered, key)
 		}
 	}

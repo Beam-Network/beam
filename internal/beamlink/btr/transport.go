@@ -14,8 +14,6 @@ import (
 	"github.com/Beam-Network/beam/internal/beamlink/circuit"
 )
 
-// These protocol selectors deliberately match beam-tunnel's frozen BTR
-// capabilities. They are logical Yamux stream protocols, not new BTR formats.
 const (
 	MessageProtocol = "btr.message.v1"
 	StreamProtocol  = "btr.stream.v1"
@@ -43,8 +41,6 @@ type Acceptor interface {
 
 type Client struct{ Dialer Dialer }
 
-// Stream carries the exact length-delimited JSON WireFrame produced and
-// consumed by beam-tunnel/pkg/btr. It does not decrypt or reinterpret payloads.
 type Stream struct{ *circuit.Conn }
 
 func (c Client) Open(ctx context.Context, route Route, protocol string, metadata map[string]string) (*Stream, error) {
@@ -77,9 +73,6 @@ func SupportedProtocol(protocol string) bool {
 	return protocol == MessageProtocol || protocol == StreamProtocol
 }
 
-// WriteWireFrame writes an already encoded canonical BTR WireFrame without
-// changing it. The bounded structural check catches transport-level corruption;
-// full semantic and cryptographic validation remains in beam-tunnel.
 func (s *Stream) WriteWireFrame(frame json.RawMessage) error {
 	if s == nil || s.Conn == nil {
 		return net.ErrClosed
@@ -135,8 +128,6 @@ func validateWireFrame(frame json.RawMessage) error {
 		value.Envelope.WireVersion != WireVersionV1 || value.Envelope.FrameType == "" || len(value.AssignmentToken) > MaxTokenBytes {
 		return errors.New("invalid BTR wire frame envelope")
 	}
-	// Ciphertext is base64 in JSON. Its definitive decoded length check remains
-	// in beam-tunnel's canonical Envelope.Validate implementation.
 	return nil
 }
 

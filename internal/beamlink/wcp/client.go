@@ -7,7 +7,9 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log"
 	"net"
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -46,7 +48,18 @@ type Client struct {
 	planVersion atomic.Uint64
 	eventCursor atomic.Uint64
 	draining    atomic.Bool
+
+	failedAttempts int
+	lastFailureLog time.Time
+	lastRecoverLog time.Time
 }
+
+const sessionLogInterval = time.Minute
+
+const maxOutstandingReceiptReplays = 4
+const receiptReplayInterval = 2 * time.Second
+
+const maxWorkloadReplayBatch = 8
 
 func NewClient(config ClientConfig) (*Client, error) {
 	if config.Address == "" || config.TLSConfig == nil || len(config.PrivateKey) != ed25519.PrivateKeySize {
@@ -80,11 +93,12 @@ func NewClient(config ClientConfig) (*Client, error) {
 func (c *Client) Run(ctx context.Context) error {
 	backoff := c.config.ReconnectMinimum
 	for {
-		err := c.runSession(ctx)
+		established := false
+		err := c.runSession(ctx, &established)
 		if ctx.Err() != nil {
 			return nil
 		}
-		if err == nil {
+		if c.sessionEnded(established, err, time.Now()) {
 			backoff = c.config.ReconnectMinimum
 		}
 		timer := time.NewTimer(backoff)
@@ -98,7 +112,20 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 }
 
-func (c *Client) runSession(ctx context.Context) error {
+func (c *Client) sessionEnded(established bool, err error, now time.Time) bool {
+	if established || err == nil {
+		c.failedAttempts = 0
+	} else {
+		c.failedAttempts++
+	}
+	if err != nil && now.Sub(c.lastFailureLog) >= sessionLogInterval {
+		c.lastFailureLog = now
+		log.Printf("WCP session with %s ended: %v; reconnecting", c.config.Address, err)
+	}
+	return established || err == nil
+}
+
+func (c *Client) runSession(ctx context.Context, established *bool) error {
 	dialer := tls.Dialer{NetDialer: &net.Dialer{Timeout: 10 * time.Second}, Config: c.config.TLSConfig.Clone()}
 	rawConnection, err := dialer.DialContext(ctx, "tcp", c.config.Address)
 	if err != nil {
@@ -149,6 +176,11 @@ func (c *Client) runSession(ctx context.Context) error {
 	}
 	c.planVersion.Store(max(c.planVersion.Load(), welcome.PlanVersion))
 	_ = connection.SetReadDeadline(time.Time{})
+	*established = true
+	if now := time.Now(); c.failedAttempts > 0 && now.Sub(c.lastRecoverLog) >= sessionLogInterval {
+		c.lastRecoverLog = now
+		log.Printf("WCP session with %s established after %d failed attempts", c.config.Address, c.failedAttempts)
+	}
 
 	sessionContext, cancelSession := context.WithCancel(ctx)
 	defer cancelSession()
@@ -182,10 +214,11 @@ func (c *Client) runSession(ctx context.Context) error {
 	sentProgress := make(map[string]struct{})
 	sentCheckpoints := make(map[string]struct{})
 	sentReceipts := make(map[string]time.Time)
-	if err := c.replayResults(framed, sentResults); err != nil {
+	records := c.workloadSnapshot()
+	if err := c.replayResults(framed, records, sentResults); err != nil {
 		return err
 	}
-	if err := c.replayCheckpoints(framed, sentCheckpoints); err != nil {
+	if err := c.replayCheckpoints(framed, records, sentCheckpoints); err != nil {
 		return err
 	}
 	if err := c.replayReceipts(framed, sentReceipts); err != nil {
@@ -201,26 +234,50 @@ func (c *Client) runSession(ctx context.Context) error {
 			return err
 		case err := <-heartbeatError:
 			return err
+		case progress := <-c.config.Engine.Progress():
+			key := progress.WorkloadID + "/" + progress.AttemptID + "/" + progress.ObservedAt.UTC().Format(time.RFC3339Nano)
+			if _, exists := sentProgress[key]; exists {
+				continue
+			}
+			if _, err := framed.write(TypeProgress, "", progress, c.eventCursor.Load()); err != nil {
+				return err
+			}
+			sentProgress[key] = struct{}{}
+		case <-c.config.Engine.ResultSaved():
+			if err := c.replayResults(framed, c.workloadSnapshot(), sentResults); err != nil {
+				return err
+			}
 		case <-resultTicker.C:
-			if err := c.replayCheckpoints(framed, sentCheckpoints); err != nil {
-				return err
-			}
-			if err := c.replayProgress(framed, sentProgress); err != nil {
-				return err
-			}
-			if err := c.replayResults(framed, sentResults); err != nil {
-				return err
-			}
-			if err := c.replayReceipts(framed, sentReceipts); err != nil {
+			if err := c.replayTick(framed, sentCheckpoints, sentProgress, sentResults, sentReceipts); err != nil {
 				return err
 			}
 		}
 	}
 }
 
-func (c *Client) replayCheckpoints(framed *framedConn, sent map[string]struct{}) error {
-	for _, record := range c.config.Store.List() {
-		if record.Checkpoint == nil {
+func (c *Client) replayTick(framed *framedConn, sentCheckpoints, sentProgress, sentResults map[string]struct{},
+	sentReceipts map[string]time.Time) error {
+	records := c.workloadSnapshot()
+	if err := c.replayCheckpoints(framed, records, sentCheckpoints); err != nil {
+		return err
+	}
+	if err := c.replayProgress(framed, records, sentProgress); err != nil {
+		return err
+	}
+	if err := c.replayResults(framed, records, sentResults); err != nil {
+		return err
+	}
+	return c.replayReceipts(framed, sentReceipts)
+}
+
+func (c *Client) workloadSnapshot() []runtime.Record {
+	return newestWorkloadRecords(c.config.Store.List())
+}
+
+func (c *Client) replayCheckpoints(framed *framedConn, records []runtime.Record, sent map[string]struct{}) error {
+	replayed := 0
+	for _, record := range records {
+		if record.Checkpoint == nil || terminalWorkloadRecord(record) {
 			continue
 		}
 		key := fmt.Sprintf("%s/%d", record.Spec.Key(), record.Checkpoint.Sequence)
@@ -231,13 +288,19 @@ func (c *Client) replayCheckpoints(framed *framedConn, sent map[string]struct{})
 			return err
 		}
 		sent[key] = struct{}{}
+		replayed++
+		if replayed == maxWorkloadReplayBatch {
+			break
+		}
 	}
 	return nil
 }
 
-func (c *Client) replayProgress(framed *framedConn, sent map[string]struct{}) error {
-	for _, record := range c.config.Store.List() {
-		if record.Progress == nil {
+func (c *Client) replayProgress(framed *framedConn, records []runtime.Record, sent map[string]struct{}) error {
+	replayed := 0
+	for _, record := range records {
+		if record.Progress == nil || terminalWorkloadRecord(record) ||
+			(!record.Spec.Lease.AssignmentExpiresAt.IsZero() && !time.Now().Before(record.Spec.Lease.AssignmentExpiresAt)) {
 			continue
 		}
 		key := record.Spec.Key() + "/" + record.Progress.ObservedAt.UTC().Format(time.RFC3339Nano)
@@ -248,6 +311,10 @@ func (c *Client) replayProgress(framed *framedConn, sent map[string]struct{}) er
 			return err
 		}
 		sent[key] = struct{}{}
+		replayed++
+		if replayed == maxWorkloadReplayBatch {
+			break
+		}
 	}
 	return nil
 }
@@ -396,35 +463,79 @@ func (c *Client) capabilityManifest(total, available domain.Resources) contracts
 	)
 }
 
-func (c *Client) replayResults(framed *framedConn, sent map[string]struct{}) error {
-	for _, record := range c.config.Store.List() {
-		if record.Result != nil {
-			key := record.Spec.Key() + "/" + string(record.Result.State) + "/" + record.Result.CompletedAt.UTC().Format(time.RFC3339Nano)
-			if _, exists := sent[key]; exists {
-				continue
-			}
-			if _, err := framed.write(TypeResult, "", *record.Result, c.eventCursor.Load()); err != nil {
-				return err
-			}
-			sent[key] = struct{}{}
+func (c *Client) replayResults(framed *framedConn, records []runtime.Record, sent map[string]struct{}) error {
+	replayed := 0
+	for _, record := range records {
+		if record.Result == nil || record.State == domain.StateReceiptCommitted {
+			continue
+		}
+		key := record.Spec.Key() + "/" + string(record.Result.State) + "/" + record.Result.CompletedAt.UTC().Format(time.RFC3339Nano)
+		if _, exists := sent[key]; exists {
+			continue
+		}
+		if _, err := framed.write(TypeResult, "", *record.Result, c.eventCursor.Load()); err != nil {
+			return err
+		}
+		sent[key] = struct{}{}
+		replayed++
+		if replayed == maxWorkloadReplayBatch {
+			break
 		}
 	}
 	return nil
+}
+
+func newestWorkloadRecords(records []runtime.Record) []runtime.Record {
+	sort.Slice(records, func(left, right int) bool {
+		leftAt, rightAt := records[left].UpdatedAt, records[right].UpdatedAt
+		if leftAt.Equal(rightAt) {
+			return records[left].CreatedAt.After(records[right].CreatedAt)
+		}
+		return leftAt.After(rightAt)
+	})
+	return records
+}
+
+func terminalWorkloadRecord(record runtime.Record) bool {
+	return record.State == domain.StateReceiptCommitted
 }
 
 func (c *Client) replayReceipts(framed *framedConn, sent map[string]time.Time) error {
 	if c.config.Receipts == nil {
 		return nil
 	}
+	pending := c.config.Receipts.Pending()
+	outstanding := 0
+	for _, receipt := range pending {
+		if _, exists := sent[receipt.ReceiptID]; exists {
+			outstanding++
+		}
+	}
+	if outstanding >= maxOutstandingReceiptReplays {
+		return nil
+	}
 	now := time.Now()
-	for _, receipt := range c.config.Receipts.Pending() {
-		if last, exists := sent[receipt.ReceiptID]; exists && now.Sub(last) < 2*time.Second {
+	var lastReplay time.Time
+	for _, sentAt := range sent {
+		if sentAt.After(lastReplay) {
+			lastReplay = sentAt
+		}
+	}
+	if !lastReplay.IsZero() && now.Sub(lastReplay) < receiptReplayInterval {
+		return nil
+	}
+	for _, receipt := range pending {
+		if _, exists := sent[receipt.ReceiptID]; exists {
 			continue
 		}
 		if _, err := framed.write(TypeReceipt, "", receipt, c.eventCursor.Load()); err != nil {
 			return err
 		}
 		sent[receipt.ReceiptID] = now
+		outstanding++
+		if outstanding == maxOutstandingReceiptReplays {
+			break
+		}
 	}
 	return nil
 }

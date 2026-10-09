@@ -44,7 +44,7 @@ func TestStorageFanoutReadsEachRangeOnceAndRetainsBufferAcrossDestinationRetry(t
 				method, path = "GET", "/source/"+fmt.Sprint(index)
 			}
 			_ = json.NewEncoder(w).Encode(contracts.StorageRoute{ChunkIndex: index, Offset: offset, Length: length,
-				ExpiresAt: now.Add(5 * time.Minute), Endpoint: contracts.HTTPEndpoint{URL: baseURL + path, Method: method, Headers: map[string]string{"Content-MD5": request.ContentMD5}}, PartNumber: contracts.MultipartAttemptPartNumber(index, request.Attempt), UploadID: "upload-" + role})
+				ExpiresAt: now.Add(5 * time.Minute), Endpoint: contracts.HTTPEndpoint{URL: baseURL + path, Method: method, Headers: map[string]string{"Content-MD5": request.ContentMD5}}, PartNumber: contracts.MultipartPartNumber(index), UploadID: "upload-" + role})
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/source/") {

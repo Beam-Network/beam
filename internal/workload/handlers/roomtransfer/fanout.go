@@ -28,7 +28,7 @@ func (h *Handler) deliverChunk(ctx context.Context, workerID string, active *ses
 	storageTargets := make([]contracts.RoomTransferDestination, 0)
 	agentTargets := make(map[string]contracts.RoomTransferDestination)
 	for _, target := range active.transfer.Targets {
-		if targetDelivered(*resume, target, index) {
+		if targetDelivered(*resume, target, index) || active.targetFailed(target.MemberID) {
 			continue
 		}
 		if target.Lease.Storage != nil {
@@ -70,12 +70,12 @@ func (h *Handler) deliverChunk(ctx context.Context, workerID string, active *ses
 	for outcome := range outcomes {
 		target := outcome.target
 		if outcome.err != nil {
-			origin, code := "target_agent", "target_write_failed"
+			origin, code, detail := "target_agent", "target_write_failed", ""
 			if target.Lease.Storage != nil {
-				origin, code = "storage_provider", storageFailureCode(outcome.err)
+				origin, code, detail = "storage_provider", storageFailureCode(outcome.err), storageFailureClass(outcome.err)
 			}
 			failures = append(failures, contracts.RoomFailure{Origin: origin, Code: code, Retryable: !errors.Is(outcome.err, context.Canceled),
-				TargetMemberID: target.MemberID, ChunkIndices: []int64{index}})
+				TargetMemberID: target.MemberID, ChunkIndices: []int64{index}, Detail: detail})
 			continue
 		}
 		key := receiptKey(target.MemberID, index)
@@ -163,6 +163,12 @@ func (s *session) collectAgentReceipts(ctx context.Context, index int64, pending
 	for len(pending) > 0 {
 		s.mu.Lock()
 		ready := make([]deliveryOutcome, 0)
+		for memberID := range pending {
+			// A member that signed a persist failure stops receiving; the lane result reports it.
+			if _, failed := s.targetFailures[memberID]; failed {
+				delete(pending, memberID)
+			}
+		}
 		if current := s.chunks[index]; current != nil {
 			for memberID, target := range pending {
 				if receipt, ok := current.targets[memberID]; ok {

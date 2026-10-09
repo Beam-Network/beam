@@ -4,14 +4,18 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Beam-Network/beam/internal/workload/contracts"
@@ -22,8 +26,63 @@ import (
 // a different authority. Errors deliberately omit URLs, headers and bodies.
 func storageHTTPClient() *http.Client {
 	return &http.Client{Timeout: 35 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
-		return errors.New("storage redirects are not permitted")
+		return storageFault("redirect", "storage redirects are not permitted")
 	}}
+}
+
+type storageError struct {
+	class   string
+	message string
+	cause   error
+}
+
+func (e *storageError) Error() string { return e.message }
+func (e *storageError) Unwrap() error { return e.cause }
+
+func storageFault(class, message string) error {
+	return &storageError{class: class, message: message}
+}
+
+func transportFault(prefix, message string, cause error) error {
+	return &storageError{class: prefix + "_" + transportClass(cause), message: message, cause: cause}
+}
+
+func transportClass(err error) string {
+	var inner *storageError
+	var netErr net.Error
+	var opErr *net.OpError
+	var certErr *tls.CertificateVerificationError
+	var recordErr tls.RecordHeaderError
+	switch {
+	case errors.As(err, &inner):
+		return inner.class
+	case errors.Is(err, context.Canceled):
+		return "cancelled"
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &netErr) && netErr.Timeout():
+		return "timeout"
+	case errors.As(err, &certErr), errors.As(err, &recordErr):
+		return "tls"
+	case errors.As(err, &opErr) && opErr.Op == "dial":
+		return "dial"
+	case errors.Is(err, syscall.ECONNRESET), errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, io.EOF):
+		return "reset"
+	}
+	return "other"
+}
+
+func httpFault(prefix string, status int, message string) error {
+	return storageFault(prefix+"http_"+strconv.Itoa(status), message)
+}
+
+func storageFailureClass(err error) string {
+	var failure *storageError
+	if errors.As(err, &failure) {
+		return failure.class
+	}
+	if errors.Is(err, context.Canceled) {
+		return "cancelled"
+	}
+	return "other"
 }
 
 func httpsEndpoint(endpoint contracts.HTTPEndpoint, method string) error {
@@ -38,10 +97,10 @@ func resolveStorageRoute(ctx context.Context, client *http.Client, transfer cont
 	workerID string, lease contracts.TunnelLease, index int64, contentMD5 string, now time.Time) (contracts.StorageRoute, error) {
 	var route contracts.StorageRoute
 	if lease.Storage == nil || !now.Before(lease.ExpiresAt) || index < transfer.ChunkStart || index > transfer.ChunkEnd {
-		return route, errors.New("storage assignment is expired or outside its range")
+		return route, storageFault("route_expired", "storage assignment is expired or outside its range")
 	}
 	if err := lease.Validate(lease.Role, lease.TargetMemberID, now); err != nil {
-		return route, err
+		return route, &storageError{class: "route_lease_invalid", message: err.Error(), cause: err}
 	}
 	endpoint := lease.Endpoints[0]
 	payload, _ := json.Marshal(contracts.StorageRouteRequest{SchemaVersion: contracts.RoomStorageSchemaVersion,
@@ -49,7 +108,7 @@ func resolveStorageRoute(ctx context.Context, client *http.Client, transfer cont
 		Attempt: transfer.Attempt, WorkerID: workerID, ChunkIndex: index, ContentMD5: contentMD5})
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.URL, bytes.NewReader(payload))
 	if err != nil {
-		return route, errors.New("invalid storage route request")
+		return route, storageFault("route_request_invalid", "invalid storage route request")
 	}
 	for key, value := range endpoint.Headers {
 		request.Header.Set(key, value)
@@ -57,16 +116,16 @@ func resolveStorageRoute(ctx context.Context, client *http.Client, transfer cont
 	request.Header.Set("Content-Type", "application/json")
 	response, err := client.Do(request)
 	if err != nil {
-		return route, errors.New("storage route control unavailable")
+		return route, transportFault("route_transport", "storage route control unavailable", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return route, fmt.Errorf("storage route control rejected assignment: HTTP %d", response.StatusCode)
+		return route, httpFault("route_", response.StatusCode, fmt.Sprintf("storage route control rejected assignment: HTTP %d", response.StatusCode))
 	}
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 128<<10))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&route); err != nil {
-		return route, errors.New("invalid storage route response")
+		return route, storageFault("route_response_invalid", "invalid storage route response")
 	}
 	method := http.MethodPut
 	if lease.Role == contracts.TunnelLeaseRoleSourceRead {
@@ -75,10 +134,10 @@ func resolveStorageRoute(ctx context.Context, client *http.Client, transfer cont
 	offset, length := storageRange(transfer, index)
 	if route.ChunkIndex != index || route.Offset != offset || route.Length != length ||
 		!route.ExpiresAt.After(now) || route.ExpiresAt.After(lease.ExpiresAt) || httpsEndpoint(route.Endpoint, method) != nil {
-		return contracts.StorageRoute{}, errors.New("storage route does not match the assignment")
+		return contracts.StorageRoute{}, storageFault("route_mismatch", "storage route does not match the assignment")
 	}
-	if method == http.MethodPut && (route.PartNumber != contracts.MultipartAttemptPartNumber(index, transfer.Attempt) || route.UploadID == "") {
-		return contracts.StorageRoute{}, errors.New("storage route lacks its multipart identity")
+	if method == http.MethodPut && (route.PartNumber != contracts.MultipartPartNumber(index) || route.UploadID == "") {
+		return contracts.StorageRoute{}, storageFault("route_no_multipart", "storage route lacks its multipart identity")
 	}
 	if method == http.MethodPut {
 		headers := http.Header{}
@@ -86,7 +145,7 @@ func resolveStorageRoute(ctx context.Context, client *http.Client, transfer cont
 			headers.Set(key, value)
 		}
 		if contentMD5 == "" || headers.Get("Content-MD5") != contentMD5 {
-			return contracts.StorageRoute{}, errors.New("storage route checksum binding mismatch")
+			return contracts.StorageRoute{}, storageFault("route_checksum_mismatch", "storage route checksum binding mismatch")
 		}
 	}
 	return route, nil
@@ -122,7 +181,7 @@ func readStorageChunk(ctx context.Context, client *http.Client, transfer contrac
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, route.Endpoint.URL, nil)
 	if err != nil {
-		return nil, contracts.StorageRangeResult{}, errors.New("invalid storage source request")
+		return nil, contracts.StorageRangeResult{}, storageFault("source_request_invalid", "invalid storage source request")
 	}
 	for key, value := range route.Endpoint.Headers {
 		request.Header.Set(key, value)
@@ -131,7 +190,7 @@ func readStorageChunk(ctx context.Context, client *http.Client, transfer contrac
 	if lease.Storage.ETag != "" {
 		condition := request.Header.Get("If-Match")
 		if condition != "" && strings.Trim(condition, `"`) != strings.Trim(lease.Storage.ETag, `"`) {
-			return nil, contracts.StorageRangeResult{}, errors.New("storage source condition does not match its frozen identity")
+			return nil, contracts.StorageRangeResult{}, storageFault("source_condition_mismatch", "storage source condition does not match its frozen identity")
 		}
 		if condition == "" {
 			request.Header.Set("If-Match", `"`+strings.Trim(lease.Storage.ETag, `"`)+`"`)
@@ -139,7 +198,7 @@ func readStorageChunk(ctx context.Context, client *http.Client, transfer contrac
 	}
 	response, err := storagehttp.Get(client, request)
 	if err != nil {
-		return nil, contracts.StorageRangeResult{}, errors.New("storage source read failed")
+		return nil, contracts.StorageRangeResult{}, transportFault("source_transport", "storage source read failed", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusPreconditionFailed {
@@ -147,7 +206,7 @@ func readStorageChunk(ctx context.Context, client *http.Client, transfer contrac
 	}
 	expectedRange := fmt.Sprintf("bytes %d-%d/%d", route.Offset, route.Offset+route.Length-1, transfer.FileSizeBytes)
 	if response.StatusCode != http.StatusPartialContent || response.Header.Get("Content-Range") != expectedRange {
-		return nil, contracts.StorageRangeResult{}, errors.New("storage source did not return the assigned range")
+		return nil, contracts.StorageRangeResult{}, storageFault("source_range_mismatch_http_"+strconv.Itoa(response.StatusCode), "storage source did not return the assigned range")
 	}
 	etag, version := response.Header.Get("ETag"), response.Header.Get("x-amz-version-id")
 	if (lease.Storage.ETag != "" && strings.Trim(etag, `"`) != strings.Trim(lease.Storage.ETag, `"`)) ||
@@ -156,7 +215,7 @@ func readStorageChunk(ctx context.Context, client *http.Client, transfer contrac
 	}
 	payload, err := readExactPayload(response.Body, route.Length)
 	if err != nil || int64(len(payload)) != route.Length {
-		return nil, contracts.StorageRangeResult{}, errors.New("storage source range length mismatch")
+		return nil, contracts.StorageRangeResult{}, storageFault("source_length_mismatch", "storage source range length mismatch")
 	}
 	digest := sha256.Sum256(payload)
 	return payload, contracts.StorageRangeResult{LeaseID: lease.LeaseID, MemberID: lease.Storage.MemberID,
@@ -179,11 +238,11 @@ func writeStorageChunk(ctx context.Context, client *http.Client, transfer contra
 			return contracts.StorageRangeResult{}, err
 		}
 		if int64(len(payload)) != route.Length {
-			return contracts.StorageRangeResult{}, errors.New("storage destination range length mismatch")
+			return contracts.StorageRangeResult{}, storageFault("length_mismatch", "storage destination range length mismatch")
 		}
 		request, err := http.NewRequestWithContext(ctx, http.MethodPut, route.Endpoint.URL, bytes.NewReader(payload))
 		if err != nil {
-			return contracts.StorageRangeResult{}, errors.New("invalid storage destination request")
+			return contracts.StorageRangeResult{}, storageFault("request_invalid", "invalid storage destination request")
 		}
 		for key, value := range route.Endpoint.Headers {
 			request.Header.Set(key, value)
@@ -193,7 +252,7 @@ func writeStorageChunk(ctx context.Context, client *http.Client, transfer contra
 		}
 		response, err := client.Do(request)
 		if err != nil {
-			last = errors.New("storage destination write failed")
+			last = transportFault("transport", "storage destination write failed", err)
 			continue
 		}
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxReceiptBytes))
@@ -201,13 +260,13 @@ func writeStorageChunk(ctx context.Context, client *http.Client, transfer contra
 		if response.StatusCode >= 200 && response.StatusCode < 300 {
 			etag := response.Header.Get("ETag")
 			if etag == "" {
-				return contracts.StorageRangeResult{}, errors.New("storage destination returned no part identity")
+				return contracts.StorageRangeResult{}, storageFault("no_etag", "storage destination returned no part identity")
 			}
 			return contracts.StorageRangeResult{LeaseID: target.Lease.LeaseID, MemberID: target.MemberID,
 				Role: target.Lease.Role, ChunkIndex: index, Offset: route.Offset, Length: route.Length,
 				RangeSHA256: rangeSHA256, ETag: etag, UploadID: route.UploadID, PartNumber: route.PartNumber, CompletedAt: now().UTC()}, nil
 		}
-		last = fmt.Errorf("storage destination returned HTTP %d", response.StatusCode)
+		last = httpFault("", response.StatusCode, fmt.Sprintf("storage destination returned HTTP %d", response.StatusCode))
 		if response.StatusCode != http.StatusForbidden && response.StatusCode != http.StatusRequestTimeout && response.StatusCode != http.StatusTooManyRequests && response.StatusCode < 500 {
 			break
 		}
