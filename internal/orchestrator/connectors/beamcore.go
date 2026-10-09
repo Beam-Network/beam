@@ -159,7 +159,7 @@ func (s *BeamCoreConnector) SubmitRoomWorkloadProgress(ctx context.Context, valu
 	return s.roomControl.submitRoomWorkload(ctx, "room_workload_progress", payload)
 }
 
-func (s *BeamCoreConnector) SubmitRoomMessageRuntime(ctx context.Context, value contracts.RoomMessageRuntimeWire) error {
+func (s *BeamCoreConnector) SubmitRoomWorkloadRuntime(ctx context.Context, value contracts.RoomWorkloadRuntimeWire) error {
 	if s.roomControl == nil || !s.roomControl.enabled() {
 		return errors.New("BeamCore room workload control is not configured")
 	}

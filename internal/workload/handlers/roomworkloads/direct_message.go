@@ -3,16 +3,12 @@ package roomworkloads
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"crypto/subtle"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -20,28 +16,13 @@ import (
 
 	"github.com/Beam-Network/beam/internal/workload/contracts"
 	"github.com/Beam-Network/beam/internal/workload/domain"
-	"github.com/Beam-Network/beam/internal/workload/handlers/workertls"
 )
 
-type DirectMessageConfig struct {
-	ListenAddress string
-	AdvertiseURL  string
-}
-
+// DirectMessageHandler serves room.message.direct.v1 sessions on the shared
+// direct room listener.
 type DirectMessageHandler struct {
-	config DirectMessageConfig
+	server *DirectServer
 	now    func() time.Time
-	mu     sync.Mutex
-	server *messageServer
-}
-
-type messageServer struct {
-	listener     net.Listener
-	http         *http.Server
-	baseURL      string
-	certificates *workertls.Certificates
-	mu           sync.RWMutex
-	sessions     map[string]*messageSession
 }
 
 type messageSession struct {
@@ -57,8 +38,8 @@ type messageSession struct {
 	changed      chan struct{}
 }
 
-func NewDirectMessageHandler(config DirectMessageConfig) *DirectMessageHandler {
-	return &DirectMessageHandler{config: config, now: time.Now}
+func NewDirectMessageHandler(server *DirectServer) *DirectMessageHandler {
+	return &DirectMessageHandler{server: server, now: time.Now}
 }
 
 func (*DirectMessageHandler) Kind() domain.Kind { return domain.KindRoomMessage }
@@ -67,14 +48,7 @@ func (handler *DirectMessageHandler) Validate(spec domain.Spec) error {
 	if err := NewMessageHandler(nil).Validate(spec); err != nil {
 		return err
 	}
-	if _, _, err := net.SplitHostPort(strings.TrimSpace(handler.config.ListenAddress)); err != nil {
-		return errors.New("direct room message listen address must be host:port")
-	}
-	parsed, err := url.Parse(strings.ReplaceAll(handler.config.AdvertiseURL, "{port}", "1"))
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return errors.New("direct room messages require an HTTPS advertise URL")
-	}
-	return nil
+	return ValidateDirectServerConfig(handler.server.config)
 }
 
 func (handler *DirectMessageHandler) Execute(ctx context.Context, spec domain.Spec) (domain.Result, error) {
@@ -82,16 +56,15 @@ func (handler *DirectMessageHandler) Execute(ctx context.Context, spec domain.Sp
 		return domain.Result{}, err
 	}
 	assignment, _ := decodeSpec[contracts.MessageUnitDetails](spec)
-	server, err := handler.sharedServer()
+	baseURL, certificates, err := handler.server.ready()
 	if err != nil {
 		return domain.Result{}, err
 	}
-	tokenBytes := make([]byte, 32)
-	if _, err := rand.Read(tokenBytes); err != nil {
+	token, err := newAccessToken()
+	if err != nil {
 		return domain.Result{}, err
 	}
-	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
-	sessionID := fmt.Sprintf("%s-%s-%d", assignment.Identity.WorkloadID, assignment.Identity.UnitID, assignment.Identity.Attempt)
+	sessionID := directSessionID(assignment.Identity)
 	targets := make(map[string]struct{}, len(assignment.Targets))
 	for _, target := range assignment.Targets {
 		targets[target.MemberID] = struct{}{}
@@ -100,23 +73,19 @@ func (handler *DirectMessageHandler) Execute(ctx context.Context, spec domain.Sp
 		sizeBytes: assignment.Details.SizeBytes, targets: targets, expiresAt: assignment.Identity.ExpiresAt,
 		payloadReady: make(chan struct{}), deliveries: make(map[string]contracts.MessageDelivery),
 		changed: make(chan struct{}, 1)}
-	server.mu.Lock()
-	if _, exists := server.sessions[sessionID]; exists {
-		server.mu.Unlock()
-		return domain.Result{}, errors.New("direct room message session is already active")
+	if err := handler.server.registerMessage(sessionID, session); err != nil {
+		return domain.Result{}, err
 	}
-	server.sessions[sessionID] = session
-	server.mu.Unlock()
-	defer func() { server.mu.Lock(); delete(server.sessions, sessionID); server.mu.Unlock() }()
-	fingerprint, err := server.certificates.ForLease(assignment.Identity.ExpiresAt)
+	defer handler.server.unregisterMessage(sessionID)
+	fingerprint, err := certificates.ForLease(assignment.Identity.ExpiresAt)
 	if err != nil {
 		return domain.Result{}, err
 	}
 	runtime := contracts.RoomMessageRuntime{SchemaVersion: contracts.RoomMessageRuntimeSchema,
 		WorkloadID: assignment.Identity.WorkloadID, UnitID: assignment.Identity.UnitID, Epoch: assignment.Identity.Epoch,
 		Attempt: assignment.Identity.Attempt, WorkerID: spec.Identity.WorkerID,
-		Capability: contracts.RoomMessageDirectCapability, Transport: "worker_https",
-		BaseURL:     strings.TrimRight(server.baseURL, "/") + "/v1/room-messages/" + url.PathEscape(sessionID),
+		Capability: contracts.RoomMessageDirectCapability, Transport: contracts.RoomWorkerHTTPSTransport,
+		BaseURL:     directSessionURL(baseURL, roomMessagesPath, sessionID),
 		AccessToken: token, TLSCertificateSHA256: fingerprint, ExpiresAt: assignment.Identity.ExpiresAt}
 	identity := assignment.Identity
 	identity.WorkerID = spec.Identity.WorkerID
@@ -152,76 +121,27 @@ func (handler *DirectMessageHandler) Execute(ctx context.Context, spec domain.Sp
 	}
 }
 
-func (handler *DirectMessageHandler) Close() error {
-	handler.mu.Lock()
-	defer handler.mu.Unlock()
-	if handler.server == nil {
-		return nil
-	}
-	return handler.server.http.Close()
+// directSessionID names one attempt on the shared listener.
+func directSessionID(identity contracts.RoomWorkloadIdentity) string {
+	return fmt.Sprintf("%s-%s-%d", identity.WorkloadID, identity.UnitID, identity.Attempt)
 }
 
-func (handler *DirectMessageHandler) PrepareListener() error {
-	_, err := handler.sharedServer()
-	return err
-}
-
-func (handler *DirectMessageHandler) sharedServer() (*messageServer, error) {
-	handler.mu.Lock()
-	defer handler.mu.Unlock()
-	if handler.server != nil {
-		return handler.server, nil
-	}
-	listener, err := net.Listen("tcp", handler.config.ListenAddress)
-	if err != nil {
-		return nil, err
-	}
-	baseURL, err := messageAdvertisedURL(handler.config.AdvertiseURL, listener.Addr())
-	if err != nil {
-		_ = listener.Close()
-		return nil, err
-	}
-	secure, certificates := workertls.WrapListener(listener, handler.now)
-	server := &messageServer{listener: secure, baseURL: baseURL, certificates: certificates,
-		sessions: make(map[string]*messageSession)}
-	server.http = &http.Server{Handler: server, ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout: time.Minute, WriteTimeout: time.Minute, IdleTimeout: time.Minute}
-	handler.server = server
-	go func() { _ = server.http.Serve(server.listener) }()
-	return server, nil
-}
-
-func (server *messageServer) ServeHTTP(response http.ResponseWriter, request *http.Request) {
-	parts := strings.Split(strings.Trim(request.URL.Path, "/"), "/")
-	if len(parts) < 4 || parts[0] != "v1" || parts[1] != "room-messages" {
-		http.NotFound(response, request)
-		return
-	}
-	server.mu.RLock()
-	session := server.sessions[parts[2]]
-	server.mu.RUnlock()
+func serveMessage(session *messageSession, response http.ResponseWriter, request *http.Request, parts []string) {
 	if session == nil || !session.authorize(request) {
 		response.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	if parts[3] == "source" && len(parts) == 4 {
+	if len(parts) == 1 && parts[0] == "source" {
 		session.source(response, request)
 		return
 	}
-	if parts[3] == "targets" && (len(parts) == 5 || len(parts) == 6) {
-		memberID, err := url.PathUnescape(parts[4])
-		if err != nil {
-			http.NotFound(response, request)
-			return
-		}
-		if len(parts) == 5 {
-			session.target(response, request, memberID)
-			return
-		}
-		if parts[5] == "ack" {
-			session.ack(response, request, memberID)
-			return
-		}
+	if len(parts) == 2 && parts[0] == "targets" {
+		session.target(response, request, parts[1])
+		return
+	}
+	if len(parts) == 3 && parts[0] == "targets" && parts[2] == "ack" {
+		session.ack(response, request, parts[1])
+		return
 	}
 	http.NotFound(response, request)
 }
@@ -331,17 +251,4 @@ func (session *messageSession) signalLocked() {
 	case session.changed <- struct{}{}:
 	default:
 	}
-}
-
-func messageAdvertisedURL(configured string, address net.Addr) (string, error) {
-	_, port, err := net.SplitHostPort(address.String())
-	if err != nil {
-		return "", err
-	}
-	value := strings.ReplaceAll(configured, "{port}", port)
-	parsed, err := url.Parse(value)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
-		return "", errors.New("direct room message advertise URL is invalid")
-	}
-	return strings.TrimRight(value, "/"), nil
 }

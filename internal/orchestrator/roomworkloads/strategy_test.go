@@ -101,3 +101,15 @@ func TestMediaStrategyMatchesWorkerAdmission(t *testing.T) {
 		t.Fatalf("legacy media admission changed: %v", err)
 	}
 }
+
+func TestStreamOfferRequiresHeartbeatTimeout(t *testing.T) {
+	fields := `"session_id":"s","resume_from_sequence":0,"replay":false,"protocol":"beam-mls-stream-v1",` +
+		`"backpressure_policy":"block","max_buffer_bytes":131072`
+	if err := requireCanonicalDetails([]byte(`{"details":{`+fields+`}}`), "room_workload_offer", domain.KindRoomStream); err == nil {
+		t.Fatal("a stream offer without heartbeat_timeout_ms must be rejected at the BeamCore border")
+	}
+	complete := []byte(`{"details":{` + fields + `,"heartbeat_timeout_ms":30000}}`)
+	if err := requireCanonicalDetails(complete, "room_workload_offer", domain.KindRoomStream); err != nil {
+		t.Fatalf("complete stream offer rejected: %v", err)
+	}
+}

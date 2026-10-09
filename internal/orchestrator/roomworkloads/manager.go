@@ -23,7 +23,7 @@ type Provisioner interface {
 
 type Sink interface {
 	SubmitRoomWorkloadProgress(context.Context, contracts.RoomGenericProgress) error
-	SubmitRoomMessageRuntime(context.Context, contracts.RoomMessageRuntimeWire) error
+	SubmitRoomWorkloadRuntime(context.Context, contracts.RoomWorkloadRuntimeWire) error
 	SubmitRoomWorkloadResult(context.Context, contracts.RoomGenericResult) error
 	SubmitRoomWorkloadStatus(context.Context, json.RawMessage) error
 	SubmitRoomWorkloadProvisioningResult(context.Context, contracts.RoomWorkloadProvisioningResultWire) error
@@ -195,7 +195,8 @@ func requireCanonicalDetails(encoded []byte, messageType string, kind domain.Kin
 		fields = []string{"command_id", "command", "request", "timeout_ms"}
 	case domain.KindRoomStream:
 		if messageType == contracts.RoomWorkloadOffer {
-			fields = []string{"session_id", "resume_from_sequence", "replay", "protocol", "backpressure_policy", "max_buffer_bytes"}
+			fields = []string{"session_id", "resume_from_sequence", "replay", "protocol", "backpressure_policy", "max_buffer_bytes",
+				"heartbeat_timeout_ms"}
 		} else {
 			fields = []string{"session_id", "protocol", "backpressure_policy", "max_buffer_bytes", "heartbeat_timeout_ms"}
 		}
@@ -311,11 +312,12 @@ func (m *Manager) submitDefinition(ctx context.Context, kind domain.Kind, encode
 		if err := value.Validate(m.now(), false); err != nil {
 			return err
 		}
-		if value.Details.HeartbeatTimeoutMS <= 0 || value.Details.HeartbeatTimeoutMS > 300_000 {
-			return errors.New("invalid room.stream heartbeat_timeout_ms")
+		if err := value.Details.Validate(); err != nil {
+			return err
 		}
 		details := contracts.StreamUnitDetails{SessionID: value.Details.SessionID, Protocol: value.Details.Protocol,
-			BackpressurePolicy: value.Details.BackpressurePolicy, MaxBufferBytes: value.Details.MaxBufferBytes}
+			BackpressurePolicy: value.Details.BackpressurePolicy, MaxBufferBytes: value.Details.MaxBufferBytes,
+			HeartbeatTimeoutMS: value.Details.HeartbeatTimeoutMS}
 		return submitTyped(ctx, m, m.stream, fromSubmit(value, details))
 	case domain.KindRoomMedia:
 		var value contracts.RoomWorkloadSubmitWire[contracts.MediaDefinitionDetails]

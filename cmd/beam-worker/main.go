@@ -96,8 +96,8 @@ func serve(arguments []string) {
 	roomTransferAdvertiseURL := flags.String("room-transfer-advertise-url", os.Getenv("BEAM_ROOM_TRANSFER_ADVERTISE_URL"), "public base URL reaching the Worker room-transfer listener")
 	roomStorageAddr := flags.String("room-storage-addr", os.Getenv("BEAM_ROOM_STORAGE_LISTEN_ADDR"), "TLS listen address for worker-executed hybrid room transfers")
 	roomStorageAdvertiseURL := flags.String("room-storage-advertise-url", os.Getenv("BEAM_ROOM_STORAGE_ADVERTISE_URL"), "HTTPS URL reaching the hybrid room listener")
-	roomMessageAddr := flags.String("room-message-addr", os.Getenv("BEAM_ROOM_MESSAGE_LISTEN_ADDR"), "TLS listen address for Worker-hosted encrypted room messages")
-	roomMessageAdvertiseURL := flags.String("room-message-advertise-url", os.Getenv("BEAM_ROOM_MESSAGE_ADVERTISE_URL"), "HTTPS URL reaching the encrypted room-message listener")
+	roomMessageAddr := flags.String("room-message-addr", os.Getenv("BEAM_ROOM_MESSAGE_LISTEN_ADDR"), "TLS listen address for Worker-hosted encrypted room messages and streams")
+	roomMessageAdvertiseURL := flags.String("room-message-advertise-url", os.Getenv("BEAM_ROOM_MESSAGE_ADVERTISE_URL"), "HTTPS URL reaching the direct room message and stream listener")
 	mediaPublicIP := flags.String("media-public-ip", os.Getenv("BEAM_MEDIA_PUBLIC_IP"), "public IP announced in worker WebRTC ICE candidates")
 	mediaUDPPortMin := flags.Uint("media-udp-port-min", uint(envIntOrDefault("BEAM_MEDIA_UDP_PORT_MIN", 0)), "minimum worker WebRTC UDP port")
 	mediaUDPPortMax := flags.Uint("media-udp-port-max", uint(envIntOrDefault("BEAM_MEDIA_UDP_PORT_MAX", 0)), "maximum worker WebRTC UDP port")
@@ -243,28 +243,37 @@ func serve(arguments []string) {
 	if contains(capabilities, "room.datagram") {
 		registerHandler(roomworkloadhandlers.NewDatagramHandler(nil))
 	}
-	directRoomMessage := contains(capabilities, contracts.RoomMessageDirectCapability)
-	if directRoomMessage && (!contains(capabilities, "room.message") || *roomMessageAddr == "" || *roomMessageAdvertiseURL == "") {
-		log.Fatal("room.message.direct.v1 requires room.message, room-message-addr, and room-message-advertise-url")
+	if err := validateRoomDirectStartup(capabilities, *roomMessageAddr, *roomMessageAdvertiseURL); err != nil {
+		log.Fatal(err)
 	}
-	if directRoomMessage {
-		messageHandler := roomworkloadhandlers.NewDirectMessageHandler(roomworkloadhandlers.DirectMessageConfig{
+	directRoomMessage := contains(capabilities, contracts.RoomMessageDirectCapability)
+	directRoomStream := contains(capabilities, contracts.RoomStreamDirectCapability)
+	if directRoomMessage || directRoomStream {
+		directServer := roomworkloadhandlers.NewDirectServer(roomworkloadhandlers.DirectServerConfig{
 			ListenAddress: *roomMessageAddr, AdvertiseURL: *roomMessageAdvertiseURL})
-		if err := messageHandler.PrepareListener(); err != nil {
+		if err := directServer.Listen(); err != nil {
 			log.Fatal(err)
 		}
-		defer messageHandler.Close()
-		if registerErr := registry.Register(messageHandler); registerErr != nil {
-			log.Fatal(registerErr)
+		defer directServer.Close()
+		// Direct room messages and streams share one TLS listener multiplexed by
+		// session path. Keep their handlers in the Worker process even when other
+		// workload kinds use subprocess isolation.
+		if directRoomMessage {
+			if registerErr := registry.Register(roomworkloadhandlers.NewDirectMessageHandler(directServer)); registerErr != nil {
+				log.Fatal(registerErr)
+			}
 		}
-	} else if contains(capabilities, "room.message") {
+		if directRoomStream {
+			if registerErr := registry.Register(roomworkloadhandlers.NewDirectStreamHandler(directServer)); registerErr != nil {
+				log.Fatal(registerErr)
+			}
+		}
+	}
+	if !directRoomMessage && contains(capabilities, "room.message") {
 		registerHandler(roomworkloadhandlers.NewMessageHandler(nil))
 	}
 	if contains(capabilities, "room.command") {
 		registerHandler(roomworkloadhandlers.NewCommandHandler(nil))
-	}
-	if contains(capabilities, "room.stream") {
-		registerHandler(roomworkloadhandlers.NewStreamHandler(nil))
 	}
 	directRoomTransfer := contains(capabilities, contracts.RoomTransferDirectCapability)
 	e2eeRoomTransfer := contains(capabilities, contracts.RoomTransferE2EECapability)
@@ -480,6 +489,32 @@ func validateRoomMediaStartup(capabilities []string, advertiseURL string) error 
 	}
 	if err := roommediahandler.ValidateAdvertiseURL(advertiseURL); err != nil {
 		return fmt.Errorf("room.media.webrtc.v1 requires media-advertise-url: %w", err)
+	}
+	return nil
+}
+
+// validateRoomDirectStartup fails Worker-hosted room messages and streams
+// closed. Each direct capability needs its base kind and the shared direct
+// listener configured by room-message-addr and room-message-advertise-url;
+// room.stream is served only directly.
+func validateRoomDirectStartup(capabilities []string, listenAddress, advertiseURL string) error {
+	directMessage := contains(capabilities, contracts.RoomMessageDirectCapability)
+	directStream := contains(capabilities, contracts.RoomStreamDirectCapability)
+	if directMessage && !contains(capabilities, "room.message") {
+		return errors.New("room.message.direct.v1 requires room.message")
+	}
+	if directStream && !contains(capabilities, "room.stream") {
+		return errors.New("room.stream.direct.v1 requires room.stream")
+	}
+	if contains(capabilities, "room.stream") && !directStream {
+		return errors.New("room.stream requires room.stream.direct.v1")
+	}
+	if !directMessage && !directStream {
+		return nil
+	}
+	if err := roomworkloadhandlers.ValidateDirectServerConfig(roomworkloadhandlers.DirectServerConfig{
+		ListenAddress: listenAddress, AdvertiseURL: advertiseURL}); err != nil {
+		return fmt.Errorf("direct room messages and streams require room-message-addr and room-message-advertise-url: %w", err)
 	}
 	return nil
 }
