@@ -18,9 +18,9 @@ import (
 )
 
 func TestDirectMessageHandlerUploadsCiphertextOnceAndWaitsForEveryTargetAck(t *testing.T) {
-	handler := NewDirectMessageHandler(DirectMessageConfig{ListenAddress: "127.0.0.1:0",
-		AdvertiseURL: "https://127.0.0.1:{port}"})
-	t.Cleanup(func() { _ = handler.Close() })
+	server := NewDirectServer(DirectServerConfig{ListenAddress: "127.0.0.1:0", AdvertiseURL: "https://127.0.0.1:{port}"})
+	t.Cleanup(func() { _ = server.Close() })
+	handler := NewDirectMessageHandler(server)
 	now := time.Now().UTC()
 	record, _ := json.Marshal(messageRecord{MessageID: "message-1", Ciphertext: []byte("ciphertext")})
 	payload, _ := json.Marshal(contracts.RoomWorkerSpec[contracts.MessageUnitDetails]{Schema: contracts.RoomWorkloadSchema,

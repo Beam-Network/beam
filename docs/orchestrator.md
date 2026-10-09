@@ -107,9 +107,14 @@ Room workloads (`room.datagram`, `room.message`, `room.command`, `room.stream`,
 `room.media`) require the room tunnel coordinator. The orchestrator advertises
 each room capability only while a connected worker can take it. Versioned
 endpoint capabilities come in worker pairs: `room.media` +
-`room.media.webrtc.v1`, `room.message` + `room.message.direct.v1`, and
-`room.transfer` + `room.transfer.storage.v2`. Configure those workers as
-described in [Room Endpoint Capabilities](worker.md#room-endpoint-capabilities).
+`room.media.webrtc.v1`, `room.message` + `room.message.direct.v1`,
+`room.stream` + `room.stream.direct.v1`, and `room.transfer` +
+`room.transfer.storage.v2`. Room streams are placed only on workers that
+advertise `room.stream.direct.v1`. A worker reports the private endpoint of a
+direct message or stream attempt in its first progress report; the orchestrator
+publishes it to BeamCore as `room_workload_runtime` instead of as progress.
+Configure those workers as described in
+[Room Endpoint Capabilities](worker.md#room-endpoint-capabilities).
 
 `storage.probe.relay.v2` is advertised while a connected worker advertises it.
 See [Storage Probe Relay](worker.md#storage-probe-relay).

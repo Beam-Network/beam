@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +32,7 @@ type strategyBase[T, R any] struct {
 	payload           func(contracts.RoomWorkloadDefinition[T], genericAttempt[T, R]) (json.RawMessage, error)
 	extraCapabilities []string
 	allowNoTargets    func(T) bool
+	resources         func(contracts.RoomWorkloadDefinition[T]) domain.Resources
 }
 
 type genericDefinition[T any] = roomworkload.RoomWorkloadDefinition[contracts.RoomWorkloadDefinition[T]]
@@ -96,13 +98,16 @@ func (s strategyBase[T, R]) Paths(_ genericDefinition[T], value genericUnit[T]) 
 func (s strategyBase[T, R]) RequiredCapabilities(def genericDefinition[T], _ genericUnit[T]) []string {
 	capability := def.Workload.RequiredCapacity.Capability
 	result := append([]string{string(s.kind)}, s.extraCapabilities...)
-	if capability == string(s.kind) {
+	if slices.Contains(result, capability) {
 		return result
 	}
 	return append(result, capability)
 }
 
 func (s strategyBase[T, R]) Resources(_ genericDefinition[T], value genericUnit[T]) domain.Resources {
+	if s.resources != nil {
+		return s.resources(value.Unit)
+	}
 	resources := value.Unit.Resources
 	resources.MemoryBytes = max(resources.MemoryBytes, 32<<20)
 	resources.Connections = max(resources.Connections, int64(len(value.Unit.Targets)+1))
@@ -203,7 +208,7 @@ func failedResultDetails[R, T any](kind domain.Kind, definition contracts.RoomWo
 		}
 		value = contracts.CommandProgressDetails{Outcomes: outcomes}
 	case domain.KindRoomStream:
-		value = contracts.StreamResultDetails{TerminalReason: terminal}
+		value = contracts.StreamResultDetails{Targets: []contracts.RoomStreamTargetState{}, TerminalReason: terminal}
 	case domain.KindRoomMedia:
 		var details contracts.MediaUnitDetails
 		if typed, ok := any(definition.Details).(contracts.MediaUnitDetails); ok {
@@ -367,14 +372,27 @@ func validateDetails(value any) error {
 			}
 		}
 	case contracts.StreamProgressDetails:
-		if current.Bytes < 0 || current.BufferedBytes < 0 || current.Dropped < 0 {
-			return errors.New("negative room.stream progress counter")
+		if current.Runtime != nil {
+			if current.Sequence != 0 || current.Bytes != 0 || current.BufferedBytes != 0 || current.Dropped != 0 || current.Targets != nil {
+				return errors.New("room.stream progress carries either a runtime or counters")
+			}
+			return nil
 		}
+		if current.Bytes < 0 || current.BufferedBytes < 0 || current.Dropped < 0 || current.Dropped > int64(len(current.Targets)) {
+			return errors.New("invalid room.stream progress counters")
+		}
+		return contracts.ValidateRoomStreamTargets(current.Targets)
 	case contracts.StreamResultDetails:
-		if current.Bytes < 0 || current.BufferedBytes < 0 || current.Dropped < 0 ||
-			(current.TerminalReason != "ended" && current.TerminalReason != "source_closed" && current.TerminalReason != "worker_failed" && current.TerminalReason != "expired") {
-			return errors.New("invalid room.stream result")
+		switch current.TerminalReason {
+		case contracts.RoomStreamEnded, contracts.RoomStreamSourceAborted, contracts.RoomStreamSourceLost,
+			contracts.RoomStreamWorkerFailed, contracts.RoomStreamExpired:
+		default:
+			return errors.New("invalid room.stream terminal reason")
 		}
+		if current.Bytes < 0 || current.BufferedBytes < 0 || current.Dropped < 0 || current.Dropped > int64(len(current.Targets)) {
+			return errors.New("invalid room.stream result counters")
+		}
+		return contracts.ValidateRoomStreamTargets(current.Targets)
 	case contracts.MediaProgressDetails:
 		if current.Packets < 0 || current.Bytes < 0 || current.Dropped < 0 || current.Tracks == nil || len(current.Tracks) > 128 {
 			return errors.New("invalid room.media progress")

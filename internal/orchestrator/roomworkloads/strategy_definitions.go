@@ -1,6 +1,7 @@
 package roomworkloads
 
 import (
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -71,16 +72,66 @@ func newCommandStrategy() CommandStrategy {
 func newStreamStrategy() StreamStrategy {
 	return StreamStrategy{strategyBase: strategyBase[contracts.StreamUnitDetails, contracts.StreamResultDetails]{
 		kind: domain.KindRoomStream, class: domain.ClassSession, dispatchSource: dispatch.SourceRoomStream,
-		validateDetails: func(value contracts.StreamUnitDetails) error {
-			if value.SessionID == "" || value.Replay || value.Protocol == "" || value.MaxBufferBytes <= 0 ||
-				(value.BackpressurePolicy != "drop_oldest" && value.BackpressurePolicy != "drop_newest" && value.BackpressurePolicy != "block") {
-				return errors.New("invalid room.stream details")
-			}
-			return nil
-		},
+		validateDetails: contracts.StreamUnitDetails.Validate,
 		progressDetails: decodeProgress[contracts.StreamProgressDetails], resultDetails: decodeResult[contracts.StreamResultDetails],
-		payload: workerPayload[contracts.StreamUnitDetails, contracts.StreamResultDetails],
+		payload:           workerPayload[contracts.StreamUnitDetails, contracts.StreamResultDetails],
+		extraCapabilities: []string{contracts.RoomStreamDirectCapability},
+		resources:         streamResources,
 	}}
+}
+
+// streamResources reserves the replay window, eight pipelined frames and
+// 1 MiB of overhead, one connection per target plus nine for the source
+// pipeline, and one stream per participant.
+func streamResources(unit contracts.RoomWorkloadDefinition[contracts.StreamUnitDetails]) domain.Resources {
+	const pipelineBytes, overheadBytes = 8 * contracts.RoomStreamMaxFrameBytes, 1 << 20
+	resources := unit.Resources
+	targets := int64(len(unit.Targets))
+	resources.MemoryBytes = max(resources.MemoryBytes, unit.Details.MaxBufferBytes+pipelineBytes+overheadBytes)
+	resources.Connections = max(resources.Connections, targets+9)
+	resources.Streams = max(resources.Streams, targets+1)
+	return resources
+}
+
+// ValidateDefinition requires one room.stream.direct.v1 capacity unit and at
+// most 64 targets per lease.
+func (s StreamStrategy) ValidateDefinition(value genericDefinition[contracts.StreamUnitDetails], now time.Time) error {
+	if err := s.strategyBase.ValidateDefinition(value, now); err != nil {
+		return err
+	}
+	definition := value.Workload
+	if definition.RequiredCapacity != (contracts.RoomCapacityRequirement{Capability: contracts.RoomStreamDirectCapability, Units: 1}) {
+		return errors.New("room.stream requires one room.stream.direct.v1 capacity unit")
+	}
+	if len(definition.Targets) > contracts.RoomStreamMaxTargets {
+		return errors.New("room.stream allows at most 64 targets per lease")
+	}
+	return nil
+}
+
+// ValidateProgress checks a reported Worker runtime against the attempt
+// identity and its destinations before it is announced.
+func (s StreamStrategy) ValidateProgress(def genericDefinition[contracts.StreamUnitDetails],
+	attempt genericAttempt[contracts.StreamUnitDetails, contracts.StreamResultDetails], value domain.Progress) (progress, error) {
+	validated, err := s.strategyBase.ValidateProgress(def, attempt, value)
+	if err != nil {
+		return progress{}, err
+	}
+	var details contracts.StreamProgressDetails
+	if err := json.Unmarshal(validated.Details, &details); err != nil {
+		return progress{}, err
+	}
+	if details.Runtime == nil {
+		return validated, nil
+	}
+	targets := make([]string, 0, len(def.Workload.Targets))
+	for _, target := range def.Workload.Targets {
+		targets = append(targets, target.MemberID)
+	}
+	if err := details.Runtime.Validate(validated.Identity, targets, time.Now().UTC()); err != nil {
+		return progress{}, err
+	}
+	return validated, nil
 }
 
 func newMediaStrategy() MediaStrategy {
