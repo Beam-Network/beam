@@ -69,6 +69,18 @@ Fast acknowledgement, steady worker sessions, and accurate progress reporting he
 
 ---
 
+## Streams
+
+Workers that advertise `room.stream.direct.v1` serve Room streams directly. A worker is ready for this capability when it has:
+
+- `room.stream` and `room.stream.direct.v1` enabled together
+- the direct room listener configured, with its TCP port reachable directly and no TLS-terminating proxy in front
+- an orchestrator running the same release, so the capability is advertised
+
+Stream keys stay with the source and target agents. Workers carry encrypted frames, keep each one until every live target has acknowledged it, and never see plaintext. See [Workers](./workers#room-streams) for the setup.
+
+---
+
 ## Media
 
 Some room media can use worker-hosted WebRTC. A worker is ready for this capability when it has:

@@ -15,7 +15,7 @@ A worker is responsible for:
 
 1. Connecting to its owning orchestrator over BeamLink/WCP.
 2. Queuing every valid workload offer and starting execution as capacity becomes available.
-3. Executing chunk transfers and Room transfer lanes.
+3. Executing chunk transfers, Room transfer lanes and, when enabled, Room streams.
 4. Advertising capabilities and reporting results through BeamLink/WCP.
 
 Workers are identified by their BeamCore `worker_id` and Bittensor hotkey. A worker is assigned to one orchestrator endpoint at a time.
@@ -67,7 +67,7 @@ Workers keep their runtime session on WCP and use BeamCore HTTP separately for r
 | `workload.result` | Workload result |
 | `evidence.receipt` | Workload receipt |
 
-Current public workers advertise `transfer.multipart` and `room.transfer` in canonical capability manifests. Keepalive uses WCP heartbeats.
+Current public workers advertise `transfer.multipart` and `room.transfer` in canonical capability manifests. Room streams are opt-in; see [Room Streams](#room-streams). Keepalive uses WCP heartbeats.
 
 ## Task Execution
 
@@ -102,6 +102,23 @@ A worker appears in an orchestrator's assignable pool when:
 3. Its owning orchestrator selects it for work.
 4. The owning orchestrator is connected to BeamCore over NATS and ready.
 
+## Room Streams
+
+Workers can serve Room stream channels directly. Streams are opt-in:
+
+1. Add `room.stream,room.stream.direct.v1` to `--capabilities`. Enable both together: a worker with `room.stream` alone refuses to start.
+2. Set the direct room listener: `--room-message-addr` (`BEAM_ROOM_MESSAGE_LISTEN_ADDR`) and `--room-message-advertise-url` (`BEAM_ROOM_MESSAGE_ADVERTISE_URL`), an `https://` URL that reaches this worker. Direct room messages use the same listener.
+3. Open that TCP port inbound. Agents pin the worker's own TLS certificate, so traffic must reach the worker directly, with no TLS-terminating proxy or load balancer in front of it.
+
+```text
+./bin/beam-worker serve --node-key data/worker/node.key \
+  --capabilities transfer.multipart,room.transfer,room.stream,room.stream.direct.v1 \
+  --room-message-addr 0.0.0.0:9480 \
+  --room-message-advertise-url https://worker.example.com:9480
+```
+
+The orchestrator places streams only on workers that advertise `room.stream.direct.v1`, so update the orchestrator and its workers together. Stream frames are end-to-end encrypted between agents: the worker holds each frame until every live target has acknowledged it and never sees plaintext.
+
 ## Requirements
 
 | Requirement          | Notes                                                                      |
@@ -109,6 +126,7 @@ A worker appears in an orchestrator's assignable pool when:
 | Network connectivity | Stable outbound internet to storage backends and the orchestrator endpoint |
 | Bittensor hotkey     | Used for worker identity and authentication                                |
 | Capability            | Default public worker advertises `transfer.multipart` and `room.transfer`  |
+| Room streams (optional) | `room.stream` + `room.stream.direct.v1` and a directly reachable TLS port; see [Room Streams](#room-streams) |
 
 ## Session Displacement
 
