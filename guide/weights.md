@@ -56,7 +56,7 @@ When raw scores differ, each tier's bucket is divided proportionally instead.
 
 Miners choose when and how much to sell. Beam adjusts emission weights based on sale volume and frequency. In any seven-day window, **one sale** totaling up to **80%** of a hotkey's base emissions causes no reduction from these selling factors. Larger or more frequent sales reduce future emission weights. Base emissions are what the hotkey would receive before this adjustment. The unused portion of the 80% threshold does not carry over.
 
-A sale is any SN105 alpha leaving your coldkey's stake on this subnet, on any hotkey, by any transaction: unstaking, a transfer to another coldkey, a swap to another subnet, or any other outflow. Moving stake between hotkeys on this subnet without changing coldkey is not a sale. Every transaction is one sale, whatever its size. Buying or receiving alpha never offsets a sale.
+A sale is any SN105 alpha leaving your coldkey's stake on this subnet, on any hotkey, by any transaction: unstaking, a transfer to another coldkey, a swap to another subnet, or any other outflow. Moving stake between hotkeys on this subnet without changing coldkey is not a sale. Everything your coldkey sells or sends away in one block is one sale, whatever its size. Buying or receiving alpha never offsets a sale.
 
 A sale from a miner hotkey counts for that hotkey. A sale from any other hotkey of your coldkey, or from a miner hotkey set as your auto-stake destination, counts as one sale for each of your miner hotkeys, with the amount split in proportion to their emission.
 
