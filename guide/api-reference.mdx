@@ -73,7 +73,9 @@ Validator routes are the exception: they authenticate with a hotkey signature ra
 
 Participant operations and transfer control use [BeamCore](https://beamcore.b1m.ai). Its [OpenAPI schema](https://beamcore.b1m.ai/openapi.json) describes the supported role-scoped contracts.
 
-Delayed telemetry uses `https://api.b1m.ai`. Supply a customer organization key with `telemetry:read` permission in `x-api-key`. Reads use credits and the applicable API limits. Responses are private and must not be cached.
+Delayed telemetry uses `https://api.b1m.ai`. Supply a customer organization key with `telemetry:read` permission in `x-api-key`. Reads use credits and the applicable API limits. Responses are private: revalidate them with `If-None-Match`, and never share or proxy-cache them.
+
+The same reads under `/v1/telemetry/realtime/` return current evidence, including transfers in progress. They need the separate `telemetry:realtime:read` permission and cost twice as much.
 
 Find request fields, response examples and errors in the [supported API reference](https://docs.b1m.ai/api).
 
