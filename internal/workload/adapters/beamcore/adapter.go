@@ -15,6 +15,7 @@ import (
 
 type TaskOfferBatch struct {
 	BatchID             string      `json:"batch_id"`
+	TransferID          string      `json:"transfer_id"`
 	AssignmentTimeoutMS int64       `json:"assignment_timeout_ms"`
 	Offers              []TaskOffer `json:"offers"`
 }

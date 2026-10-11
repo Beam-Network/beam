@@ -132,6 +132,7 @@ func (s *Service) Dispatch(ctx context.Context, request DispatchRequest) (Record
 	} else {
 		now := s.config.Now().UTC()
 		record = Record{Source: request.Source, ExternalID: request.ExternalID, WorkloadKey: key, BatchID: request.BatchID,
+			TransferID: request.TransferID,
 			State: StateReceived, Spec: request.Spec, CreatedAt: now, UpdatedAt: now}
 		if err := s.save(record, "external task received"); err != nil {
 			return Record{}, err

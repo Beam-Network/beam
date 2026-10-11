@@ -352,7 +352,7 @@ func (control *roomControl) handleTaskOfferBatch(ctx context.Context, encoded []
 	var failures []error
 	for _, spec := range specs {
 		if _, err := control.tasks.Dispatch(ctx, dispatch.DispatchRequest{
-			Source: dispatch.SourceBeamCore, ExternalID: spec.AttemptID, BatchID: batch.BatchID, Spec: spec,
+			Source: dispatch.SourceBeamCore, ExternalID: spec.AttemptID, BatchID: batch.BatchID, TransferID: batch.TransferID, Spec: spec,
 		}); err != nil {
 			failures = append(failures, fmt.Errorf("offer %s: %w", spec.AttemptID, err))
 		}

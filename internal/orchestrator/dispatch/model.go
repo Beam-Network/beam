@@ -48,6 +48,7 @@ type Record struct {
 	UpstreamDelivered   bool             `json:"upstream_delivered"`
 	UpstreamError       string           `json:"upstream_error,omitempty"`
 	BatchID             string           `json:"batch_id,omitempty"`
+	TransferID          string           `json:"transfer_id,omitempty"`
 	CreatedAt           time.Time        `json:"created_at"`
 	UpdatedAt           time.Time        `json:"updated_at"`
 	AssignmentExpiresAt time.Time        `json:"assignment_expires_at,omitempty"`
@@ -83,6 +84,7 @@ type DispatchRequest struct {
 	Source       Source
 	ExternalID   string
 	BatchID      string
+	TransferID   string
 	Spec         domain.Spec
 	WorkerID     string
 	NodeID       string

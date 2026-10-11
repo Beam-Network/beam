@@ -55,6 +55,7 @@ BeamCore pushes a batch of executable worker offers:
 {
 	"type": "task_offer_batch",
 	"batch_id": "uuid",
+	"transfer_id": "uuid",
 	"assignment_timeout_ms": 60000,
 	"offers": [
 		{

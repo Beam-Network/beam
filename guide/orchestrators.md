@@ -65,6 +65,7 @@ BeamCore sends executable normal-transfer offers directly:
 {
 	"type": "task_offer_batch",
 	"batch_id": "uuid",
+	"transfer_id": "uuid",
 	"assignment_timeout_ms": 60000,
 	"offers": [
 		{
