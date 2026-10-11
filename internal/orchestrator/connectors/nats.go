@@ -39,6 +39,40 @@ type NATSConfig struct {
 
 const duplicateControlSessionError = "duplicate_control_session: an offer-bearing NATS connection is already active for this hotkey"
 
+var errDuplicateControlSession = errors.New(duplicateControlSessionError)
+
+func connectBeamCoreNATS(ctx context.Context, config NATSConfig) (*natsConnector, error) {
+	config.InboxPrefix = beamCoreInboxPrefix(config.Hotkey)
+	return retryDuplicateControlSession(ctx, 20*time.Second, 500*time.Millisecond, func() (*natsConnector, error) {
+		return connectNATS(config)
+	})
+}
+
+func retryDuplicateControlSession(ctx context.Context, maxWait, retryWait time.Duration,
+	connect func() (*natsConnector, error)) (*natsConnector, error) {
+	deadline := time.NewTimer(maxWait)
+	defer deadline.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		session, err := connect()
+		if err == nil || !errors.Is(err, errDuplicateControlSession) {
+			return session, err
+		}
+		wait := time.NewTimer(retryWait)
+		select {
+		case <-ctx.Done():
+			wait.Stop()
+			return nil, ctx.Err()
+		case <-deadline.C:
+			wait.Stop()
+			return nil, err
+		case <-wait.C:
+		}
+	}
+}
+
 func (c NATSConfig) Enabled() bool { return c.URL != "" }
 
 func beamCoreInboxPrefix(hotkey string) string {
@@ -96,7 +130,7 @@ func connectNATS(config NATSConfig) (*natsConnector, error) {
 		if isNATSAuthorizationError(err) {
 			duplicate, diagnosticErr := hasActiveDuplicateControlSession(config)
 			if diagnosticErr == nil && duplicate {
-				return nil, errors.New(duplicateControlSessionError)
+				return nil, errDuplicateControlSession
 			}
 		}
 		return nil, fmt.Errorf("connect %s NATS: %w", config.Name, err)

@@ -21,6 +21,13 @@ import (
 
 const DefaultControlPrefix = "beam.orch.control.v2"
 
+var (
+	controlHeartbeatInterval     = 15 * time.Second
+	controlHeartbeatFailureLimit = 4
+	controlRetryInitialBackoff   = time.Second
+	controlRetryMaxBackoff       = 15 * time.Second
+)
+
 type roomControl struct {
 	config                    NATSConfig
 	conn                      roomControlNATS
@@ -96,10 +103,14 @@ func (control *roomControl) bind(ctx context.Context) (_ *roomControlSession, er
 	if !control.enabled() {
 		return &roomControlSession{control: control}, nil
 	}
-	if err := control.request(ctx, "register", map[string]any{"gateway_url": control.config.GatewayURL, "ready": true}); err != nil {
+	if err := retryTransientControl(ctx, "register Orchestrator", func() error {
+		return control.request(ctx, "register", map[string]any{"gateway_url": control.config.GatewayURL, "ready": true})
+	}); err != nil {
 		return nil, fmt.Errorf("register Orchestrator: %w", err)
 	}
-	if err := control.publishCapability(ctx, true); err != nil {
+	if err := retryTransientControl(ctx, "publish Orchestrator capability", func() error {
+		return control.publishCapability(ctx, true)
+	}); err != nil {
 		return nil, err
 	}
 	session := &roomControlSession{control: control, messages: make(chan *nats.Msg, 256), relayMessages: make(chan *nats.Msg, 256)}
@@ -282,18 +293,29 @@ func (control *roomControl) processRoomWorkloadJob(ctx context.Context, job room
 
 // runHeartbeat sends liveness and capability changes.
 func (control *roomControl) runHeartbeat(ctx context.Context, failures chan<- error) {
-	ticker := time.NewTicker(15 * time.Second)
+	ticker := time.NewTicker(controlHeartbeatInterval)
 	defer ticker.Stop()
+	consecutiveFailures := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := control.request(ctx, "heartbeat", map[string]any{}); err != nil {
+			err := control.request(ctx, "heartbeat", map[string]any{})
+			if err == nil {
+				err = control.publishCapability(ctx, false)
+			}
+			if err == nil {
+				consecutiveFailures = 0
+				continue
+			}
+			if !transientControlError(ctx, err) {
 				reportHeartbeatFailure(ctx, failures, err)
 				return
 			}
-			if err := control.publishCapability(ctx, false); err != nil {
+			consecutiveFailures++
+			log.Printf("BeamCore heartbeat failed (%d/%d consecutive): %v", consecutiveFailures, controlHeartbeatFailureLimit, err)
+			if consecutiveFailures >= controlHeartbeatFailureLimit {
 				reportHeartbeatFailure(ctx, failures, err)
 				return
 			}
@@ -305,6 +327,32 @@ func reportHeartbeatFailure(ctx context.Context, failures chan<- error, err erro
 	select {
 	case failures <- err:
 	case <-ctx.Done():
+	}
+}
+
+func transientControlError(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	return errors.Is(err, nats.ErrNoResponders) || errors.Is(err, nats.ErrTimeout) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func retryTransientControl(ctx context.Context, operation string, attempt func() error) error {
+	backoff := controlRetryInitialBackoff
+	for {
+		err := attempt()
+		if err == nil || !transientControlError(ctx, err) {
+			return err
+		}
+		log.Printf("%s failed, retrying in %s: %v", operation, backoff, err)
+		wait := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			wait.Stop()
+			return ctx.Err()
+		case <-wait.C:
+		}
+		backoff = min(2*backoff, controlRetryMaxBackoff)
 	}
 }
 

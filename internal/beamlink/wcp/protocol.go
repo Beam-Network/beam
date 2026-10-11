@@ -26,6 +26,8 @@ const (
 	maxFrameBytes   = 1 << 20
 )
 
+var frameWriteTimeout = 15 * time.Second
+
 const (
 	TypeChallenge     = "challenge"
 	TypeHello         = "hello"
@@ -129,11 +131,20 @@ type framedConn struct {
 	seq    uint64
 }
 
+type frameWriteError struct{ err error }
+
+func (e frameWriteError) Error() string { return e.err.Error() }
+func (e frameWriteError) Unwrap() error { return e.err }
+
 func newFramedConn(connection io.ReadWriter) *framedConn {
 	return &framedConn{reader: connection, writer: connection}
 }
 
 func (c *framedConn) write(messageType, replyTo string, value any, ack uint64) (Envelope, error) {
+	return c.writeID(randomID("wcp"), messageType, replyTo, value, ack)
+}
+
+func (c *framedConn) writeID(messageID, messageType, replyTo string, value any, ack uint64) (Envelope, error) {
 	payload, err := json.Marshal(value)
 	if err != nil {
 		return Envelope{}, err
@@ -142,7 +153,7 @@ func (c *framedConn) write(messageType, replyTo string, value any, ack uint64) (
 	defer c.mu.Unlock()
 	c.seq++
 	envelope := Envelope{
-		Version: ProtocolVersion, MessageID: randomID("wcp"), ReplyTo: replyTo,
+		Version: ProtocolVersion, MessageID: messageID, ReplyTo: replyTo,
 		Sequence: c.seq, Ack: ack, SentAt: time.Now().UTC(), Type: messageType, Payload: payload,
 	}
 	encoded, err := json.Marshal(envelope)
@@ -154,11 +165,15 @@ func (c *framedConn) write(messageType, replyTo string, value any, ack uint64) (
 	}
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(encoded)))
+	if connection, ok := c.writer.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		_ = connection.SetWriteDeadline(time.Now().Add(frameWriteTimeout))
+		defer connection.SetWriteDeadline(time.Time{})
+	}
 	if _, err := c.writer.Write(header[:]); err != nil {
-		return Envelope{}, err
+		return Envelope{}, frameWriteError{err}
 	}
 	if _, err := c.writer.Write(encoded); err != nil {
-		return Envelope{}, err
+		return Envelope{}, frameWriteError{err}
 	}
 	return envelope, nil
 }

@@ -79,12 +79,12 @@ func (s *Server) handle(parent context.Context, connection net.Conn) {
 		previous.close()
 	}
 	defer func() {
+		session.close()
 		s.mu.Lock()
 		if s.sessions[session.workerID] == session {
 			delete(s.sessions, session.workerID)
 		}
 		s.mu.Unlock()
-		session.close()
 		s.dropStorageProbeRelays(session)
 	}()
 	if _, err := session.send(TypeWelcome, envelope.MessageID, Welcome{
@@ -285,12 +285,20 @@ type Session struct {
 }
 
 func (s *Session) send(messageType, replyTo string, value any) (Envelope, error) {
+	return s.sendID(randomID("wcp"), messageType, replyTo, value)
+}
+
+func (s *Session) sendID(messageID, messageType, replyTo string, value any) (Envelope, error) {
 	select {
 	case <-s.done:
 		return Envelope{}, io.ErrClosedPipe
 	default:
 	}
-	return s.framed.write(messageType, replyTo, value, s.lastRead.Load())
+	envelope, err := s.framed.writeID(messageID, messageType, replyTo, value, s.lastRead.Load())
+	if errors.As(err, new(frameWriteError)) {
+		s.close()
+	}
+	return envelope, err
 }
 
 func (s *Session) close() {

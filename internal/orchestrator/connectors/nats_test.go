@@ -1,6 +1,7 @@
 package connectors
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -99,5 +100,52 @@ func TestNATSAuthorizationErrorRecognition(t *testing.T) {
 	}
 	if isNATSAuthorizationError(errors.New("connection refused")) {
 		t.Fatal("transport failures must not be treated as authorization rejections")
+	}
+}
+
+func TestDuplicateControlSessionStartupHandoff(t *testing.T) {
+	wanted := &natsConnector{}
+	calls := 0
+	session, err := retryDuplicateControlSession(context.Background(), time.Second, time.Millisecond,
+		func() (*natsConnector, error) {
+			calls++
+			if calls < 3 {
+				return nil, errDuplicateControlSession
+			}
+			return wanted, nil
+		})
+	if err != nil || session != wanted || calls != 3 {
+		t.Fatalf("handoff did not connect after predecessor closed: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestDuplicateControlSessionStartupRemainsBounded(t *testing.T) {
+	calls := 0
+	_, err := retryDuplicateControlSession(context.Background(), 5*time.Millisecond, time.Millisecond,
+		func() (*natsConnector, error) {
+			calls++
+			return nil, errDuplicateControlSession
+		})
+	if !errors.Is(err, errDuplicateControlSession) || calls < 1 {
+		t.Fatalf("persistent duplicate was not rejected: calls=%d err=%v", calls, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	_, err = retryDuplicateControlSession(ctx, time.Second, time.Millisecond,
+		func() (*natsConnector, error) {
+			cancel()
+			return nil, errDuplicateControlSession
+		})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("shutdown did not stop handoff wait: %v", err)
+	}
+	configurationError := errors.New("invalid NATS credentials")
+	calls = 0
+	_, err = retryDuplicateControlSession(context.Background(), time.Second, time.Millisecond,
+		func() (*natsConnector, error) {
+			calls++
+			return nil, configurationError
+		})
+	if !errors.Is(err, configurationError) || calls != 1 {
+		t.Fatalf("unrelated configuration error was retried: calls=%d err=%v", calls, err)
 	}
 }

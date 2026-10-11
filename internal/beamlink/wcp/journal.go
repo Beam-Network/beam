@@ -2,8 +2,10 @@ package wcp
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -13,6 +15,8 @@ import (
 	"github.com/Beam-Network/beam/internal/evidence"
 	"github.com/Beam-Network/beam/internal/workload/domain"
 )
+
+const maxJournalLineBytes = maxFrameBytes * 2
 
 type JournalEvent struct {
 	EventID           string              `json:"event_id"`
@@ -46,7 +50,7 @@ func OpenFileJournal(path string) (*FileJournal, error) {
 		return nil, errors.New("WCP journal path is required")
 	}
 	journal := &FileJournal{path: path, seen: make(map[string]struct{})}
-	file, err := os.Open(path)
+	file, err := os.OpenFile(path, os.O_RDWR, 0o600)
 	if errors.Is(err, os.ErrNotExist) {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return nil, err
@@ -57,12 +61,24 @@ func OpenFileJournal(path string) (*FileJournal, error) {
 		return nil, err
 	}
 	defer file.Close()
-	scanner := bufio.NewScanner(file)
-	buffer := make([]byte, 64<<10)
-	scanner.Buffer(buffer, maxFrameBytes*2)
-	for scanner.Scan() {
+	reader := bufio.NewReader(file)
+	var complete int64
+	for {
+		line, err := reader.ReadBytes('\n')
+		if errors.Is(err, io.EOF) {
+			if len(line) > 0 {
+				if err := file.Truncate(complete); err != nil {
+					return nil, err
+				}
+			}
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		complete += int64(len(line))
 		var event JournalEvent
-		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+		if err := json.Unmarshal(line, &event); err != nil {
 			return nil, err
 		}
 		if event.EventID == "" {
@@ -73,9 +89,6 @@ func OpenFileJournal(path string) (*FileJournal, error) {
 		}
 		journal.seen[event.EventID] = struct{}{}
 		journal.events = append(journal.events, event)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
 	}
 	return journal, nil
 }
@@ -92,6 +105,15 @@ func (j *FileJournal) Append(event JournalEvent) (bool, error) {
 	if event.RecordedAt.IsZero() {
 		event.RecordedAt = time.Now().UTC()
 	}
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(event); err != nil {
+		return false, err
+	}
+	if encoded.Len() > maxJournalLineBytes {
+		return false, errors.New("WCP journal event exceeds the journal line limit")
+	}
 	if err := os.MkdirAll(filepath.Dir(j.path), 0o700); err != nil {
 		return false, err
 	}
@@ -99,10 +121,7 @@ func (j *FileJournal) Append(event JournalEvent) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	encoded, err := json.Marshal(event)
-	if err == nil {
-		_, err = file.Write(append(encoded, '\n'))
-	}
+	_, err = file.Write(encoded.Bytes())
 	if err == nil {
 		err = file.Sync()
 	}

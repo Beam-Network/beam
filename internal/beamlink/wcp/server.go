@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/Beam-Network/beam/internal/beamlink/circuit"
 	"github.com/Beam-Network/beam/internal/evidence"
@@ -14,6 +15,8 @@ import (
 	"github.com/Beam-Network/beam/internal/workload/domain"
 	"github.com/Beam-Network/beam/internal/workload/runtime"
 )
+
+var offerDecisionTimeout = 30 * time.Second
 
 type ResultEvent struct {
 	WorkerID string
@@ -121,23 +124,22 @@ func (s *Server) Offer(ctx context.Context, workerID string, spec domain.Spec) (
 	}); err != nil {
 		return runtime.Decision{}, err
 	}
+	messageID := randomID("wcp")
 	s.mu.Lock()
 	if s.sessions[workerID] != session {
 		s.mu.Unlock()
 		return runtime.Decision{}, errors.New("Worker WCP session changed")
 	}
-	request, err := session.send(TypeOffer, "", spec)
-	if err != nil {
-		s.mu.Unlock()
-		return runtime.Decision{}, err
-	}
-	s.pending[request.MessageID] = response
+	s.pending[messageID] = response
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
-		delete(s.pending, request.MessageID)
+		delete(s.pending, messageID)
 		s.mu.Unlock()
 	}()
+	if _, err := session.sendID(messageID, TypeOffer, "", spec); err != nil {
+		return runtime.Decision{}, err
+	}
 	select {
 	case decision := <-response:
 		return decision, nil
@@ -145,6 +147,8 @@ func (s *Server) Offer(ctx context.Context, workerID string, spec domain.Spec) (
 		return runtime.Decision{}, ctx.Err()
 	case <-session.done:
 		return runtime.Decision{}, errors.New("Worker WCP session closed")
+	case <-time.After(offerDecisionTimeout):
+		return runtime.Decision{}, errors.New("Worker WCP decision timed out")
 	}
 }
 
