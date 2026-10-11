@@ -70,7 +70,7 @@ provenance commands.
 
 ## Links
 
-- Dashboard: https://data.b1m.ai/
+- Miner dashboard: https://miner.b1m.ai/
 - Bittensor: https://bittensor.com
 - Public docs: https://github.com/Beam-Network/beam
 

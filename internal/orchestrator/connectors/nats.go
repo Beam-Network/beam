@@ -31,6 +31,7 @@ type NATSConfig struct {
 	Environment      string
 	ControlPrefix    string
 	Hotkey           string
+	InboxPrefix      string
 	GatewayURL       string
 	PublicAPIURL     string
 	SoftwareVersion  string
@@ -39,6 +40,14 @@ type NATSConfig struct {
 const duplicateControlSessionError = "duplicate_control_session: an offer-bearing NATS connection is already active for this hotkey"
 
 func (c NATSConfig) Enabled() bool { return c.URL != "" }
+
+func beamCoreInboxPrefix(hotkey string) string {
+	hotkey = strings.ToLower(strings.TrimSpace(hotkey))
+	if hotkey == "" {
+		return ""
+	}
+	return "_INBOX.o." + hotkey
+}
 
 type natsConnector struct {
 	config NATSConfig
@@ -63,6 +72,9 @@ func connectNATS(config NATSConfig) (*natsConnector, error) {
 		config.RequestTimeout = 10 * time.Second
 	}
 	options := []nats.Option{nats.Name(config.Name), nats.MaxReconnects(-1), nats.ReconnectWait(time.Second)}
+	if config.InboxPrefix != "" {
+		options = append(options, nats.CustomInboxPrefix(config.InboxPrefix))
+	}
 	if config.CredentialsFile != "" {
 		options = append(options, nats.UserCredentials(config.CredentialsFile))
 	}

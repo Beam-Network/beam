@@ -49,7 +49,9 @@ func (s *BeamCoreConnector) Run(ctx context.Context) error {
 	}
 	defer s.running.Store(false)
 
-	session, err := connectNATS(s.config)
+	config := s.config
+	config.InboxPrefix = beamCoreInboxPrefix(config.Hotkey)
+	session, err := connectNATS(config)
 	if err != nil {
 		return err
 	}

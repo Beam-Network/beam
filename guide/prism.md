@@ -44,8 +44,8 @@ The winner gains exactly the points the loser loses. For at least two participan
 ```text
 r = 1                              if F = 2
 r = clamp((n − 2) / (F − 2), 0, 1)  otherwise
-Defence stake = 1 + 4r              (1 to 5 points)
-Upset stake   = 5 + 10r             (5 to 15 points)
+Defence stake = round(1 + 4r)       (1 to 5 points)
+Upset stake   = round(5 + 10r)      (5 to 15 points)
 ```
 
 Beating the neighbor below earns the defence stake; beating the neighbor above earns the upset stake. A participant alone earns no duel points.
