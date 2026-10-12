@@ -96,7 +96,32 @@ curl -X POST http://127.0.0.1:8781/v1/orchestrator/memberships \
 
 ## Capabilities
 
-`transfer.multipart` handles normal transfer chunks.
+`transfer.multipart` handles normal transfer chunks. A transfer offer is one
+source range delivered to every listed destination; `offer_id` is its only
+identity.
+
+A destination with `protocol` `authenticated_part_v1` or
+`authenticated_form_v1` (Box is the first `profile`) declares its `method`,
+`digest`, `receipt`, `max_attempts` and, for forms, `form`. Its offer requires
+`transfer.authenticated_part.v1` and reserves the chunk size plus 4 MiB on the
+worker. The orchestrator advertises `transfer.authenticated_part.v1` while a
+connected worker that advertises it can reserve a 32 MiB part plus 4 MiB.
+Destinations without a protocol keep the presigned path and its URL-derived
+method. See [Authenticated Part Uploads](worker.md#authenticated-part-uploads).
+
+An offer with `kind` `source_digest` carries `source` `{url, headers, size}`
+and `digest` `{algorithms}`, and no `destinations`. The orchestrator accepts it
+only with an HTTPS source without a `Range` header, a positive `size` and
+exactly the `sha1` and `sha256` algorithms. It becomes one
+`transfer.source_digest` workload that requires `transfer.source_digest.v1`
+and reserves 4 MiB and one connection on the worker, whatever the object size.
+The orchestrator advertises `transfer.source_digest.v1` (protocol version 1)
+while a connected worker that advertises it can reserve that. See
+[Source Digest](worker.md#source-digest).
+
+A transfer offer has no `kind`. A `task_offer_batch` with an invalid offer, an
+unknown destination `protocol` or any other offer `kind` is rejected before any
+of its offers is dispatched.
 
 `room.transfer` identifies Room data-transfer lanes.
 For current Room transfers, the orchestrator advertises eligibility only when
@@ -118,6 +143,31 @@ Configure those workers as described in
 
 `storage.probe.relay.v2` is advertised while a connected worker advertises it.
 See [Storage Probe Relay](worker.md#storage-probe-relay).
+
+## Task Results
+
+The orchestrator sends one `task_offer_result` per finished offer. A transfer
+offer's result has one outcome per destination in offer order: `{etag}` for a
+delivered presigned destination, `{error}` for a failed one, plus the range
+`chunk_hash`. Missing required evidence is a terminal local failure.
+
+An authenticated destination reports
+`{sha1, request_count, provider_part_id}` when delivered and
+`{error, request_count, sha1}` when it failed; `sha1` is omitted when the range
+was never read. `sha1` is the hash of the bytes the worker sent and
+`request_count` the number of provider HTTP requests it made. A delivered
+authenticated destination without a 40-character lowercase hex `sha1`, a
+positive `request_count` and a `provider_part_id` is a terminal local failure.
+A `provider_throttled` failure also reports `retry_after_ms`, the provider's
+`Retry-After` in milliseconds when it is at most one hour, so BeamCore can
+pause that provider account for every participant.
+
+A source digest reports `{offer_id, worker_id, digest: {sha1, sha256, bytes}}`
+when it completed and `{offer_id, worker_id, error}` when it failed. A
+completed digest without a 40-character lowercase hex `sha1`, a 64-character
+lowercase hex `sha256` and `bytes` equal to the offered `size` is a terminal
+local failure. A cancelled or expired digest that reported no failure class,
+such as one whose subsystem process was stopped, reports `delivery_cancelled`.
 
 ## NATS Connectivity and Build Provenance
 
