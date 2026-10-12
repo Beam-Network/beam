@@ -41,12 +41,12 @@ Reports containing a mnemonic, a seed, keyfile contents, a private key or a Beam
 | --- | --- |
 | Submitted | Received, not yet reviewed |
 | In review | The team is looking at it |
-| Needs info | The team asked you something; see the timeline or the Discord thread |
+| Needs info | The team asked you something; see the timeline |
 | Confirmed | Accepted as a bug |
 | Fixed | The fix has shipped |
 | Closed | Finished: fixed, not a bug, duplicate or won't fix |
 
-Your report page shows the timeline, every note the team addresses to you, the Discord thread once one is opened, and any bonus granted. Only you see your reports: another hotkey gets *not found*.
+Your report page shows the timeline, every note the team addresses to you, and any bonus granted. Only you see your reports: another hotkey gets *not found*.
 
 ## Exploits and security issues
 
