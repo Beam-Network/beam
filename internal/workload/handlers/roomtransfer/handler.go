@@ -26,6 +26,7 @@ import (
 	"github.com/Beam-Network/beam/internal/workload/contracts"
 	"github.com/Beam-Network/beam/internal/workload/domain"
 	workloadprogress "github.com/Beam-Network/beam/internal/workload/progress"
+	"github.com/Beam-Network/beam/internal/workload/storagehttp"
 )
 
 const (
@@ -481,7 +482,7 @@ func (s *session) acceptSource(response http.ResponseWriter, request *http.Reque
 	if s.transfer.Protection.Valid() {
 		wireLength += protectedChunkOverhead
 	}
-	payload, readErr := readExactPayload(request.Body, wireLength)
+	payload, readErr := storagehttp.ReadExact(request.Body, wireLength)
 	digest := sha256.Sum256(payload)
 	s.mu.Lock()
 	s.readingSource = false

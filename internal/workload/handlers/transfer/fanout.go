@@ -3,7 +3,6 @@ package transfer
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -12,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,7 +28,7 @@ func validateFanout(transfer contracts.MultipartTransfer, spec domain.Spec) erro
 		return errors.New("fan-out transfer has no destinations")
 	}
 	first := transfer.Parts[0]
-	if first.Length <= 0 || first.Length > spec.Resources.MemoryBytes-(4<<20) {
+	if first.Length <= 0 || first.Length > spec.Resources.MemoryBytes-contracts.TransferBufferOverheadBytes {
 		return errors.New("fan-out buffer exceeds reserved memory")
 	}
 	for index, part := range transfer.Parts {
@@ -53,10 +53,7 @@ func validateFanout(transfer contracts.MultipartTransfer, spec domain.Spec) erro
 
 // The buffer belongs to a logical range, never to a destination. A slow or
 // retrying destination holds this one buffer while other bounded slots advance.
-func (h *Handler) executeFanout(ctx context.Context, spec domain.Spec, transfer contracts.MultipartTransfer) (domain.Result, error) {
-	if err := validateFanout(transfer, spec); err != nil {
-		return domain.Result{}, err
-	}
+func (h *Handler) executeFanout(ctx context.Context, transfer contracts.MultipartTransfer) (domain.Result, error) {
 	var resumed contracts.FanoutCheckpoint
 	if _, ok, err := workloadcheckpoint.Current(ctx, contracts.FanoutCheckpointSchema, &resumed); err != nil {
 		return domain.Result{}, err
@@ -86,11 +83,11 @@ func (h *Handler) executeFanout(ctx context.Context, spec domain.Spec, transfer 
 	}
 	response, err := storagehttp.Get(&client, request)
 	if err != nil {
-		return domain.Result{}, errors.New("source_read_failed")
+		return domain.Result{}, errors.New(classSourceReadFailed)
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusPreconditionFailed {
-		return domain.Result{}, errors.New("room_source_changed")
+		return domain.Result{}, errors.New(classSourceChanged)
 	}
 	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusPartialContent {
 		return domain.Result{}, fmt.Errorf("source_http_%d", response.StatusCode)
@@ -102,26 +99,15 @@ func (h *Handler) executeFanout(ctx context.Context, spec domain.Spec, transfer 
 			return domain.Result{}, errors.New("source_range_mismatch")
 		}
 	}
-	payload := make([]byte, first.Length)
-	read, err := io.ReadFull(response.Body, payload)
+	authenticated := slices.ContainsFunc(transfer.Parts, contracts.TransferPart.Authenticated)
+	payload, err := readRangePayload(response.Body, first.Length, authenticated)
 	outputs := map[string]string{}
-	var extra [1]byte
-	if err == nil {
-		var count int
-		count, err = response.Body.Read(extra[:])
-		if count > 0 {
-			err = errors.New("excess source bytes")
-		} else if errors.Is(err, io.EOF) {
-			err = nil
-		}
+	if err != nil {
+		return domain.Result{Outputs: outputs}, errors.New(classSourceLengthMismatch)
 	}
-	if err != nil || int64(read) != first.Length {
-		return domain.Result{Outputs: outputs}, errors.New("source_length_mismatch")
-	}
-	digest := sha256.Sum256(payload)
-	checksum := hex.EncodeToString(digest[:])
+	checksum := payload.sha256
 	if first.ExpectedSHA256 != "" && !strings.EqualFold(first.ExpectedSHA256, checksum) {
-		return domain.Result{Outputs: outputs}, errors.New("room_source_changed")
+		return domain.Result{Outputs: outputs}, errors.New(classSourceChanged)
 	}
 	checkpoint := func(total int64) error {
 		err := workloadcheckpoint.Save(ctx, contracts.FanoutCheckpointSchema, nil,
@@ -145,16 +131,33 @@ func (h *Handler) executeFanout(ctx context.Context, spec domain.Spec, transfer 
 		go func() {
 			defer wg.Done()
 			for part := range queue {
-				etag, writeErr := writeFanoutDestination(ctx, &client, part, payload)
+				var etag string
+				var delivery providerDelivery
+				var writeErr error
+				if part.Authenticated() {
+					delivery, writeErr = h.uploadAuthenticated(ctx, &client, part, payload)
+				} else {
+					etag, writeErr = writeFanoutDestination(ctx, &client, part, payload.bytes)
+				}
 				mu.Lock()
 				prefix := fmt.Sprintf("part.%d.", part.Index)
+				if part.Authenticated() {
+					outputs[prefix+"sha1"] = hex.EncodeToString(payload.sha1)
+					outputs[prefix+"request_count"] = strconv.Itoa(delivery.requests)
+				}
 				if writeErr != nil {
 					failed = true
 					outputs[prefix+"error"] = writeErr.Error()
 					outputs[prefix+"state"] = "failed"
+					recordThrottle(outputs, prefix, writeErr)
 				} else {
 					total += part.Length
-					outputs[prefix+"sha256"], outputs[prefix+"etag"] = checksum, etag
+					outputs[prefix+"sha256"] = checksum
+					if part.Authenticated() {
+						outputs[prefix+"provider_part_id"] = delivery.providerPartID
+					} else {
+						outputs[prefix+"etag"] = etag
+					}
 					outputs[prefix+"bytes"], outputs[prefix+"state"] = strconv.FormatInt(part.Length, 10), "completed"
 				}
 				if checkpointErr == nil {

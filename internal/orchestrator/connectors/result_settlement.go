@@ -50,7 +50,19 @@ func scalarDestinationOutcome(record dispatch.Record, result domain.Result, tran
 	prefix := fmt.Sprintf("part.%d.", part.Index)
 	hash := strings.TrimSpace(result.Outputs[prefix+"sha256"])
 	etag := strings.TrimSpace(result.Outputs[prefix+"etag"])
-	if result.State != domain.StateCompleted && result.State != domain.StateReceiptCommitted {
+	completed := result.State == domain.StateCompleted || result.State == domain.StateReceiptCommitted
+	if part.Authenticated() {
+		failure := fallback(result.Outputs[prefix+"error"], fallback(result.ErrorMessage, "worker_failed"))
+		outcome, err := authenticatedDestinationOutcome(result.Outputs, prefix, completed, failure)
+		if err != nil {
+			return "", nil, err
+		}
+		if completed && len(hash) != 64 {
+			return "", nil, dispatch.TerminalDelivery(fmt.Errorf("BeamCore task result is missing part %d sha256 evidence", part.Index))
+		}
+		return hash, []map[string]any{outcome}, nil
+	}
+	if !completed {
 		failure := map[string]any{"error": fallback(result.ErrorMessage, "worker_failed")}
 		if etag != "" {
 			failure["etag"] = etag
@@ -86,11 +98,6 @@ func fanoutDestinationOutcomes(result domain.Result, transfer contracts.Multipar
 		if completed && (length != part.Length || len(hash) != 64 || (part.ETagRequired && etag == "")) {
 			return "", nil, dispatch.TerminalDelivery(errors.New("fan-out result lacks required delivery evidence"))
 		}
-		if completed {
-			chunkHash = hash
-			destinations = append(destinations, destinationSuccess(etag))
-			continue
-		}
 		failure := result.Outputs[prefix+"error"]
 		if failure == "" {
 			failure = "fanout_worker_failed"
@@ -98,9 +105,66 @@ func fanoutDestinationOutcomes(result domain.Result, transfer contracts.Multipar
 				failure = "room_source_changed"
 			}
 		}
+		if completed {
+			chunkHash = hash
+		}
+		if part.Authenticated() {
+			outcome, err := authenticatedDestinationOutcome(result.Outputs, prefix, completed, failure)
+			if err != nil {
+				return "", nil, err
+			}
+			destinations = append(destinations, outcome)
+			continue
+		}
+		if completed {
+			destinations = append(destinations, destinationSuccess(etag))
+			continue
+		}
 		destinations = append(destinations, map[string]any{"error": failure})
 	}
 	return chunkHash, destinations, nil
+}
+
+// authenticatedDestinationOutcome reports the sha1 of the bytes sent, the provider
+// request count and, on success, the provider part id. A success needs all three.
+// A throttled failure also reports the provider's Retry-After in milliseconds.
+func authenticatedDestinationOutcome(outputs map[string]string, prefix string, completed bool, failure string) (map[string]any, error) {
+	sha1 := outputs[prefix+"sha1"]
+	requests, countErr := strconv.Atoi(outputs[prefix+"request_count"])
+	if completed {
+		partID := outputs[prefix+"provider_part_id"]
+		if !lowerHex(sha1, 40) || countErr != nil || requests < 1 || partID == "" {
+			return nil, dispatch.TerminalDelivery(errors.New("authenticated destination result lacks sha1, request_count or provider_part_id evidence"))
+		}
+		return map[string]any{"sha1": sha1, "request_count": requests, "provider_part_id": partID}, nil
+	}
+	outcome := map[string]any{"error": failure}
+	if lowerHex(sha1, 40) {
+		outcome["sha1"] = sha1
+	}
+	if countErr == nil && requests >= 0 {
+		outcome["request_count"] = requests
+	}
+	if retryAfter, err := strconv.ParseInt(outputs[prefix+"retry_after_ms"], 10, 64); err == nil &&
+		retryAfter >= 0 && retryAfter <= maxRetryAfterMillis {
+		outcome["retry_after_ms"] = retryAfter
+	}
+	return outcome, nil
+}
+
+// maxRetryAfterMillis is the longest provider Retry-After BeamCore accepts in a result.
+const maxRetryAfterMillis = 3_600_000
+
+func lowerHex(value string, length int) bool {
+	if len(value) != length {
+		return false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func destinationSuccess(etag string) map[string]any {

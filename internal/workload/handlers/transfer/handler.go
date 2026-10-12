@@ -29,20 +29,25 @@ type multipartCheckpoint struct {
 }
 
 type partCheckpoint struct {
-	Bytes  int64  `json:"bytes"`
-	SHA256 string `json:"sha256"`
-	ETag   string `json:"etag,omitempty"`
+	Bytes          int64  `json:"bytes"`
+	SHA256         string `json:"sha256"`
+	ETag           string `json:"etag,omitempty"`
+	SHA1           string `json:"sha1,omitempty"`
+	RequestCount   int    `json:"request_count,omitempty"`
+	ProviderPartID string `json:"provider_part_id,omitempty"`
 }
 
 type Handler struct {
 	client *http.Client
+	// wait pauses between authenticated upload attempts.
+	wait func(context.Context, time.Duration) error
 }
 
 func NewHandler(client *http.Client) *Handler {
 	if client == nil {
 		client = storagehttp.NewClient(30 * time.Minute)
 	}
-	return &Handler{client: client}
+	return &Handler{client: client, wait: sleepContext}
 }
 
 func (h *Handler) Kind() domain.Kind { return domain.KindTransferMultipart }
@@ -81,17 +86,28 @@ func (h *Handler) Validate(spec domain.Spec) error {
 				return fmt.Errorf("part %d: expected_sha256 must be a hexadecimal SHA-256 digest", part.Index)
 			}
 		}
+		switch {
+		case part.Authenticated():
+			if err := validateAuthenticatedPart(part, spec.Resources.MemoryBytes); err != nil {
+				return fmt.Errorf("part %d: %w", part.Index, err)
+			}
+		case part.Protocol != "" && part.Protocol != contracts.UploadProtocolPresignedPut:
+			return fmt.Errorf("part %d: unsupported destination protocol %q", part.Index, part.Protocol)
+		}
 	}
 	return nil
 }
 
 func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result, error) {
+	if err := h.Validate(spec); err != nil {
+		return domain.Result{}, err
+	}
 	var transfer contracts.MultipartTransfer
 	if err := json.Unmarshal(spec.Payload, &transfer); err != nil {
 		return domain.Result{}, err
 	}
 	if transfer.Fanout {
-		return h.executeFanout(ctx, spec, transfer)
+		return h.executeFanout(ctx, transfer)
 	}
 	resume := multipartCheckpoint{Parts: make(map[string]partCheckpoint)}
 	if _, _, err := workloadcheckpoint.Current(ctx, multipartCheckpointSchema, &resume); err != nil {
@@ -104,26 +120,26 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 	total := resume.Bytes
 	for _, part := range transfer.Parts {
 		partKey := strconv.Itoa(part.Index)
+		prefix := "part." + partKey + "."
 		if completed, ok := resume.Parts[partKey]; ok {
-			prefix := "part." + partKey + "."
-			outputs[prefix+"sha256"] = completed.SHA256
-			if completed.ETag != "" {
-				outputs[prefix+"etag"] = completed.ETag
-			}
+			partResult{sha256: completed.SHA256, etag: completed.ETag, sha1: completed.SHA1,
+				requests: completed.RequestCount, providerPartID: completed.ProviderPartID}.record(outputs, prefix, part)
 			continue
 		}
 		partResult, err := h.executePart(ctx, part)
 		if err != nil {
+			if part.Authenticated() {
+				partResult.record(outputs, prefix, part)
+				outputs[prefix+"error"] = uploadFailureClass(err)
+				recordThrottle(outputs, prefix, err)
+			}
 			return domain.Result{BytesProcessed: total, Outputs: outputs}, fmt.Errorf("part %d: %w", part.Index, err)
 		}
 		total += partResult.bytes
-		prefix := "part." + strconv.Itoa(part.Index) + "."
-		outputs[prefix+"sha256"] = partResult.sha256
-		if partResult.etag != "" {
-			outputs[prefix+"etag"] = partResult.etag
-		}
+		partResult.record(outputs, prefix, part)
 		resume.Bytes = total
-		resume.Parts[partKey] = partCheckpoint{Bytes: partResult.bytes, SHA256: partResult.sha256, ETag: partResult.etag}
+		resume.Parts[partKey] = partCheckpoint{Bytes: partResult.bytes, SHA256: partResult.sha256, ETag: partResult.etag,
+			SHA1: partResult.sha1, RequestCount: partResult.requests, ProviderPartID: partResult.providerPartID}
 		if err := workloadcheckpoint.Save(ctx, multipartCheckpointSchema, map[string]string{
 			"completed_part": partKey,
 		}, resume); err != nil && !errors.Is(err, workloadcheckpoint.ErrUnavailable) {
@@ -134,31 +150,44 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 }
 
 type partResult struct {
-	bytes  int64
-	sha256 string
-	etag   string
+	bytes          int64
+	sha256         string
+	etag           string
+	sha1           string
+	requests       int
+	providerPartID string
+}
+
+// record writes a part's evidence outputs. Authenticated destinations always report
+// their request count, and their sha1 once the range was read.
+func (r partResult) record(outputs map[string]string, prefix string, part contracts.TransferPart) {
+	if r.sha256 != "" {
+		outputs[prefix+"sha256"] = r.sha256
+	}
+	if r.etag != "" {
+		outputs[prefix+"etag"] = r.etag
+	}
+	if !part.Authenticated() {
+		return
+	}
+	outputs[prefix+"request_count"] = strconv.Itoa(r.requests)
+	if r.sha1 != "" {
+		outputs[prefix+"sha1"] = r.sha1
+	}
+	if r.providerPartID != "" {
+		outputs[prefix+"provider_part_id"] = r.providerPartID
+	}
 }
 
 func (h *Handler) executePart(ctx context.Context, part contracts.TransferPart) (partResult, error) {
-	sourceRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, part.Source.URL, nil)
-	if err != nil {
-		return partResult{}, fmt.Errorf("create source request: %w", err)
+	if part.Authenticated() {
+		return h.executeAuthenticatedPart(ctx, part)
 	}
-	copyHeaders(sourceRequest.Header, part.Source.Headers)
-	if part.SourceRange && part.Length > 0 {
-		sourceRequest.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", part.Offset, part.Offset+part.Length-1))
-	}
-	sourceResponse, err := h.client.Do(sourceRequest)
+	sourceResponse, err := h.openSource(ctx, part)
 	if err != nil {
-		return partResult{}, fmt.Errorf("fetch source: %w", err)
+		return partResult{}, err
 	}
 	defer sourceResponse.Body.Close()
-	if sourceResponse.StatusCode != http.StatusOK && sourceResponse.StatusCode != http.StatusPartialContent {
-		return partResult{}, responseError("source", sourceResponse)
-	}
-	if part.SourceRange && part.Length > 0 && sourceResponse.StatusCode != http.StatusPartialContent {
-		return partResult{}, fmt.Errorf("source ignored required byte range: HTTP %d", sourceResponse.StatusCode)
-	}
 
 	hash := sha256.New()
 	var source io.Reader = sourceResponse.Body
@@ -203,6 +232,31 @@ func (h *Handler) executePart(ctx context.Context, part contracts.TransferPart) 
 		bytes: counter.count, sha256: digest,
 		etag: strings.Trim(destinationResponse.Header.Get("ETag"), `"`),
 	}, nil
+}
+
+// openSource returns a successful source response; the caller closes its body.
+func (h *Handler) openSource(ctx context.Context, part contracts.TransferPart) (*http.Response, error) {
+	sourceRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, part.Source.URL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create source request: %w", err)
+	}
+	copyHeaders(sourceRequest.Header, part.Source.Headers)
+	if part.SourceRange && part.Length > 0 {
+		sourceRequest.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", part.Offset, part.Offset+part.Length-1))
+	}
+	sourceResponse, err := h.client.Do(sourceRequest)
+	if err != nil {
+		return nil, fmt.Errorf("fetch source: %w", err)
+	}
+	if sourceResponse.StatusCode != http.StatusOK && sourceResponse.StatusCode != http.StatusPartialContent {
+		defer sourceResponse.Body.Close()
+		return nil, responseError("source", sourceResponse)
+	}
+	if part.SourceRange && part.Length > 0 && sourceResponse.StatusCode != http.StatusPartialContent {
+		_ = sourceResponse.Body.Close()
+		return nil, fmt.Errorf("source ignored required byte range: HTTP %d", sourceResponse.StatusCode)
+	}
+	return sourceResponse, nil
 }
 
 func validateEndpoint(label string, endpoint contracts.HTTPEndpoint) error {

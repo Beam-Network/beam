@@ -529,6 +529,11 @@ func (control *roomControl) capabilityManifest(now time.Time) contracts.Capabili
 	if control.tasks.CapabilityAvailable(contracts.TransferMultipartFanoutCapability, domain.Resources{MemoryBytes: 96 << 20, Connections: 9, Streams: 9}) {
 		capabilities = append(capabilities, contracts.TransferMultipartFanoutCapability)
 	}
+	// Probe with the buffer BeamCore plans for the largest authenticated provider part.
+	if control.tasks.CapabilityAvailable(contracts.TransferAuthenticatedPartCapability,
+		beamcoreadapter.BufferedTransferResources(contracts.AuthenticatedPartProbeBytes)) {
+		capabilities = append(capabilities, contracts.TransferAuthenticatedPartCapability)
+	}
 	if control.rooms != nil {
 		e2ee, storage := control.rooms.CapabilityAvailable(), control.rooms.StorageCapabilityAvailable()
 		if e2ee || storage {

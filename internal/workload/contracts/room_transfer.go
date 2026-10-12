@@ -28,6 +28,10 @@ const (
 	TunnelLeaseRoleTargetWrite        = "target_write"
 )
 
+// TransferAuthenticatedPartCapability executes authenticated_part_v1 and
+// authenticated_form_v1 transfer destinations.
+const TransferAuthenticatedPartCapability = "transfer.authenticated_part.v1"
+
 type RoomTransferProtection struct {
 	Scheme   string `json:"scheme"`
 	KeyEpoch uint64 `json:"key_epoch"`
