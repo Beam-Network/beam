@@ -16,7 +16,7 @@ Within each workload and qualification pool, orchestrators are ordered by assign
 
 Each neighboring pair has one duel, starting at the bottom. The middle participants face two neighbors; the top and bottom face one.
 
-![Orch B is highlighted in mint, with a centered connector branching to its two neighboring duels. The frozen order is orch A, orch B, orch C: 3, 3 and 2 assigned tasks; 3/3, 3/3 and 1/2 verified successes; and trusted durations of 12, 8 and 5 seconds. A precedes B through the pre-wave PRISM tie-break. First, B beats C on reliability: B +5, C −5. Then B beats A on speed at equal reliability: B +15, A −15. Wave totals are A −15, B +20 and C −5. Gains are green and losses red; each endpoint faces B once.](../static/img/prism-duels.png)
+![Orch B is highlighted in mint, with a centered connector branching to its two neighboring duels. The frozen order is orch A, orch B, orch C: 3, 3 and 2 assigned tasks; 3/3, 3/3 and 1/2 verified successes; and trusted durations of 12, 8 and 5 seconds. A precedes B through the pre-wave PRISM tie-break. First, B beats C on reliability: B +15, C −15. Then B beats A on speed at equal reliability: B +15, A −15. Wave totals are A −15, B +30 and C −15. Gains are green and losses red; each endpoint faces B once.](../static/img/prism-duels.png)
 
 *This example follows orch B's two duels: defend against C, then climb against A. A and B have the same assigned load; their pre-wave PRISM places A higher. All three eligible orchestrators participate; the point changes add up to zero.*
 
@@ -44,25 +44,24 @@ The winner gains exactly the points the loser loses. For at least two participan
 ```text
 r = 1                              if F = 2
 r = clamp((n − 2) / (F − 2), 0, 1)  otherwise
-Defence stake = round(1 + 4r)       (1 to 5 points)
-Upset stake   = round(5 + 10r)      (5 to 15 points)
+Stake = round(5 + 10r)              (5 to 15 points)
 ```
 
-Beating the neighbor below earns the defence stake; beating the neighbor above earns the upset stake. A participant alone earns no duel points.
+Every duel in a wave has the same stake: the winner gains it and the loser loses it, whichever neighbor it faces. A participant alone earns no duel points. If more than half of a wave's participants fail, the wave is neutral.
 
 ## Reading your score
 
-Performance points are the signed total of duel results settled in the last 24 hours. They can be negative. Each workload and pool normalizes its own totals:
+Performance points are the signed total of duel results and recovery charges settled in the last 24 hours. They can be negative. Each workload and pool normalizes its own totals:
 
 ```text
 All totals equal: performanceScore = 0.5
-Otherwise: performanceScore = 0.2 + 0.8 × (points − lowest) / (highest − lowest)
+Otherwise: performanceScore = (points − lowest) / (highest − lowest)
 PRISM final score = performanceScore × readinessMultiplier × penaltyMultiplier
 ```
 
 Readiness reflects a healthy control connection and availability. Independently verified integrity, fraud and Sybil penalties can reduce the final score. Keep your worker pool reliable and your control connection healthy to improve your opportunities.
 
-Recovery work earns no duel points or qualification progress. A rescue does not erase the failed original assignment. Verified recovery work can still earn work credit. An intervention affects the original task's result once; it adds no second performance penalty.
+Recovery work earns no duel points or qualification progress. Each failed recovery assignment of a standard transfer costs 3 × the stake of that transfer's first wave. A rescue does not erase the failed original assignment. Verified recovery work can still earn work credit. An intervention affects the original task's result once; it adds no second performance penalty.
 
 ## Qualification
 
