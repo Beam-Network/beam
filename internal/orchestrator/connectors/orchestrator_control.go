@@ -534,6 +534,9 @@ func (control *roomControl) capabilityManifest(now time.Time) contracts.Capabili
 		beamcoreadapter.BufferedTransferResources(contracts.AuthenticatedPartProbeBytes)) {
 		capabilities = append(capabilities, contracts.TransferAuthenticatedPartCapability)
 	}
+	if control.tasks.CapabilityAvailable(contracts.TransferSourceDigestCapability, beamcoreadapter.SourceDigestResources()) {
+		capabilities = append(capabilities, contracts.TransferSourceDigestCapability)
+	}
 	if control.rooms != nil {
 		e2ee, storage := control.rooms.CapabilityAvailable(), control.rooms.StorageCapabilityAvailable()
 		if e2ee || storage {

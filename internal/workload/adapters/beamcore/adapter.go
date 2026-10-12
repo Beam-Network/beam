@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,16 +21,33 @@ type TaskOfferBatch struct {
 	Offers              []TaskOffer `json:"offers"`
 }
 
+// OfferKindSourceDigest marks an offer that hashes a whole source object. An offer
+// without a kind is a transfer offer.
+const OfferKindSourceDigest = "source_digest"
+
+// TaskOffer is one BeamCore task offer; offer_id is its only identity. A transfer
+// offer delivers one source range to every listed destination. A source_digest
+// offer hashes the whole source object and has no destinations.
 type TaskOffer struct {
 	OfferID      string             `json:"offer_id"`
+	Kind         string             `json:"kind,omitempty"`
 	Source       OfferSource        `json:"source"`
 	Destinations []OfferDestination `json:"destinations"`
+	Digest       *OfferDigest       `json:"digest,omitempty"`
 }
 
+// OfferSource is a transfer offer's source range (ChunkSize) or a source_digest
+// offer's whole object (Size).
 type OfferSource struct {
 	URL       string            `json:"url"`
 	Headers   map[string]string `json:"headers,omitempty"`
 	ChunkSize int64             `json:"chunk_size"`
+	Size      int64             `json:"size,omitempty"`
+}
+
+// OfferDigest names the digests a source_digest offer requests.
+type OfferDigest struct {
+	Algorithms []string `json:"algorithms"`
 }
 
 // OfferDestination is one TaskOfferDestination. Protocol defaults to presigned_put;
@@ -61,17 +79,37 @@ func BufferedTransferResources(chunkSize int64) domain.Resources {
 // AuthenticatedEvidence names the outputs an authenticated destination commits to.
 var AuthenticatedEvidence = []string{"sha1", "request_count", "provider_part_id"}
 
-// ToWorkload maps one offer to one worker workload. Several destinations become a
-// fan-out workload that reads the range once and uploads it to each destination.
+// SourceDigestResources reserves one streaming source connection and its transport
+// overhead; the object itself is never buffered.
+func SourceDigestResources() domain.Resources {
+	return domain.Resources{MemoryBytes: contracts.TransferBufferOverheadBytes, BandwidthMbps: 1, Connections: 1, Streams: 1}
+}
+
+// SourceDigestEvidence names the outputs a source digest commits to.
+var SourceDigestEvidence = []string{"sha1", "sha256", "bytes"}
+
+// ToWorkload maps one offer to one worker workload by its kind.
 func ToWorkload(offer TaskOffer, assignmentTimeout time.Duration, receivedAt time.Time) (domain.Spec, error) {
 	if offer.OfferID == "" {
 		return domain.Spec{}, errors.New("BeamCore offer_id is required")
 	}
-	if offer.Source.URL == "" || offer.Source.ChunkSize <= 0 || len(offer.Destinations) == 0 {
-		return domain.Spec{}, errors.New("BeamCore offer requires a source range and at least one destination")
-	}
 	if assignmentTimeout <= 0 {
 		return domain.Spec{}, errors.New("BeamCore offer batch requires assignment_timeout_ms")
+	}
+	switch offer.Kind {
+	case "":
+		return transferWorkload(offer, assignmentTimeout, receivedAt)
+	case OfferKindSourceDigest:
+		return sourceDigestWorkload(offer, assignmentTimeout, receivedAt)
+	}
+	return domain.Spec{}, fmt.Errorf("unsupported BeamCore offer kind %q", offer.Kind)
+}
+
+// transferWorkload maps a transfer offer. Several destinations become a fan-out
+// workload that reads the range once and uploads it to each destination.
+func transferWorkload(offer TaskOffer, assignmentTimeout time.Duration, receivedAt time.Time) (domain.Spec, error) {
+	if offer.Source.URL == "" || offer.Source.ChunkSize <= 0 || len(offer.Destinations) == 0 {
+		return domain.Spec{}, errors.New("BeamCore offer requires a source range and at least one destination")
 	}
 	fanout := len(offer.Destinations) > 1
 	parts := make([]contracts.TransferPart, 0, len(offer.Destinations))
@@ -132,6 +170,50 @@ func ToWorkload(offer TaskOffer, assignmentTimeout time.Duration, receivedAt tim
 		spec.RequiredCapabilities = append(spec.RequiredCapabilities, contracts.TransferAuthenticatedPartCapability)
 	}
 	return spec, nil
+}
+
+// sourceDigestWorkload maps a source_digest offer to one streaming whole-object read.
+// It carries no destination, so the worker never receives a destination credential.
+func sourceDigestWorkload(offer TaskOffer, assignmentTimeout time.Duration, receivedAt time.Time) (domain.Spec, error) {
+	if len(offer.Destinations) != 0 {
+		return domain.Spec{}, errors.New("BeamCore source_digest offer must not carry destinations")
+	}
+	if !requestsSourceDigestAlgorithms(offer.Digest) {
+		return domain.Spec{}, errors.New("BeamCore source_digest offer must request exactly the sha1 and sha256 algorithms")
+	}
+	digest := contracts.SourceDigest{Source: contracts.HTTPEndpoint{URL: offer.Source.URL, Headers: offer.Source.Headers},
+		Size: offer.Source.Size}
+	if err := digest.Validate(); err != nil {
+		return domain.Spec{}, fmt.Errorf("BeamCore source_digest offer: %w", err)
+	}
+	payload, err := json.Marshal(digest)
+	if err != nil {
+		return domain.Spec{}, err
+	}
+	return domain.Spec{
+		WorkloadID: offer.OfferID, AttemptID: offer.OfferID,
+		Kind: domain.KindTransferSourceDigest, Class: domain.ClassJob,
+		Source:               domain.Source{System: "beamcore", Reference: offer.OfferID},
+		RequiredCapabilities: []string{contracts.TransferSourceDigestCapability},
+		Resources:            SourceDigestResources(),
+		Lease:                domain.Lease{OfferExpiresAt: receivedAt.Add(assignmentTimeout)},
+		Evidence:             domain.EvidencePolicy{ReceiptRequired: true, Commitments: slices.Clone(SourceDigestEvidence)},
+		Payload:              payload,
+	}, nil
+}
+
+// requestsSourceDigestAlgorithms reports whether a digest requests exactly the
+// algorithms every source digest computes, in any order.
+func requestsSourceDigestAlgorithms(digest *OfferDigest) bool {
+	if digest == nil || len(digest.Algorithms) != len(contracts.SourceDigestAlgorithms) {
+		return false
+	}
+	for _, algorithm := range contracts.SourceDigestAlgorithms {
+		if !slices.Contains(digest.Algorithms, algorithm) {
+			return false
+		}
+	}
+	return true
 }
 
 // offerDestinationMethod derives a presigned destination's method from its URL and

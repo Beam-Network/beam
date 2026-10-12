@@ -35,3 +35,26 @@ func TestTransferReceiptCommitsAuthenticatedPartEvidence(t *testing.T) {
 		t.Fatalf("authenticated evidence is not committed: %+v", receipt.Commitments)
 	}
 }
+
+func TestTransferReceiptCommitsSourceDigestEvidence(t *testing.T) {
+	_, privateKey, _ := ed25519.GenerateKey(rand.Reader)
+	publicKey := privateKey.Public().(ed25519.PublicKey)
+	identity := domain.Identity{WorkerID: "worker-1", OrchestratorID: "orchestrator-1", NodeID: nodeID(publicKey)}
+	now := time.Now().UTC()
+	receipt, err := NewWorkloadReceipt(identity, privateKey, domain.Spec{
+		WorkloadID: "offer-digest", AttemptID: "offer-digest", Identity: identity, Kind: domain.KindTransferSourceDigest,
+		Evidence: domain.EvidencePolicy{ReceiptRequired: true, Commitments: []string{"sha1", "sha256", "bytes"}},
+	}, domain.Result{State: domain.StateCompleted, StartedAt: now.Add(-time.Second), CompletedAt: now, BytesProcessed: 4096,
+		Outputs: map[string]string{"sha1": "digest-1", "sha256": "digest-256", "bytes": "4096"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	committed := map[string]string{}
+	for _, commitment := range receipt.Commitments {
+		committed[commitment.Name] = commitment.Value
+	}
+	if receipt.Type != ReceiptTransfer || committed["sha1"] != "digest-1" || committed["sha256"] != "digest-256" ||
+		committed["bytes"] != "4096" || receipt.Verify() != nil {
+		t.Fatalf("source digest evidence is not committed: %s %+v", receipt.Type, receipt.Commitments)
+	}
+}

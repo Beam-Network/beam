@@ -28,6 +28,9 @@ const (
 	KindArtifactPublish    Kind = "artifact.publish"
 )
 
+// KindTransferSourceDigest hashes one whole source object and writes nothing.
+const KindTransferSourceDigest Kind = "transfer.source_digest"
+
 type Class string
 
 const (

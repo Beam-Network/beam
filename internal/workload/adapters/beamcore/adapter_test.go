@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Beam-Network/beam/internal/workload/contracts"
+	"github.com/Beam-Network/beam/internal/workload/domain"
 )
 
 func singleDestinationOffer() TaskOffer {
@@ -132,5 +133,81 @@ func TestToWorkloadRequiresAuthenticatedCapabilityForMixedFanout(t *testing.T) {
 		spec.RequiredCapabilities[2] != contracts.TransferAuthenticatedPartCapability ||
 		spec.Resources.MemoryBytes != (8<<20)+contracts.TransferBufferOverheadBytes || spec.Resources.Connections != 3 {
 		t.Fatalf("mixed fan-out has unexpected requirements: %+v %+v", spec.RequiredCapabilities, spec.Resources)
+	}
+}
+
+func sourceDigestOffer() TaskOffer {
+	return TaskOffer{
+		OfferID: "offer-digest", Kind: OfferKindSourceDigest,
+		Source: OfferSource{URL: "https://bucket.test/object?X-Amz-Signature=sig", Size: 1610612736,
+			Headers: map[string]string{"x-amz-security-token": "source-token"}},
+		Digest: &OfferDigest{Algorithms: []string{"sha1", "sha256"}},
+	}
+}
+
+func TestToWorkloadMapsSourceDigestOffer(t *testing.T) {
+	now := time.Now()
+	spec, err := ToWorkload(sourceDigestOffer(), 40*time.Minute, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Kind != domain.KindTransferSourceDigest || spec.WorkloadID != "offer-digest" || spec.AttemptID != "offer-digest" ||
+		!spec.Lease.OfferExpiresAt.Equal(now.Add(40*time.Minute)) {
+		t.Fatalf("unexpected digest workload: %+v", spec)
+	}
+	if len(spec.RequiredCapabilities) != 1 || spec.RequiredCapabilities[0] != contracts.TransferSourceDigestCapability {
+		t.Fatalf("digest workload must require only its own capability: %+v", spec.RequiredCapabilities)
+	}
+	// A streaming digest reserves the same small footprint whatever the object size.
+	if spec.Resources != SourceDigestResources() || spec.Resources.MemoryBytes != contracts.TransferBufferOverheadBytes {
+		t.Fatalf("digest workload must not reserve the object: %+v", spec.Resources)
+	}
+	if strings.Join(spec.Evidence.Commitments, ",") != "sha1,sha256,bytes" || !spec.Evidence.ReceiptRequired {
+		t.Fatalf("digest evidence is not committed: %+v", spec.Evidence)
+	}
+	var payload contracts.SourceDigest
+	if err := json.Unmarshal(spec.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Size != 1610612736 || payload.Source.URL != "https://bucket.test/object?X-Amz-Signature=sig" ||
+		payload.Source.Headers["x-amz-security-token"] != "source-token" {
+		t.Fatalf("digest payload was not mapped: %+v", payload)
+	}
+	if strings.Contains(string(spec.Payload), "destination") || strings.Contains(string(spec.Payload), "offer_id") {
+		t.Fatalf("digest payload carries more than its source: %s", spec.Payload)
+	}
+	offer := sourceDigestOffer()
+	offer.Digest.Algorithms = []string{"sha256", "sha1"}
+	offer.Source.URL = "http://127.0.0.1:8080/object"
+	if _, err := ToWorkload(offer, time.Minute, now); err != nil {
+		t.Fatalf("reordered algorithms or a loopback test source were rejected: %v", err)
+	}
+}
+
+func TestToWorkloadRejectsInvalidSourceDigestOffers(t *testing.T) {
+	for name, mutate := range map[string]func(*TaskOffer){
+		"destinations": func(offer *TaskOffer) {
+			offer.Destinations = []OfferDestination{{URL: "https://bucket.test/part?X-Amz-Signature=sig"}}
+		},
+		"no digest":           func(offer *TaskOffer) { offer.Digest = nil },
+		"sha1 only":           func(offer *TaskOffer) { offer.Digest.Algorithms = []string{"sha1"} },
+		"duplicate algorithm": func(offer *TaskOffer) { offer.Digest.Algorithms = []string{"sha1", "sha1"} },
+		"extra algorithm":     func(offer *TaskOffer) { offer.Digest.Algorithms = []string{"sha1", "sha256", "md5"} },
+		"other algorithm":     func(offer *TaskOffer) { offer.Digest.Algorithms = []string{"sha1", "md5"} },
+		"no size":             func(offer *TaskOffer) { offer.Source.Size = 0 },
+		"no source url":       func(offer *TaskOffer) { offer.Source.URL = "" },
+		"plain http source":   func(offer *TaskOffer) { offer.Source.URL = "http://bucket.test/object" },
+		"range header":        func(offer *TaskOffer) { offer.Source.Headers["Range"] = "bytes=0-1023" },
+	} {
+		offer := sourceDigestOffer()
+		mutate(&offer)
+		if _, err := ToWorkload(offer, time.Minute, time.Now()); err == nil {
+			t.Errorf("digest offer with %s was accepted", name)
+		}
+	}
+	offer := sourceDigestOffer()
+	offer.Kind = "source_hash"
+	if _, err := ToWorkload(offer, time.Minute, time.Now()); err == nil || !strings.Contains(err.Error(), `unsupported BeamCore offer kind "source_hash"`) {
+		t.Fatalf("unknown offer kind was not rejected clearly: %v", err)
 	}
 }

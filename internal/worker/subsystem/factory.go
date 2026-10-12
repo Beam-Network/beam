@@ -56,7 +56,7 @@ func (c Config) ForKind(kind domain.Kind) Config {
 	switch kind {
 	case domain.KindTransferDistribute:
 		return Config{ControlAddress: c.ControlAddress, ControlToken: c.ControlToken}
-	case domain.KindTransferMultipart, domain.KindRoomDatagram,
+	case domain.KindTransferMultipart, domain.KindTransferSourceDigest, domain.KindRoomDatagram,
 		domain.KindRoomMessage, domain.KindRoomCommand:
 		return Config{}
 	case domain.KindActionExecute:
@@ -104,6 +104,8 @@ func BuildHandler(kind domain.Kind, config Config) (runtime.Handler, error) {
 	switch kind {
 	case domain.KindTransferMultipart:
 		return transfer.NewHandler(nil), nil
+	case domain.KindTransferSourceDigest:
+		return transfer.NewSourceDigestHandler(nil), nil
 	case domain.KindTransferDistribute:
 		transport, err := newCircuitTransport(config.ControlAddress, config.ControlToken)
 		if err != nil {

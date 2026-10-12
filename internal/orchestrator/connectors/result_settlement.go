@@ -17,7 +17,13 @@ type taskOfferResultAcknowledgement struct {
 	Reason string `json:"reason"`
 }
 
+// taskOfferResult builds the one task_offer_result of a finished offer. A transfer
+// offer's destinations follow the offer's destination order; a failed destination
+// carries an error. A source digest reports its digest or an error instead.
 func taskOfferResult(record dispatch.Record, result domain.Result) (map[string]any, error) {
+	if record.Spec.Kind == domain.KindTransferSourceDigest {
+		return sourceDigestResult(record, result)
+	}
 	var transfer contracts.MultipartTransfer
 	if err := json.Unmarshal(record.Spec.Payload, &transfer); err != nil {
 		return nil, dispatch.TerminalDelivery(fmt.Errorf("BeamCore task result has invalid transfer payload: %w", err))
@@ -165,6 +171,41 @@ func lowerHex(value string, length int) bool {
 		}
 	}
 	return true
+}
+
+// sourceDigestResult reports {digest: {sha1, sha256, bytes}} for a completed digest
+// and {error} for a failed one. A completed digest needs a 40-character and a
+// 64-character lowercase hex digest and exactly the offered size in bytes.
+func sourceDigestResult(record dispatch.Record, result domain.Result) (map[string]any, error) {
+	var digest contracts.SourceDigest
+	if err := json.Unmarshal(record.Spec.Payload, &digest); err != nil {
+		return nil, dispatch.TerminalDelivery(fmt.Errorf("BeamCore task result has invalid source digest payload: %w", err))
+	}
+	payload := map[string]any{"offer_id": record.Spec.AttemptID, "worker_id": record.WorkerID}
+	if result.State != domain.StateCompleted && result.State != domain.StateReceiptCommitted {
+		payload["error"] = sourceDigestFailure(result)
+		return payload, nil
+	}
+	sha1, sha256 := result.Outputs["sha1"], result.Outputs["sha256"]
+	bytes, err := strconv.ParseInt(result.Outputs["bytes"], 10, 64)
+	if !lowerHex(sha1, 40) || !lowerHex(sha256, 64) || err != nil || bytes != digest.Size {
+		return nil, dispatch.TerminalDelivery(errors.New("source digest result lacks sha1, sha256 or bytes evidence matching the offered size"))
+	}
+	payload["digest"] = map[string]any{"sha1": sha1, "sha256": sha256, "bytes": bytes}
+	return payload, nil
+}
+
+// sourceDigestFailure is the class the digest handler reported. A cancelled or
+// expired assignment without one, such as a stopped subsystem process, is
+// delivery_cancelled.
+func sourceDigestFailure(result domain.Result) string {
+	if failure := result.Outputs["error"]; failure != "" {
+		return failure
+	}
+	if result.State == domain.StateCancelled || result.State == domain.StateExpired {
+		return "delivery_cancelled"
+	}
+	return fallback(result.ErrorMessage, "worker_failed")
 }
 
 func destinationSuccess(etag string) map[string]any {
