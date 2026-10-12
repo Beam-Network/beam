@@ -89,7 +89,8 @@ func NewWorkloadReceipt(identity domain.Identity, privateKey ed25519.PrivateKey,
 	}
 	receiptType := ReceiptWorkload
 	switch spec.Kind {
-	case domain.KindTransferMultipart, domain.KindTransferRange, domain.KindTransferDistribute:
+	case domain.KindTransferMultipart, domain.KindTransferRange, domain.KindTransferDistribute,
+		domain.KindTransferSourceDigest:
 		receiptType = ReceiptTransfer
 	case domain.KindTunnelHTTP, domain.KindTunnelTCP:
 		receiptType = ReceiptTunnel

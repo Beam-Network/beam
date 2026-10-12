@@ -1,7 +1,7 @@
 # BEAM Worker Guide
 
-Run a Go worker on BEAM mainnet for `transfer.multipart`, room transfer, and
-worker-hosted room workloads.
+Run a Go worker on BEAM mainnet for `transfer.multipart`, source digests, room
+transfer, and worker-hosted room workloads.
 
 ## Requirements
 
@@ -76,7 +76,7 @@ export BEAM_WCP_SERVER_NAME=orchestrator.example.com
 
 ./bin/beam-worker serve \
   --node-key data/worker/node.key \
-  --capabilities transfer.multipart,transfer.multipart.fanout.v1,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v2,storage.probe.relay.v2 \
+  --capabilities transfer.multipart,transfer.multipart.fanout.v1,transfer.authenticated_part.v1,transfer.source_digest.v1,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v2,storage.probe.relay.v2 \
   --room-transfer-addr 0.0.0.0:9470 \
   --room-transfer-advertise-url https://worker.example.com:9470
 ```
@@ -145,6 +145,91 @@ the media public IP to the address they reach. For clients behind restrictive
 networks, optionally list STUN/TURN URLs in `--media-ice-servers`
 (`BEAM_MEDIA_ICE_SERVERS`) and set `--media-turn-secret`
 (`BEAM_MEDIA_TURN_SECRET`) to issue temporary TURN credentials.
+
+## Authenticated Part Uploads
+
+`transfer.authenticated_part.v1` lets the worker write `transfer.multipart`
+ranges to provider APIs that take authenticated uploads instead of presigned
+URLs. It is on by default and needs `transfer.multipart`. Box is the first
+profile (`profile: "box"`). A destination declares one of two protocols:
+
+| Protocol | Request | Digest header | Receipt |
+| --- | --- | --- | --- |
+| `authenticated_part_v1` | the declared method (Box: `PUT` to the upload-session part URL) with the offer's `Authorization` and `Content-Range` | `Digest: sha=<base64 SHA-1>` | `part` → `part_id` |
+| `authenticated_form_v1` | `POST` of a multipart form: the `attributes` JSON part first, then the file part | `Content-MD5: <hex SHA-1>` | `entries.0` → `id` |
+
+The offer names the digest header and its format (`sha=base64` or `hex`), the
+receipt path and its required fields; the table shows the Box values. The
+bearer credential arrives in the offer's destination headers, and the worker
+sends it only with that destination's upload requests.
+
+Destinations without a protocol keep the presigned path (`presigned_put`),
+which streams the range with the method derived from the presigned URL; an
+offered `method` applies only to the authenticated protocols.
+
+For an authenticated destination the worker:
+
+1. Reserves the chunk size plus 4 MiB, reads exactly the assigned range into
+   one buffer, and computes SHA-1 and SHA-256 in the same pass. A short or long
+   source read fails with `source_length_mismatch` before any provider request.
+2. Sends the declared digest header with the declared method (`PUT` or `POST`)
+   over HTTPS. Redirects are never followed.
+3. Retries with the same buffer, up to the offer's `max_attempts`, after
+   transport errors, 408, 429 and 5xx. It honours `Retry-After` and gives up
+   when the wait would outlast the assignment lease. Other responses are never
+   retried.
+4. Requires every declared receipt field. A receipt `sha1` must equal the
+   SHA-1 of the sent bytes.
+
+Each destination reports `sha1`, `request_count` (every provider HTTP request,
+including failed and retried ones) and, on success, `provider_part_id`. These
+outputs are commitments in the signed receipt. A `provider_throttled` failure
+with a provider `Retry-After` also reports it in milliseconds as
+`retry_after_ms`. Failures carry one class and never include a URL, header or
+response body:
+
+| Class | Cause |
+| --- | --- |
+| `provider_throttled` | 429 after the attempts or the lease ran out |
+| `authorization_lost` | 401 or 403 |
+| `provider_digest_rejected` | 400 `digest_mismatch` (part) or `bad_digest` (form) |
+| `provider_connection_dropped` | the connection failed on the last attempt (Box closes it for a missing digest or a misaligned `Content-Range`) |
+| `provider_receipt_mismatch` | the receipt `sha1` differs from the sent bytes |
+| `provider_receipt_invalid` | the success response lacks the receipt or a declared field |
+| `provider_error` | any other 4xx, 3xx, or 408/5xx after the attempts |
+| `source_read_failed`, `source_length_mismatch` | the source range could not be read exactly |
+| `delivery_cancelled` | the assignment was cancelled or its lease expired |
+
+## Source Digest
+
+`transfer.source_digest.v1` lets BeamCore learn the whole-file SHA-1 and
+SHA-256 of a source that carries no trusted checksum, which a Box commit
+requires. It is on by default and needs no other capability. A source digest
+reads one object and writes nothing; the worker never receives a destination
+or its credential.
+
+For a source digest the worker:
+
+1. Sends one `GET` of the whole object to the HTTPS source with the offer's
+   headers, without `Range`, and with `Accept-Encoding: identity` unless the
+   offer sets one, so the hashes cover the stored bytes. Redirects are never
+   followed.
+2. Streams the body through SHA-1 and SHA-256 in one pass. The object is never
+   buffered: the workload reserves 4 MiB and one connection whatever its size.
+   The assignment lease, not a client timeout, bounds the read.
+3. Counts the bytes. A declared `Content-Length` or a byte count that differs
+   from the offered `size` fails with `source_length_mismatch`.
+
+A completed digest reports `sha1`, `sha256` (lowercase hex) and `bytes`. These
+outputs are commitments in the signed receipt. Failures carry one class:
+
+| Class | Cause |
+| --- | --- |
+| `source_length_mismatch` | the object is shorter or longer than `size` |
+| `source_read_failed` | any status other than 200 (a redirect included), a transport error, or a dropped connection |
+| `delivery_cancelled` | the assignment was cancelled or its lease expired |
+
+To opt out of either capability, leave it out of `--capabilities`.
 
 ## Storage Probe Relay
 

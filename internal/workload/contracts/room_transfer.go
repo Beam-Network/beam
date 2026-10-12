@@ -28,6 +28,14 @@ const (
 	TunnelLeaseRoleTargetWrite        = "target_write"
 )
 
+// TransferAuthenticatedPartCapability executes authenticated_part_v1 and
+// authenticated_form_v1 transfer destinations.
+const TransferAuthenticatedPartCapability = "transfer.authenticated_part.v1"
+
+// TransferSourceDigestCapability executes transfer.source_digest workloads: one
+// streaming read of a whole source object hashed with SHA-1 and SHA-256.
+const TransferSourceDigestCapability = "transfer.source_digest.v1"
+
 type RoomTransferProtection struct {
 	Scheme   string `json:"scheme"`
 	KeyEpoch uint64 `json:"key_epoch"`

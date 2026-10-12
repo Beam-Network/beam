@@ -6,6 +6,22 @@ type HTTPEndpoint struct {
 	Headers map[string]string `json:"headers,omitempty"`
 }
 
+// Destination upload protocols. An empty protocol is UploadProtocolPresignedPut.
+const (
+	UploadProtocolPresignedPut      = "presigned_put"
+	UploadProtocolAuthenticatedPart = "authenticated_part_v1"
+	UploadProtocolAuthenticatedForm = "authenticated_form_v1"
+	// UploadProfileBox is the Box upload-session part and small-file form profile.
+	UploadProfileBox = "box"
+)
+
+// TransferBufferOverheadBytes is the transport reservation added to every buffered range.
+const TransferBufferOverheadBytes = 4 << 20
+
+// AuthenticatedPartProbeBytes is the largest provider part BeamCore plans for
+// authenticated destinations (Box: 8, 16 or 32 MiB); capability probes reserve it.
+const AuthenticatedPartProbeBytes = 32 << 20
+
 type TransferPart struct {
 	ETagRequired   bool         `json:"etag_required,omitempty"`
 	Index          int          `json:"index"`
@@ -15,6 +31,43 @@ type TransferPart struct {
 	Offset         int64        `json:"offset,omitempty"`
 	Length         int64        `json:"length,omitempty"`
 	ExpectedSHA256 string       `json:"expected_sha256,omitempty"`
+	// Protocol selects how Destination is written; Destination.Method is the declared method.
+	// The authenticated protocols buffer the range, send its digest, retry with the same
+	// buffer up to MaxAttempts and verify the provider receipt.
+	Protocol    string         `json:"protocol,omitempty"`
+	Profile     string         `json:"profile,omitempty"`
+	Digest      *UploadDigest  `json:"digest,omitempty"`
+	Receipt     *UploadReceipt `json:"receipt,omitempty"`
+	MaxAttempts int            `json:"max_attempts,omitempty"`
+	Form        *UploadForm    `json:"form,omitempty"`
+}
+
+// Authenticated reports whether the destination uses an authenticated upload protocol.
+func (part TransferPart) Authenticated() bool {
+	return part.Protocol == UploadProtocolAuthenticatedPart || part.Protocol == UploadProtocolAuthenticatedForm
+}
+
+// UploadDigest names the digest of the sent bytes and the header that carries it.
+// Format is "sha=base64" (Digest: sha=<base64>) or "hex".
+type UploadDigest struct {
+	Algorithm string `json:"algorithm"`
+	Header    string `json:"header"`
+	Format    string `json:"format"`
+}
+
+// UploadReceipt locates the provider receipt in the JSON response. Path is a
+// dot-separated path whose numeric segments index arrays; Fields must be present.
+type UploadReceipt struct {
+	Path   string   `json:"path"`
+	Fields []string `json:"fields"`
+}
+
+// UploadForm describes a multipart form upload: the Attributes JSON part comes
+// first, then the range bytes as FileField named Filename.
+type UploadForm struct {
+	Attributes string `json:"attributes"`
+	FileField  string `json:"file_field"`
+	Filename   string `json:"filename"`
 }
 
 type MultipartTransfer struct {

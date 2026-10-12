@@ -9,7 +9,7 @@ BeamCore provides the public HTTP API, Core NATS control gateway, transfer lifec
 | Component | Responsibility |
 | --- | --- |
 | Orchestrator | Connects to BeamCore over Core NATS, publishes capability updates, routes workload offers to workers over BeamLink/WCP, and relays results |
-| Worker | Connects to its orchestrator over BeamLink/WCP, advertises capabilities, executes `transfer.multipart`, carries E2EE `room.transfer` ciphertext, and returns signed results |
+| Worker | Connects to its orchestrator over BeamLink/WCP, advertises capabilities, executes `transfer.multipart` (presigned and authenticated provider destinations) and `transfer.source_digest.v1` whole-source digests, carries E2EE `room.transfer` ciphertext, and returns signed results |
 | Validator | Reads BeamCore epoch summaries, sets subnet weights, and posts weight proofs |
 
 Agent-only room transfers are end-to-end encrypted; workers do not receive
@@ -65,7 +65,7 @@ provenance commands.
 ## Run
 
 - [Orchestrator guide](docs/orchestrator.md): run a miner that receives `task_offer_batch` and `room_task_offer_batch`.
-- [Worker guide](docs/worker.md): run a worker that advertises and executes `transfer.multipart` and direct E2EE `room.transfer` workloads.
+- [Worker guide](docs/worker.md): run a worker that advertises and executes `transfer.multipart`, source digest, and direct E2EE `room.transfer` workloads.
 - [Validator guide](docs/validator.md): run a validator that sets weights from BeamCore epoch summaries.
 
 ## Links
