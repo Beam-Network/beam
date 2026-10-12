@@ -131,7 +131,7 @@ A sale within the allowance does not slow repayment. A hotkey that sold all of i
 
 ### Checking your state
 
-`GET https://api.b1m.ai/v1/audit/sell-allowance/{hotkey}` returns your hotkey's multipliers, remaining allowance, 7-day sales and debt for the latest published epoch.
+`GET https://api.b1m.ai/v1/audit/sell-allowance/{hotkey}` returns your hotkey's multipliers, 7-day sales and debt for the latest published epoch. To avoid a penalty, sell at most `safeToSellAlphaRao` in one sale by `safeUntilBlock`.
 
 ## Inputs
 
