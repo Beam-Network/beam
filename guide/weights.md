@@ -12,8 +12,7 @@ Beam validator weights are the final UID vector submitted to Bittensor. BeamCore
 BeamCore first computes a base raw score for every qualified orchestrator with a subnet UID:
 
 ```text
-fraud_report_reward_i = 1 + min(1.00, sum(active award bonuses_i))
-raw_weight_i = verified_uploaded_mib_i * penalty_multiplier_i * fraud_report_reward_i
+raw_weight_i = verified_uploaded_mib_i
 ```
 
 It then ranks qualified orchestrators by `raw_weight` and splits emissions into five fixed-rank tiers:
@@ -29,14 +28,13 @@ It then ranks qualified orchestrators by `raw_weight` and splits emissions into 
 Within each active tier, that tier's bucket is split proportionally by `raw_weight`:
 
 ```text
-tier_weight_i      = raw_weight_i / SUM(raw_weight in tier_i)
-normalized_weight_i = effective_tier_bucket_i x tier_weight_i
-uint16_weight_i     = floor(normalized_weight_i x 65535)
+tier_weight_i = raw_weight_i / SUM(raw_weight in tier_i)
+base_weight_i = effective_tier_bucket_i x tier_weight_i
 ```
 
 If Tier B, C, D, or E is empty or has zero total raw score, its bucket rolls up into Tier A. Zero-raw orchestrators never receive positive weight.
 
-BeamCore then adjusts each normalized weight for [sell pressure](#sell-pressure) before computing `uint16_weight`.
+BeamCore applies [sell pressure](#sell-pressure) and redistribution, then weight penalties and fraud-report bonuses to the resulting weight, before final normalization and uint16 encoding.
 
 ## Example
 
@@ -54,7 +52,7 @@ When raw scores differ, each tier's bucket is divided proportionally instead.
 
 ## Sell pressure
 
-Miners choose when and how much to sell. Beam adjusts emission weights based on sale volume and frequency. In any seven-day window, **one sale** totaling up to **80%** of a hotkey's base emissions causes no reduction from these selling factors. Larger or more frequent sales reduce future emission weights. Base emissions are what the hotkey would receive before this adjustment. The unused portion of the 80% threshold does not carry over.
+Miners choose when and how much to sell. Beam adjusts emission weights based on sale volume and frequency. In any seven-day window, **one sale** totaling up to **80%** of a hotkey's base emissions causes no reduction from these selling factors. Larger or more frequent sales reduce future emission weights. Base emissions are the upload-based tier allocation before sell pressure, weight penalties and rewards. The unused portion of the 80% threshold does not carry over.
 
 A sale is any SN105 alpha leaving your coldkey's stake on this subnet, on any hotkey, by any transaction: unstaking, a transfer to another coldkey, a swap to another subnet, or any other outflow. Moving stake between hotkeys on this subnet without changing coldkey is not a sale. Everything your coldkey sells or sends away in one block is one sale, whatever its size. Buying or receiving alpha never offsets a sale.
 
@@ -131,7 +129,7 @@ A sale within the allowance does not slow repayment. A hotkey that sold all of i
 
 ### Checking your state
 
-`GET https://api.b1m.ai/v1/audit/sell-allowance/{hotkey}` returns your hotkey's multipliers, 7-day sales and debt for the latest published epoch. To avoid a penalty, sell at most `safeToSellAlphaRao` in one sale by `safeUntilBlock`.
+`GET https://api.b1m.ai/v1/audit/sell-allowance/{hotkey}` returns your hotkey's multipliers, 7-day sales and debt for the latest published epoch. To avoid a penalty, sell at most `transferableAlphaRao` in one sale by `windowEndBlock`.
 
 ## Inputs
 
@@ -161,7 +159,7 @@ Each award expires independently **7 days (168 hours)** after application by def
 
 Awards follow your hotkey on the same subnet through resets and UID changes. Timers continue during inactivity or qualification.
 
-The bonus affects emission ranking, not routing or qualification. Zero uploads or a zero penalty still produce zero weight.
+The bonus affects final emission shares, not tier membership, routing or qualification. Zero uploads or a zero penalty still produce zero weight.
 
 Report them on the [bug desk](./bug-reports.md) with the **Exploit** or **Security** category.
 
@@ -195,7 +193,7 @@ The response includes matching `uids` and `weights` arrays. `workload_scoring` r
 	"uids": [12, 47, 52],
 	"weights": [0.5, 0.3, 0.2],
 	"uint16_weights": [32767, 19660, 13107],
-	"formula_version": "tiered_weight_verified_uploaded_mib_x_penalty_x_fraud_report_reward_v4",
+	"formula_version": "tiered_weight_verified_uploaded_mib_x_sell_allowance_x_penalty_x_fraud_report_reward_v6",
 	"source": "epoch_summary",
 	"reward_evaluated_at": "2026-10-01T00:00:00.000Z",
 	"all_weights_zero": false
@@ -209,7 +207,7 @@ Expiry-adjusted vectors use `source = "epoch_summary_reward_expiry_adjusted"`; `
 ## Improving weight share
 
 - Qualify for each workload by completing its calibration work reliably.
-- Complete enough penalty-adjusted uploaded production MiB inside the PRISM evidence window to rank into a higher emission tier.
+- Complete enough verified uploaded production MiB inside the PRISM evidence window to rank into a higher emission tier.
 - Keep your orchestrator connected and ready so it can receive production assignments.
 - Maintain strong PRISM performance so routing gives you more opportunities to complete production work.
 - One sale totaling up to 80% of seven-day base emissions keeps the sale-volume and sale-frequency multipliers at 1.00; larger or more frequent sales reduce them.
