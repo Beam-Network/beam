@@ -33,11 +33,11 @@ assignmentDuration = latest verified original-task upload timestamp from provide
                    − Core publication time of first batch in the assignment
 ```
 
-Agent-only room transfers have no storage-provider upload; their completion evidence comes from verified delivery receipts.
+Agent-only room transfers have no storage-provider upload; their completion evidence comes from verified delivery receipts. In room transfers, time the source agent spends preparing a chunk after your worker reports ready is not counted.
 
 The shorter duration wins. This interval covers all batches in that wave; it is not averaged or divided by task count. Receiving a task-result message does not establish a storage upload's completion time, and participant-reported timestamps do not decide the duel.
 
-Equal success rates and durations draw; two assignments with no successes also draw. No accountable tasks, or missing trusted timing when rates are equal, means the duel is unrated. Draws and unrated duels award zero points.
+Equal success rates with durations within 5% of each other (the slower at most 1.05 × the faster) draw; two assignments with no successes also draw. No accountable tasks, or missing trusted timing when rates are equal, means the duel is unrated. Draws and unrated duels award zero points.
 
 The winner gains exactly the points the loser loses. For at least two participants, let `n` be the number competing and `F` the eligible pool size, both frozen before the duel:
 
@@ -55,9 +55,13 @@ Performance points are the signed total of duel results and recovery charges set
 
 ```text
 All totals equal: performanceScore = 0.5
-Otherwise: performanceScore = (points − lowest) / (highest − lowest)
+Otherwise: performanceScore = (points − bottom) / (highest − bottom)
+bottom = lowest       if lowest ≤ −3 × √V
+         −3 × √V      otherwise (lowest − 1 if lowest ≥ 0)
 PRISM final score = performanceScore × readinessMultiplier × penaltyMultiplier
 ```
+
+V is the sum of the squared duel point changes behind the lowest total in the last 24 hours. Only a total that is clearly behind, not just the lowest of a few duels, scores 0.
 
 Readiness reflects a healthy control connection and availability. Independently verified integrity, fraud and Sybil penalties can reduce the final score. Keep your worker pool reliable and your control connection healthy to improve your opportunities.
 
