@@ -64,9 +64,6 @@ func (s progressSink[T, R]) DeliverRoomWorkloadProgress(ctx context.Context, val
 			return err
 		}
 		if details.Runtime != nil {
-			if err := details.Runtime.Validate(value.Identity, s.manager.now().UTC()); err != nil {
-				return err
-			}
 			if err := announceRuntime(ctx, sink, value, details.Runtime); err != nil {
 				return err
 			}

@@ -177,15 +177,6 @@ func (s *Server) handleResult(session *Session, envelope Envelope) error {
 	if err != nil {
 		return err
 	}
-	eventID := fmt.Sprintf("result:%s:%s:%s:%s:%d", session.workerID, result.WorkloadID,
-		result.AttemptID, result.State, result.CompletedAt.UnixNano())
-	appended, err := s.journal.Append(JournalEvent{
-		EventID: eventID, WorkerID: session.workerID, Type: TypeResult,
-		WorkloadID: result.WorkloadID, AttemptID: result.AttemptID, Result: &result,
-	})
-	if err != nil || !appended {
-		return err
-	}
 	select {
 	case s.results <- ResultEvent{WorkerID: session.workerID, Result: result}:
 		return nil
@@ -202,8 +193,6 @@ func (s *Server) handleProgress(session *Session, envelope Envelope) error {
 	// Progress is advisory and continuously refreshed. Persisting every sample
 	// forced an fsync on the WCP read loop and let historical telemetry delay a
 	// new workload's runtime endpoint beyond the publisher handshake deadline.
-	// Results, receipts and checkpoints remain journaled; current progress is
-	// also retained in the durable workload stores downstream.
 	select {
 	case s.progress <- ProgressEvent{WorkerID: session.workerID, Progress: progress}:
 		return nil
@@ -219,14 +208,6 @@ func (s *Server) handleCheckpoint(session *Session, envelope Envelope) error {
 	}
 	if checkpoint.WorkloadID == "" || checkpoint.AttemptID == "" || checkpoint.Kind == "" || checkpoint.Sequence == 0 || checkpoint.Schema == "" {
 		return errors.New("invalid workload checkpoint")
-	}
-	eventID := fmt.Sprintf("checkpoint:%s:%s:%s:%d", session.workerID, checkpoint.WorkloadID, checkpoint.AttemptID, checkpoint.Sequence)
-	_, err = s.journal.Append(JournalEvent{
-		EventID: eventID, WorkerID: session.workerID, Type: TypeCheckpoint,
-		WorkloadID: checkpoint.WorkloadID, AttemptID: checkpoint.AttemptID, Checkpoint: &checkpoint,
-	})
-	if err != nil {
-		return err
 	}
 	select {
 	case s.checkpoints <- CheckpointEvent{WorkerID: session.workerID, Checkpoint: checkpoint}:
@@ -250,23 +231,14 @@ func (s *Server) handleReceipt(session *Session, envelope Envelope) error {
 	if receipt.OrchestratorID != s.orchestratorID || receipt.WorkerID != session.workerID || receipt.NodeID != session.identity.NodeID {
 		return errors.New("receipt identity does not match its authenticated WCP session")
 	}
-	appended, err := s.journal.Append(JournalEvent{
-		EventID: "receipt:" + receipt.ReceiptID, WorkerID: session.workerID, Type: TypeReceipt,
-		WorkloadID: receipt.WorkloadID, AttemptID: receipt.AttemptID, Receipt: &receipt,
-	})
-	if err != nil {
-		return err
-	}
 	if _, err := session.send(TypeReceiptAck, envelope.MessageID, ReceiptAck{
 		ReceiptID: receipt.ReceiptID, AcknowledgedAt: time.Now().UTC(),
 	}); err != nil {
 		return err
 	}
-	if appended {
-		select {
-		case s.receipts <- ReceiptEvent{WorkerID: session.workerID, Receipt: receipt}:
-		default:
-		}
+	select {
+	case s.receipts <- ReceiptEvent{WorkerID: session.workerID, Receipt: receipt}:
+	default:
 	}
 	return nil
 }

@@ -16,6 +16,8 @@ var (
 	ErrNodeConflict   = errors.New("node identity is already attached to another worker")
 )
 
+const observationSaveInterval = 10 * time.Second
+
 type Registry struct {
 	mu           sync.RWMutex
 	orchestrator orchestratordomain.Orchestrator
@@ -23,6 +25,7 @@ type Registry struct {
 	observations map[string]orchestratordomain.WorkerObservation
 	version      uint64
 	store        StateStore
+	savedAt      time.Time
 }
 
 func New(orchestrator orchestratordomain.Orchestrator) (*Registry, error) {
@@ -139,6 +142,9 @@ func (r *Registry) UpdateObservation(observation orchestratordomain.WorkerObserv
 	previous, existed := r.observations[observation.WorkerID]
 	r.observations[observation.WorkerID] = observation
 	r.version++
+	if existed && now.Sub(r.savedAt) < observationSaveInterval {
+		return nil
+	}
 	if err := r.persistLocked(); err != nil {
 		r.version--
 		if existed {
@@ -148,6 +154,7 @@ func (r *Registry) UpdateObservation(observation orchestratordomain.WorkerObserv
 		}
 		return err
 	}
+	r.savedAt = now
 	return nil
 }
 

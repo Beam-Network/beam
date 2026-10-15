@@ -6,7 +6,7 @@ transfer, and worker-hosted room workloads.
 ## Requirements
 
 - Go 1.24+
-- Bittensor worker hotkey registered on subnet 105
+- Bittensor worker hotkey (no subnet registration required)
 - BeamCore worker registration response with `worker_id`
 - Orchestrator WCP address, CA, server name, and membership
 
@@ -20,14 +20,6 @@ go build -o bin/beam-worker ./cmd/beam-worker
 ```
 
 ## 2. Register
-
-Register the hotkey on subnet 105:
-
-```bash
-btcli subnet register --netuid 105 --subtensor.network finney \
-  --wallet.name your_coldkey \
-  --wallet.hotkey your_hotkey
-```
 
 Register the worker with BeamCore. Sign the message `<worker_hotkey_ss58>:<public_ip>:9000` with the worker hotkey and send:
 
@@ -78,7 +70,7 @@ export BEAM_WCP_SERVER_NAME=orchestrator.example.com
   --node-key data/worker/node.key \
   --capabilities transfer.multipart,transfer.multipart.fanout.v1,transfer.authenticated_part.v1,transfer.source_digest.v1,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v2,storage.probe.relay.v2 \
   --room-transfer-addr 0.0.0.0:9470 \
-  --room-transfer-advertise-url https://worker.example.com:9470
+  --room-transfer-advertise-url http://worker.example.com:9470
 ```
 
 Agent-only room transfers are end-to-end encrypted. Encryption keys and

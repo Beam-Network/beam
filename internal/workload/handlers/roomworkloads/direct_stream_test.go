@@ -995,7 +995,7 @@ func TestDirectServerSharesOneCertificateForMessagesAndStreams(t *testing.T) {
 		t.Fatalf("message %+v and stream %+v do not share the listener", message.Runtime, stream.runtime)
 	}
 	request, _ := http.NewRequest(http.MethodPost, message.Runtime.BaseURL+"/source", bytes.NewReader(record))
-	request.Header.Set("Authorization", "Bearer "+message.Runtime.AccessToken)
+	request.Header.Set("Authorization", "Bearer "+message.Runtime.SourceAccessToken)
 	response, err := stream.client.Do(request)
 	if err != nil {
 		t.Fatal(err)

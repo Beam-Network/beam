@@ -26,10 +26,10 @@ type DirectMessageHandler struct {
 }
 
 type messageSession struct {
-	token        string
+	sourceToken  string
+	targetTokens []contracts.RoomStreamTargetToken
 	messageID    string
 	sizeBytes    int64
-	targets      map[string]struct{}
 	expiresAt    time.Time
 	mu           sync.Mutex
 	payload      []byte
@@ -60,19 +60,25 @@ func (handler *DirectMessageHandler) Execute(ctx context.Context, spec domain.Sp
 	if err != nil {
 		return domain.Result{}, err
 	}
-	token, err := newAccessToken()
+	sourceToken, err := newAccessToken()
 	if err != nil {
 		return domain.Result{}, err
 	}
 	sessionID := directSessionID(assignment.Identity)
-	targets := make(map[string]struct{}, len(assignment.Targets))
-	for _, target := range assignment.Targets {
-		targets[target.MemberID] = struct{}{}
-	}
-	session := &messageSession{token: token, messageID: assignment.Details.MessageID,
-		sizeBytes: assignment.Details.SizeBytes, targets: targets, expiresAt: assignment.Identity.ExpiresAt,
+	session := &messageSession{sourceToken: sourceToken, messageID: assignment.Details.MessageID,
+		sizeBytes: assignment.Details.SizeBytes, expiresAt: assignment.Identity.ExpiresAt,
 		payloadReady: make(chan struct{}), deliveries: make(map[string]contracts.MessageDelivery),
 		changed: make(chan struct{}, 1)}
+	members := make([]string, 0, len(assignment.Targets))
+	for _, target := range assignment.Targets {
+		token, err := newAccessToken()
+		if err != nil {
+			return domain.Result{}, err
+		}
+		session.targetTokens = append(session.targetTokens,
+			contracts.RoomStreamTargetToken{TargetMemberID: target.MemberID, AccessToken: token})
+		members = append(members, target.MemberID)
+	}
 	if err := handler.server.registerMessage(sessionID, session); err != nil {
 		return domain.Result{}, err
 	}
@@ -85,18 +91,19 @@ func (handler *DirectMessageHandler) Execute(ctx context.Context, spec domain.Sp
 		WorkloadID: assignment.Identity.WorkloadID, UnitID: assignment.Identity.UnitID, Epoch: assignment.Identity.Epoch,
 		Attempt: assignment.Identity.Attempt, WorkerID: spec.Identity.WorkerID,
 		Capability: contracts.RoomMessageDirectCapability, Transport: contracts.RoomWorkerHTTPSTransport,
-		BaseURL:     directSessionURL(baseURL, roomMessagesPath, sessionID),
-		AccessToken: token, TLSCertificateSHA256: fingerprint, ExpiresAt: assignment.Identity.ExpiresAt}
+		BaseURL: directSessionURL(baseURL, roomMessagesPath, sessionID), TLSCertificateSHA256: fingerprint,
+		ExpiresAt: assignment.Identity.ExpiresAt, SourceAccessToken: session.sourceToken,
+		TargetAccessTokens: session.targetTokens}
 	identity := assignment.Identity
 	identity.WorkerID = spec.Identity.WorkerID
-	if err := runtime.Validate(identity, handler.now().UTC()); err != nil {
+	if err := runtime.Validate(identity, members, handler.now().UTC()); err != nil {
 		return domain.Result{}, err
 	}
 	report(ctx, contracts.MessageProgressDetails{Runtime: &runtime})
 
 	for {
 		session.mu.Lock()
-		complete := len(session.payload) > 0 && len(session.deliveries) == len(session.targets)
+		complete := len(session.payload) > 0 && len(session.deliveries) == len(session.targetTokens)
 		deliveries := make([]contracts.MessageDelivery, 0, len(session.deliveries))
 		if complete {
 			for _, delivery := range session.deliveries {
@@ -127,32 +134,54 @@ func directSessionID(identity contracts.RoomWorkloadIdentity) string {
 }
 
 func serveMessage(session *messageSession, response http.ResponseWriter, request *http.Request, parts []string) {
-	if session == nil || !session.authorize(request) {
+	var role streamRole
+	ok := false
+	if session != nil {
+		role, ok = session.authenticate(request)
+	}
+	if !ok {
 		response.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	if len(parts) == 1 && parts[0] == "source" {
+	switch {
+	case len(parts) == 1 && parts[0] == "source":
+		if !role.source {
+			response.WriteHeader(http.StatusForbidden)
+			return
+		}
 		session.source(response, request)
-		return
+	case (len(parts) == 2 || len(parts) == 3 && parts[2] == "ack") && parts[0] == "targets":
+		if role.source || role.member != parts[1] {
+			response.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if len(parts) == 2 {
+			session.target(response, request, parts[1])
+		} else {
+			session.ack(response, request, parts[1])
+		}
+	default:
+		http.NotFound(response, request)
 	}
-	if len(parts) == 2 && parts[0] == "targets" {
-		session.target(response, request, parts[1])
-		return
-	}
-	if len(parts) == 3 && parts[0] == "targets" && parts[2] == "ack" {
-		session.ack(response, request, parts[1])
-		return
-	}
-	http.NotFound(response, request)
 }
 
-func (session *messageSession) authorize(request *http.Request) bool {
+func (session *messageSession) authenticate(request *http.Request) (streamRole, bool) {
 	authorization := request.Header.Get("Authorization")
-	if !strings.HasPrefix(authorization, "Bearer ") {
-		return false
+	if !strings.HasPrefix(authorization, "Bearer ") || !time.Now().Before(session.expiresAt) {
+		return streamRole{}, false
 	}
-	provided := strings.TrimSpace(strings.TrimPrefix(authorization, "Bearer "))
-	return subtle.ConstantTimeCompare([]byte(provided), []byte(session.token)) == 1 && time.Now().Before(session.expiresAt)
+	provided := []byte(strings.TrimSpace(strings.TrimPrefix(authorization, "Bearer ")))
+	var role streamRole
+	found := false
+	if subtle.ConstantTimeCompare(provided, []byte(session.sourceToken)) == 1 {
+		role, found = streamRole{source: true}, true
+	}
+	for _, target := range session.targetTokens {
+		if subtle.ConstantTimeCompare(provided, []byte(target.AccessToken)) == 1 {
+			role, found = streamRole{member: target.TargetMemberID}, true
+		}
+	}
+	return role, found
 }
 
 func (session *messageSession) source(response http.ResponseWriter, request *http.Request) {
@@ -192,10 +221,6 @@ func (session *messageSession) target(response http.ResponseWriter, request *htt
 		response.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if _, ok := session.targets[memberID]; !ok {
-		http.NotFound(response, request)
-		return
-	}
 	for {
 		session.mu.Lock()
 		payload := append([]byte(nil), session.payload...)
@@ -220,10 +245,6 @@ func (session *messageSession) target(response http.ResponseWriter, request *htt
 func (session *messageSession) ack(response http.ResponseWriter, request *http.Request, memberID string) {
 	if request.Method != http.MethodPost {
 		response.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-	if _, ok := session.targets[memberID]; !ok {
-		http.NotFound(response, request)
 		return
 	}
 	var delivery contracts.MessageDelivery

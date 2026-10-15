@@ -24,7 +24,7 @@ const (
 	RoomWorkloadProvisioningResult = "room_workload_provisioning_result"
 	RoomWorkloadRuntimeType        = "room_workload_runtime"
 	RoomMessageDirectCapability    = "room.message.direct.v1"
-	RoomMessageRuntimeSchema       = "room-message-runtime/v1"
+	RoomMessageRuntimeSchema       = "room-message-runtime/v2"
 	RoomStreamDirectCapability     = "room.stream.direct.v1"
 	RoomStreamRuntimeSchema        = "room-stream-runtime/v1"
 	RoomStreamProtectionProtocol   = "beam-mls-stream-v1"
@@ -518,22 +518,23 @@ type MessageProgressDetails struct {
 }
 
 type RoomMessageRuntime struct {
-	SchemaVersion        string    `json:"schema_version"`
-	WorkloadID           string    `json:"workload_id"`
-	UnitID               string    `json:"unit_id"`
-	Epoch                uint64    `json:"epoch"`
-	Attempt              uint64    `json:"attempt"`
-	WorkerID             string    `json:"worker_id"`
-	Capability           string    `json:"capability"`
-	Transport            string    `json:"transport"`
-	BaseURL              string    `json:"base_url"`
-	AccessToken          string    `json:"access_token"`
-	TLSCertificateSHA256 string    `json:"tls_certificate_sha256"`
-	ExpiresAt            time.Time `json:"expires_at"`
+	SchemaVersion        string                  `json:"schema_version"`
+	WorkloadID           string                  `json:"workload_id"`
+	UnitID               string                  `json:"unit_id"`
+	Epoch                uint64                  `json:"epoch"`
+	Attempt              uint64                  `json:"attempt"`
+	WorkerID             string                  `json:"worker_id"`
+	Capability           string                  `json:"capability"`
+	Transport            string                  `json:"transport"`
+	BaseURL              string                  `json:"base_url"`
+	TLSCertificateSHA256 string                  `json:"tls_certificate_sha256"`
+	ExpiresAt            time.Time               `json:"expires_at"`
+	SourceAccessToken    string                  `json:"source_access_token"`
+	TargetAccessTokens   []RoomStreamTargetToken `json:"target_access_tokens"`
 }
 
 // RoomWorkloadRuntimeWire announces the private runtime of one Worker attempt
-// on room_workload_runtime. Runtime holds room-message-runtime/v1 for
+// on room_workload_runtime. Runtime holds room-message-runtime/v2 for
 // room.message and room-stream-runtime/v1 for room.stream.
 type RoomWorkloadRuntimeWire struct {
 	Type          string          `json:"type"`
@@ -559,18 +560,21 @@ func NewRoomWorkloadRuntimeWire(identity RoomWorkloadIdentity, runtime any, repo
 		WorkerID: identity.WorkerID, Runtime: encoded, ReportedAt: reportedAt.UTC()}, nil
 }
 
-func (runtime RoomMessageRuntime) Validate(identity RoomWorkloadIdentity, now time.Time) error {
+func (runtime RoomMessageRuntime) Validate(identity RoomWorkloadIdentity, targetMemberIDs []string, now time.Time) error {
 	if runtime.SchemaVersion != RoomMessageRuntimeSchema || runtime.WorkloadID != identity.WorkloadID ||
 		runtime.UnitID != identity.UnitID || runtime.Epoch != identity.Epoch || runtime.Attempt != identity.Attempt ||
 		runtime.WorkerID != identity.WorkerID || runtime.Capability != RoomMessageDirectCapability ||
-		runtime.Transport != RoomWorkerHTTPSTransport || runtime.AccessToken == "" ||
+		runtime.Transport != RoomWorkerHTTPSTransport ||
 		runtime.ExpiresAt.IsZero() || !now.Before(runtime.ExpiresAt) || !cleanHTTPSURL(runtime.BaseURL) {
 		return errors.New("invalid direct room message runtime")
 	}
 	if !lowerHexSHA256(runtime.TLSCertificateSHA256) {
 		return errors.New("invalid direct room message TLS fingerprint")
 	}
-	return nil
+	if len(runtime.TargetAccessTokens) == 0 {
+		return errors.New("direct room message runtime target tokens do not match the attempt")
+	}
+	return validateRoleTokens("message", runtime.SourceAccessToken, runtime.TargetAccessTokens, targetMemberIDs)
 }
 
 // RoomStreamRuntime is room-stream-runtime/v1: the private endpoint of one
@@ -611,37 +615,43 @@ func (runtime RoomStreamRuntime) Validate(identity RoomWorkloadIdentity, targetM
 	if runtime.ExpiresAt.IsZero() || !now.Before(runtime.ExpiresAt) || runtime.ExpiresAt.After(identity.ExpiresAt) {
 		return errors.New("direct room stream runtime expiry is outside the workload lease")
 	}
-	if len(runtime.TargetAccessTokens) == 0 || len(runtime.TargetAccessTokens) > RoomStreamMaxTargets ||
-		len(runtime.TargetAccessTokens) != len(targetMemberIDs) {
+	if len(runtime.TargetAccessTokens) == 0 || len(runtime.TargetAccessTokens) > RoomStreamMaxTargets {
 		return errors.New("direct room stream runtime target tokens do not match the attempt")
 	}
-	if !ValidRoomWorkerAccessToken(runtime.SourceAccessToken) {
-		return errors.New("invalid direct room stream source token")
+	return validateRoleTokens("stream", runtime.SourceAccessToken, runtime.TargetAccessTokens, targetMemberIDs)
+}
+
+func validateRoleTokens(kind, source string, targets []RoomStreamTargetToken, targetMemberIDs []string) error {
+	if len(targets) != len(targetMemberIDs) {
+		return fmt.Errorf("direct room %s runtime target tokens do not match the attempt", kind)
+	}
+	if !ValidRoomWorkerAccessToken(source) {
+		return fmt.Errorf("invalid direct room %s source token", kind)
 	}
 	expected := make(map[string]struct{}, len(targetMemberIDs))
 	for _, member := range targetMemberIDs {
 		expected[member] = struct{}{}
 	}
-	members := make(map[string]struct{}, len(runtime.TargetAccessTokens))
-	tokens := map[string]struct{}{runtime.SourceAccessToken: {}}
-	for _, target := range runtime.TargetAccessTokens {
+	members := make(map[string]struct{}, len(targets))
+	tokens := map[string]struct{}{source: {}}
+	for _, target := range targets {
 		if _, ok := expected[target.TargetMemberID]; !ok {
-			return fmt.Errorf("direct room stream runtime names unknown target %s", target.TargetMemberID)
+			return fmt.Errorf("direct room %s runtime names unknown target %s", kind, target.TargetMemberID)
 		}
 		if _, duplicate := members[target.TargetMemberID]; duplicate {
-			return fmt.Errorf("duplicate direct room stream target %s", target.TargetMemberID)
+			return fmt.Errorf("duplicate direct room %s target %s", kind, target.TargetMemberID)
 		}
 		members[target.TargetMemberID] = struct{}{}
 		if !ValidRoomWorkerAccessToken(target.AccessToken) {
-			return errors.New("invalid direct room stream target token")
+			return fmt.Errorf("invalid direct room %s target token", kind)
 		}
 		if _, reused := tokens[target.AccessToken]; reused {
-			return errors.New("direct room stream tokens must be distinct")
+			return fmt.Errorf("direct room %s tokens must be distinct", kind)
 		}
 		tokens[target.AccessToken] = struct{}{}
 	}
 	if len(members) != len(expected) {
-		return errors.New("direct room stream runtime target tokens do not match the attempt")
+		return fmt.Errorf("direct room %s runtime target tokens do not match the attempt", kind)
 	}
 	return nil
 }

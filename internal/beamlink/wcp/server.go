@@ -118,12 +118,6 @@ func (s *Server) Offer(ctx context.Context, workerID string, spec domain.Spec) (
 		return runtime.Decision{}, err
 	}
 	response := make(chan runtime.Decision, 1)
-	if _, err := s.journal.Append(JournalEvent{
-		EventID: randomID("offer"), WorkerID: workerID, Type: TypeOffer,
-		WorkloadID: spec.WorkloadID, AttemptID: spec.AttemptID,
-	}); err != nil {
-		return runtime.Decision{}, err
-	}
 	messageID := randomID("wcp")
 	s.mu.Lock()
 	if s.sessions[workerID] != session {
@@ -157,12 +151,6 @@ func (s *Server) Commit(_ context.Context, workerID string, commit domain.Commit
 	if err != nil {
 		return err
 	}
-	if _, err := s.journal.Append(JournalEvent{
-		EventID: randomID("commit"), WorkerID: workerID, Type: TypeCommit,
-		WorkloadID: commit.WorkloadID, AttemptID: commit.AttemptID,
-	}); err != nil {
-		return err
-	}
 	_, err = session.send(TypeCommit, "", commit)
 	return err
 }
@@ -170,12 +158,6 @@ func (s *Server) Commit(_ context.Context, workerID string, commit domain.Commit
 func (s *Server) Cancel(_ context.Context, workerID, workloadID, attemptID string) error {
 	session, err := s.session(workerID)
 	if err != nil {
-		return err
-	}
-	if _, err := s.journal.Append(JournalEvent{
-		EventID: randomID("cancel"), WorkerID: workerID, Type: TypeCancel,
-		WorkloadID: workloadID, AttemptID: attemptID,
-	}); err != nil {
 		return err
 	}
 	_, err = session.send(TypeCancel, "", Cancel{WorkloadID: workloadID, AttemptID: attemptID})

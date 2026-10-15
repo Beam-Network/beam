@@ -65,3 +65,22 @@ func TestRoomDirectStartupFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+func TestRoomTransferStartupRequiresHTTPAdvertiseURL(t *testing.T) {
+	cases := []struct {
+		advertiseURL string
+		valid        bool
+	}{
+		{"", true},
+		{"http://worker.example.com:9470", true},
+		{"http://worker.example.com:{port}", true},
+		{"https://worker.example.com:9470", false},
+		{"worker.example.com:9470", false},
+		{"http:///v1", false},
+	}
+	for _, test := range cases {
+		if err := validateRoomTransferStartup(test.advertiseURL); (err == nil) != test.valid {
+			t.Fatalf("validateRoomTransferStartup(%q) = %v", test.advertiseURL, err)
+		}
+	}
+}

@@ -17,7 +17,7 @@ import (
 	workloadprogress "github.com/Beam-Network/beam/internal/workload/progress"
 )
 
-func TestDirectMessageHandlerUploadsCiphertextOnceAndWaitsForEveryTargetAck(t *testing.T) {
+func TestDirectMessageHandlerScopesEveryTokenToItsRoleAndWaitsForEveryTargetAck(t *testing.T) {
 	server := NewDirectServer(DirectServerConfig{ListenAddress: "127.0.0.1:0", AdvertiseURL: "https://127.0.0.1:{port}"})
 	t.Cleanup(func() { _ = server.Close() })
 	handler := NewDirectMessageHandler(server)
@@ -51,21 +51,55 @@ func TestDirectMessageHandlerUploadsCiphertextOnceAndWaitsForEveryTargetAck(t *t
 	if err := json.Unmarshal([]byte((<-progress)["room_progress_details"]), &initial); err != nil || initial.Runtime == nil {
 		t.Fatalf("missing private runtime progress: %v", err)
 	}
-	client := pinnedMessageClient(t, initial.Runtime.TLSCertificateSHA256)
-	call := func(method, suffix string, body []byte) *http.Response {
-		request, _ := http.NewRequestWithContext(ctx, method, initial.Runtime.BaseURL+suffix, bytes.NewReader(body))
-		request.Header.Set("Authorization", "Bearer "+initial.Runtime.AccessToken)
+	runtime := initial.Runtime
+	targetTokens := map[string]string{}
+	for _, target := range runtime.TargetAccessTokens {
+		targetTokens[target.TargetMemberID] = target.AccessToken
+	}
+	if runtime.SchemaVersion != contracts.RoomMessageRuntimeSchema || len(targetTokens) != 2 ||
+		targetTokens["target-a"] == targetTokens["target-b"] || runtime.SourceAccessToken == targetTokens["target-a"] {
+		t.Fatalf("runtime does not issue one distinct token per role: %+v", runtime)
+	}
+	client := pinnedMessageClient(t, runtime.TLSCertificateSHA256)
+	callAs := func(token, method, suffix string, body []byte) *http.Response {
+		request, _ := http.NewRequestWithContext(ctx, method, runtime.BaseURL+suffix, bytes.NewReader(body))
+		request.Header.Set("Authorization", "Bearer "+token)
 		response, err := client.Do(request)
 		if err != nil {
 			t.Fatal(err)
 		}
 		return response
 	}
+	call := func(method, suffix string, body []byte) *http.Response {
+		return callAs(runtime.SourceAccessToken, method, suffix, body)
+	}
 	legacy, _ := json.Marshal(map[string]any{"message_id": "message-1", "payload": []byte("ciphertext")})
 	response := call(http.MethodPost, "/source", legacy)
 	response.Body.Close()
 	if response.StatusCode != http.StatusBadRequest {
 		t.Fatalf("legacy source status=%d", response.StatusCode)
+	}
+	forgedAck, _ := json.Marshal(contracts.MessageDelivery{TargetMemberID: "target-b", State: "failed"})
+	for _, forbidden := range []struct {
+		token, method, suffix string
+		body                  []byte
+	}{
+		{targetTokens["target-a"], http.MethodPost, "/source", record},
+		{runtime.SourceAccessToken, http.MethodGet, "/targets/target-a", nil},
+		{runtime.SourceAccessToken, http.MethodPost, "/targets/target-b/ack", forgedAck},
+		{targetTokens["target-a"], http.MethodGet, "/targets/target-b", nil},
+		{targetTokens["target-a"], http.MethodPost, "/targets/target-b/ack", forgedAck},
+	} {
+		response := callAs(forbidden.token, forbidden.method, forbidden.suffix, forbidden.body)
+		response.Body.Close()
+		if response.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s %s with another role's token status=%d", forbidden.method, forbidden.suffix, response.StatusCode)
+		}
+	}
+	response = callAs("unknown-token", http.MethodPost, "/source", record)
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unknown token status=%d", response.StatusCode)
 	}
 	type targetResult struct {
 		member   string
@@ -77,8 +111,8 @@ func TestDirectMessageHandlerUploadsCiphertextOnceAndWaitsForEveryTargetAck(t *t
 	for _, member := range []string{"target-a", "target-b"} {
 		go func() {
 			request, _ := http.NewRequestWithContext(ctx, http.MethodGet,
-				initial.Runtime.BaseURL+"/targets/"+member, nil)
-			request.Header.Set("Authorization", "Bearer "+initial.Runtime.AccessToken)
+				runtime.BaseURL+"/targets/"+member, nil)
+			request.Header.Set("Authorization", "Bearer "+targetTokens[member])
 			targetStarted <- struct{}{}
 			response, err := client.Do(request)
 			targetResults <- targetResult{member: member, response: response, err: err}
@@ -123,7 +157,7 @@ func TestDirectMessageHandlerUploadsCiphertextOnceAndWaitsForEveryTargetAck(t *t
 			t.Fatalf("target %s did not receive exact ciphertext", result.member)
 		}
 		ack, _ := json.Marshal(contracts.MessageDelivery{TargetMemberID: result.member, State: "delivered"})
-		response = call(http.MethodPost, "/targets/"+result.member+"/ack", ack)
+		response = callAs(targetTokens[result.member], http.MethodPost, "/targets/"+result.member+"/ack", ack)
 		response.Body.Close()
 		if response.StatusCode != http.StatusNoContent {
 			t.Fatalf("target %s ack status=%d", result.member, response.StatusCode)

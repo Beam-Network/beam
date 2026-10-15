@@ -55,6 +55,29 @@ func newMessageStrategy() MessageStrategy {
 	}}
 }
 
+func (s MessageStrategy) ValidateProgress(def genericDefinition[contracts.MessageUnitDetails],
+	attempt genericAttempt[contracts.MessageUnitDetails, contracts.MessageProgressDetails], value domain.Progress) (progress, error) {
+	validated, err := s.strategyBase.ValidateProgress(def, attempt, value)
+	if err != nil {
+		return progress{}, err
+	}
+	var details contracts.MessageProgressDetails
+	if err := json.Unmarshal(validated.Details, &details); err != nil {
+		return progress{}, err
+	}
+	if details.Runtime == nil {
+		return validated, nil
+	}
+	targets := make([]string, 0, len(def.Workload.Targets))
+	for _, target := range def.Workload.Targets {
+		targets = append(targets, target.MemberID)
+	}
+	if err := details.Runtime.Validate(validated.Identity, targets, time.Now().UTC()); err != nil {
+		return progress{}, err
+	}
+	return validated, nil
+}
+
 func newCommandStrategy() CommandStrategy {
 	return CommandStrategy{strategyBase: strategyBase[contracts.CommandUnitDetails, contracts.CommandProgressDetails]{
 		kind: domain.KindRoomCommand, class: domain.ClassJob, dispatchSource: dispatch.SourceRoomCommand,

@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -291,6 +292,9 @@ func serve(arguments []string) {
 		log.Fatal("room.transfer.storage.v2 requires room-storage-addr and room-storage-advertise-url")
 	}
 	if directRoomTransfer || hybridRoomTransfer {
+		if err := validateRoomTransferStartup(*roomTransferAdvertiseURL); err != nil {
+			log.Fatal(err)
+		}
 		transferHandler := roomtransferhandler.NewHandler(roomtransferhandler.Config{ListenAddress: *roomTransferAddr,
 			AdvertiseURL: *roomTransferAdvertiseURL, StorageListenAddress: *roomStorageAddr, StorageAdvertiseURL: *roomStorageAdvertiseURL})
 		if hybridRoomTransfer {
@@ -518,6 +522,17 @@ func validateRoomDirectStartup(capabilities []string, listenAddress, advertiseUR
 	if err := roomworkloadhandlers.ValidateDirectServerConfig(roomworkloadhandlers.DirectServerConfig{
 		ListenAddress: listenAddress, AdvertiseURL: advertiseURL}); err != nil {
 		return fmt.Errorf("direct room messages and streams require room-message-addr and room-message-advertise-url: %w", err)
+	}
+	return nil
+}
+
+func validateRoomTransferStartup(advertiseURL string) error {
+	if advertiseURL == "" {
+		return nil
+	}
+	parsed, err := url.Parse(strings.ReplaceAll(advertiseURL, "{port}", "1"))
+	if err != nil || parsed.Scheme != "http" || parsed.Host == "" {
+		return errors.New("room-transfer-advertise-url must be an http:// URL; the room-transfer listener serves plain HTTP")
 	}
 	return nil
 }

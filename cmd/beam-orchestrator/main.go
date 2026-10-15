@@ -57,7 +57,7 @@ func serve(arguments []string) {
 	wcpAddr := flags.String("wcp-addr", os.Getenv("BEAM_WCP_LISTEN_ADDR"), "TLS WCP listen address; empty disables WCP")
 	wcpCert := flags.String("wcp-tls-cert", os.Getenv("BEAM_WCP_TLS_CERT"), "WCP TLS certificate")
 	wcpKey := flags.String("wcp-tls-key", os.Getenv("BEAM_WCP_TLS_KEY"), "WCP TLS private key")
-	wcpJournal := flags.String("wcp-journal", "data/orchestrator/wcp-events.jsonl", "durable WCP command and result journal")
+	wcpJournal := flags.String("wcp-journal", "data/orchestrator/wcp-events.jsonl", "durable WCP circuit journal")
 	taskState := flags.String("task-state", "data/orchestrator/tasks.json", "durable external task orchestration state")
 	roomTransferState := flags.String("room-transfer-state", "data/orchestrator/room-transfers.json", "durable room transfer orchestration state")
 	roomWorkloadState := flags.String("room-workload-state", "data/orchestrator/room-workloads", "durable generic room workload state directory")
