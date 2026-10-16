@@ -85,7 +85,7 @@ X-Api-Key: b1m_...
 
 ### 2. Task Assignment
 
-The Core Server selects an orchestrator from the **active pool** using PRISM scores as routing weights. Orchestrators in the `qualified` pool are preferred; `qualifying` orchestrators serve as overflow capacity.
+The Core Server allocates tasks within the transfer's qualification pool. Qualified allocations use PRISM scores as routing weights; qualifying allocations use equal-share rotation.
 
 Tasks are dispatched to the orchestrator's control plane connection.
 

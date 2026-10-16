@@ -53,6 +53,8 @@ An orchestrator is ready for room work when:
 
 Advertise a room capability after the worker can run that workload end to end. Accurate capabilities help Beam route work to healthy participant paths.
 
+Room transfers have their own eligibility and [PRISM profile](./prism). Room membership identifies senders and recipients, not worker assignments.
+
 ---
 
 ## Recovery
@@ -61,6 +63,7 @@ Room work supports live recovery across participant paths.
 
 | Workload | Recovery behavior |
 | --- | --- |
+| Room transfer | Retry only failed or unverified chunks for recipients still missing them. |
 | Datagram | Beam records delivered packet progress and continues with fresh traffic. |
 | Message or command | Beam can place the work on another eligible path. |
 | Stream or media | Beam resumes from the latest safe sequence. |
