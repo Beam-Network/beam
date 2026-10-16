@@ -29,12 +29,12 @@ Within each active tier, that tier's bucket is split proportionally by `raw_weig
 
 ```text
 tier_weight_i = raw_weight_i / SUM(raw_weight in tier_i)
-base_weight_i = effective_tier_bucket_i x tier_weight_i
+tier_base_weight_i = effective_tier_bucket_i x tier_weight_i
 ```
 
 If Tier B, C, D, or E is empty or has zero total raw score, its bucket rolls up into Tier A. Zero-raw orchestrators never receive positive weight.
 
-BeamCore applies [sell pressure](#sell-pressure) and redistribution, then weight penalties and fraud-report bonuses to the resulting weight, before final normalization and uint16 encoding.
+BeamCore applies fraud-report bonuses to tier weights and normalizes them, then applies [sell pressure](#sell-pressure), redistribution and weight penalties, before final normalization and uint16 encoding.
 
 ## Example
 
@@ -52,7 +52,7 @@ When raw scores differ, each tier's bucket is divided proportionally instead.
 
 ## Sell pressure
 
-Miners choose when and how much to sell. Beam adjusts emission weights based on sale volume and frequency. In any seven-day window, **one sale** totaling up to **80%** of a hotkey's base emissions causes no reduction from these selling factors. Larger or more frequent sales reduce future emission weights. Base emissions are the upload-based tier allocation before sell pressure, weight penalties and rewards. The unused portion of the 80% threshold does not carry over.
+Miners choose when and how much to sell. Beam adjusts emission weights based on sale volume and frequency. In any seven-day window, **one sale** totaling up to **80%** of a hotkey's base emissions causes no reduction from these selling factors. Larger or more frequent sales reduce future emission weights. Base emissions are the upload-based tier allocation including report bonuses, before sell pressure, redistribution and weight penalties. The unused portion of the 80% threshold does not carry over.
 
 A sale is any SN105 alpha leaving your coldkey's stake on this subnet, on any hotkey, by any transaction: unstaking, a transfer to another coldkey, a swap to another subnet, or any other outflow. Moving stake between hotkeys on this subnet without changing coldkey is not a sale. Everything your coldkey sells or sends away in one block is one sale, whatever its size. Buying or receiving alpha never offsets a sale.
 
@@ -159,7 +159,7 @@ Each award expires independently **7 days (168 hours)** after application by def
 
 Awards follow your hotkey on the same subnet through resets and UID changes. Timers continue during inactivity or qualification.
 
-The bonus affects final emission shares, not tier membership, routing or qualification. Zero uploads or a zero penalty still produce zero weight.
+The bonus affects base emission shares, not tier membership, routing or qualification. Zero uploads or a zero penalty still produce zero weight.
 
 Report them on the [bug desk](./bug-reports.md) with the **Exploit** or **Security** category.
 
@@ -192,8 +192,8 @@ The response includes matching `uids` and `weights` arrays. `workload_scoring` r
 	"current_epoch": 17926,
 	"uids": [12, 47, 52],
 	"weights": [0.5, 0.3, 0.2],
-	"uint16_weights": [32767, 19660, 13107],
-	"formula_version": "tiered_weight_verified_uploaded_mib_x_sell_allowance_x_penalty_x_fraud_report_reward_v6",
+	"uint16_weights": [32768, 19660, 13107],
+	"formula_version": "tiered_weight_verified_uploaded_mib_x_fraud_report_reward_x_sell_allowance_x_penalty_v7",
 	"source": "epoch_summary",
 	"reward_evaluated_at": "2026-10-01T00:00:00.000Z",
 	"all_weights_zero": false
