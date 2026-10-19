@@ -15,24 +15,21 @@ BeamCore first computes a base raw score for every qualified orchestrator with a
 raw_weight_i = verified_uploaded_mib_i
 ```
 
-It then ranks qualified orchestrators by `raw_weight` and splits emissions into five fixed-rank tiers:
+It then ranks qualified orchestrators by `raw_weight` and places them in five fixed-rank tiers, each with a multiplier per MiB:
 
-| Tier  | Rank band      | Nominal emission bucket |
-| ----- | -------------- | ----------------------- |
-| **A** | Top 30         | **50%**                 |
-| **B** | Next 30        | **35%**                 |
-| **C** | Next 30        | **10%**                 |
-| **D** | Next 30        | **4%**                  |
-| **E** | Remaining UIDs | **1%**                  |
-
-Within each active tier, that tier's bucket is split proportionally by `raw_weight`:
+| Tier  | Rank band      | Tier multiplier |
+| ----- | -------------- | --------------- |
+| **A** | Top 30         | **1**           |
+| **B** | Next 30        | **0.8**         |
+| **C** | Next 30        | **0.2**         |
+| **D** | Next 30        | **0.08**        |
+| **E** | Remaining UIDs | **0.0075**      |
 
 ```text
-tier_weight_i = raw_weight_i / SUM(raw_weight in tier_i)
-base_weight_i = effective_tier_bucket_i x tier_weight_i
+base_weight_i = raw_weight_i x tier_multiplier_i / SUM(raw_weight x tier_multiplier)
 ```
 
-If Tier B, C, D, or E is empty or has zero total raw score, its bucket rolls up into Tier A. Positive weight goes to orchestrators with positive raw scores.
+Positive weight goes to orchestrators with positive raw scores.
 
 BeamCore applies and normalizes fraud-report bonuses into the base, then applies [sell pressure](#sell-pressure), redistribution and weight penalties before final normalization and uint16 encoding.
 
@@ -40,15 +37,15 @@ BeamCore applies and normalizes fraud-report bonuses into the base, then applies
 
 Assume 200 qualified orchestrators have equal positive raw scores. The fixed bands and per-UID shares are:
 
-| Tier | Ranks   | Members | Tier bucket | Per-UID share |
-| ---- | ------- | ------- | ----------- | ------------- |
-| A    | 1-30    | 30      | 50%         | 1.6667%       |
-| B    | 31-60   | 30      | 35%         | 1.1667%       |
-| C    | 61-90   | 30      | 10%         | 0.3333%       |
-| D    | 91-120  | 30      | 4%          | 0.1333%       |
-| E    | 121-200 | 80      | 1%          | 0.0125%       |
+| Tier | Ranks   | Members | Tier share | Per-UID share |
+| ---- | ------- | ------- | ---------- | ------------- |
+| A    | 1-30    | 30      | 47.62%     | 1.5873%       |
+| B    | 31-60   | 30      | 38.10%     | 1.2698%       |
+| C    | 61-90   | 30      | 9.52%      | 0.3175%       |
+| D    | 91-120  | 30      | 3.81%      | 0.1270%       |
+| E    | 121-200 | 80      | 0.95%      | 0.0119%       |
 
-Each tier's per-UID share follows its members' relative raw scores.
+Each tier's share follows its members' raw scores.
 
 ## Sell pressure
 
@@ -197,7 +194,7 @@ The response includes matching `uids` and `weights` arrays. `workload_scoring` r
 	"uids": [12, 47, 52],
 	"weights": [0.5, 0.3, 0.2],
 	"uint16_weights": [32768, 19660, 13107],
-	"formula_version": "tiered_weight_verified_uploaded_mib_x_fraud_report_reward_x_accumulated_allowance_x_sell_allowance_x_penalty_v8",
+	"formula_version": "tier_multiplier_verified_uploaded_mib_x_fraud_report_reward_x_accumulated_allowance_x_sell_allowance_x_penalty_v9",
 	"source": "epoch_summary",
 	"reward_evaluated_at": "2026-10-01T00:00:00.000Z",
 	"all_weights_zero": false
