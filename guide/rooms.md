@@ -55,6 +55,8 @@ Advertise a room capability after the worker can run that workload end to end. A
 
 Room transfers have their own eligibility and [PRISM profile](./prism). Room membership identifies senders and recipients, not worker assignments.
 
+A room transfer's initial lanes go to the highest-scored eligible orchestrators, one lane per orchestrator, up to the source member's advertised connection limit, [assignment plan](./api-reference).
+
 ---
 
 ## Recovery
