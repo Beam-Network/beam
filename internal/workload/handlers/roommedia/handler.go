@@ -131,15 +131,20 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 	if err != nil {
 		return domain.Result{}, err
 	}
-	token, err := randomToken(32)
+	publisherToken, err := randomToken(32)
+	if err != nil {
+		return domain.Result{}, err
+	}
+	viewerToken, err := randomToken(32)
 	if err != nil {
 		return domain.Result{}, err
 	}
 	baseURL := strings.TrimRight(shared.baseURL, "/") + "/v1/rooms/" + url.PathEscape(worker.Details.SessionID)
-	runtime := &contracts.MediaRuntime{Capability: contracts.RoomMediaWebRTCCapability,
-		Transport: "worker_sfu", BaseURL: baseURL, AccessToken: token,
+	runtime := &contracts.MediaRuntime{SchemaVersion: contracts.RoomMediaRuntimeSchema,
+		Capability: contracts.RoomMediaWebRTCCapability, Transport: "worker_sfu", BaseURL: baseURL,
+		PublisherAccessToken: publisherToken, ViewerAccessToken: viewerToken,
 		TLSCertificateSHA256: fingerprint, ExpiresAt: worker.Identity.ExpiresAt}
-	if err := shared.add(worker.Details.SessionID, authorize(token, media.Handler(runtime.BaseURL))); err != nil {
+	if err := shared.add(worker.Details.SessionID, authorize(publisherToken, viewerToken, media.Handler(runtime.BaseURL))); err != nil {
 		return domain.Result{}, err
 	}
 	defer shared.remove(worker.Details.SessionID)
@@ -342,7 +347,9 @@ func randomToken(size int) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(value), nil
 }
 
-func authorize(token string, next http.Handler) http.Handler {
+type publisherAccessKey struct{}
+
+func authorize(publisherToken, viewerToken string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodOptions {
 			cors(response)
@@ -350,13 +357,23 @@ func authorize(token string, next http.Handler) http.Handler {
 			return
 		}
 		provided := strings.TrimSpace(strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer "))
-		if len(provided) != len(token) || subtle.ConstantTimeCompare([]byte(provided), []byte(token)) != 1 {
+		publisher := tokenMatches(provided, publisherToken)
+		if !publisher && !tokenMatches(provided, viewerToken) {
 			writeJSON(response, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
 		cors(response)
-		next.ServeHTTP(response, request)
+		next.ServeHTTP(response, request.WithContext(context.WithValue(request.Context(), publisherAccessKey{}, publisher)))
 	})
+}
+
+func tokenMatches(provided, token string) bool {
+	return len(provided) == len(token) && subtle.ConstantTimeCompare([]byte(provided), []byte(token)) == 1
+}
+
+func publisherAccess(request *http.Request) bool {
+	publisher, _ := request.Context().Value(publisherAccessKey{}).(bool)
+	return publisher
 }
 
 func cors(response http.ResponseWriter) {

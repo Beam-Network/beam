@@ -27,6 +27,7 @@ const (
 	RoomMessageRuntimeSchema       = "room-message-runtime/v2"
 	RoomStreamDirectCapability     = "room.stream.direct.v1"
 	RoomStreamRuntimeSchema        = "room-stream-runtime/v1"
+	RoomMediaRuntimeSchema         = "room-media-runtime/v2"
 	RoomStreamProtectionProtocol   = "beam-mls-stream-v1"
 	RoomWorkerHTTPSTransport       = "worker_https"
 )
@@ -890,10 +891,12 @@ const (
 )
 
 type MediaRuntime struct {
+	SchemaVersion        string    `json:"schema_version"`
 	Capability           string    `json:"capability"`
 	Transport            string    `json:"transport"`
 	BaseURL              string    `json:"base_url"`
-	AccessToken          string    `json:"access_token"`
+	PublisherAccessToken string    `json:"publisher_access_token"`
+	ViewerAccessToken    string    `json:"viewer_access_token"`
 	TLSCertificateSHA256 string    `json:"tls_certificate_sha256"`
 	ExpiresAt            time.Time `json:"expires_at"`
 }

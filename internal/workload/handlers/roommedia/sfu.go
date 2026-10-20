@@ -168,6 +168,10 @@ func (s *sfu) whip(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if !publisherAccess(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "publisher token required"})
+		return
+	}
 	offer, raw, err := readOffer(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -467,6 +471,10 @@ func (s *sfu) writeAnswer(w http.ResponseWriter, r *http.Request, participantID,
 func (s *sfu) deleteParticipant(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("participant_id")
 	if id == "publisher" {
+		if !publisherAccess(r) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "publisher token required"})
+			return
+		}
 		s.mu.RLock()
 		pc := s.publisher
 		s.mu.RUnlock()

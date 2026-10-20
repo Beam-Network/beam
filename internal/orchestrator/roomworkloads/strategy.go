@@ -427,8 +427,6 @@ func validateMediaCounters(tracks []contracts.MediaTrackCounters) error {
 	return nil
 }
 
-// validateMediaRuntime accepts only a clean HTTPS runtime with a lowercase
-// SHA-256 certificate pin, so BeamCore never receives a runtime it rejects.
 func validateMediaRuntime(runtime *contracts.MediaRuntime) error {
 	if runtime == nil {
 		return nil
@@ -438,8 +436,11 @@ func validateMediaRuntime(runtime *contracts.MediaRuntime) error {
 	if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" ||
 		endpoint.Fragment != "" || pinErr != nil || len(pin) != sha256.Size ||
 		runtime.TLSCertificateSHA256 != strings.ToLower(runtime.TLSCertificateSHA256) ||
+		runtime.SchemaVersion != contracts.RoomMediaRuntimeSchema ||
 		runtime.Capability != contracts.RoomMediaWebRTCCapability || runtime.Transport != "worker_sfu" ||
-		runtime.AccessToken == "" || runtime.ExpiresAt.IsZero() {
+		!contracts.ValidRoomWorkerAccessToken(runtime.PublisherAccessToken) ||
+		!contracts.ValidRoomWorkerAccessToken(runtime.ViewerAccessToken) ||
+		runtime.PublisherAccessToken == runtime.ViewerAccessToken || runtime.ExpiresAt.IsZero() {
 		return errors.New("invalid room.media Worker runtime")
 	}
 	return nil

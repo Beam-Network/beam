@@ -1,6 +1,8 @@
 package roomworkloads
 
 import (
+	"bytes"
+	"encoding/base64"
 	"strings"
 	"testing"
 	"time"
@@ -9,10 +11,14 @@ import (
 	"github.com/Beam-Network/beam/internal/workload/domain"
 )
 
-func TestMediaRuntimeRequiresCleanHTTPSAndCertificatePin(t *testing.T) {
+func TestMediaRuntimeRequiresCleanHTTPSCertificatePinAndRoleTokens(t *testing.T) {
+	publisherToken := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))
+	viewerToken := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{2}, 32))
 	runtime := func() contracts.MediaRuntime {
-		return contracts.MediaRuntime{Capability: contracts.RoomMediaWebRTCCapability, Transport: "worker_sfu",
-			BaseURL: "https://worker.example.test:9460/v1/rooms/session", AccessToken: "token",
+		return contracts.MediaRuntime{SchemaVersion: contracts.RoomMediaRuntimeSchema,
+			Capability: contracts.RoomMediaWebRTCCapability, Transport: "worker_sfu",
+			BaseURL:              "https://worker.example.test:9460/v1/rooms/session",
+			PublisherAccessToken: publisherToken, ViewerAccessToken: viewerToken,
 			TLSCertificateSHA256: strings.Repeat("ab", 32), ExpiresAt: time.Now().Add(time.Hour).UTC()}
 	}
 	valid := runtime()
@@ -32,6 +38,14 @@ func TestMediaRuntimeRequiresCleanHTTPSAndCertificatePin(t *testing.T) {
 		"short pin":     func(value *contracts.MediaRuntime) { value.TLSCertificateSHA256 = strings.Repeat("ab", 31) },
 		"uppercase pin": func(value *contracts.MediaRuntime) { value.TLSCertificateSHA256 = strings.Repeat("AB", 32) },
 		"non-hex pin":   func(value *contracts.MediaRuntime) { value.TLSCertificateSHA256 = strings.Repeat("zz", 32) },
+		"v1 schema":     func(value *contracts.MediaRuntime) { value.SchemaVersion = "" },
+		"shared token":  func(value *contracts.MediaRuntime) { value.ViewerAccessToken = value.PublisherAccessToken },
+		"missing viewer token": func(value *contracts.MediaRuntime) {
+			value.ViewerAccessToken = ""
+		},
+		"short publisher token": func(value *contracts.MediaRuntime) {
+			value.PublisherAccessToken = "token"
+		},
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

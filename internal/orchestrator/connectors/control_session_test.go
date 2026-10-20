@@ -33,6 +33,7 @@ type fakeRoomControlConnection struct {
 	flushErr         error
 	flushHasDeadline bool
 	requests         []fakeControlRequest
+	reply            func(string) map[string]any
 	publishedMu      sync.Mutex
 	published        []fakeControlRequest
 }
@@ -82,6 +83,9 @@ func (connection *fakeRoomControlConnection) requestWithContext(_ context.Contex
 	if messageType == "capability_update" {
 		response["accepted"] = true
 	}
+	if connection.reply != nil {
+		response = connection.reply(messageType)
+	}
 	encoded, err := msgpack.Marshal(response)
 	if err != nil {
 		return nil, err
@@ -99,6 +103,33 @@ func (fakeControlWCP) Cancel(context.Context, string, string, string) error    {
 func (fakeControlWCP) Connected(string) bool                                   { return true }
 func (fakeControlWCP) UpsertCircuit(context.Context, circuit.Plan) error       { return nil }
 func (fakeControlWCP) RevokeCircuit(context.Context, circuit.Revocation) error { return nil }
+
+func TestRoomResultReplayFinishesOnlyConfirmedOrPermanentlyMissingTransfers(t *testing.T) {
+	for _, test := range []struct {
+		received  bool
+		reason    string
+		wantError bool
+	}{
+		{true, "", false}, {false, "transfer_not_found", false},
+		{false, "verification_pending", true}, {false, "", true},
+		{false, "stale_attempt", true}, {false, "invalid_room_task_result_payload", true},
+	} {
+		connection := &fakeRoomControlConnection{reply: func(string) map[string]any {
+			return map[string]any{"type": "room_task_result_ack", "received": test.received, "reason": test.reason}
+		}}
+		control := newRoomControl(NATSConfig{Environment: "dev", Hotkey: "hotkey-1"}, nil, nil, nil, nil)
+		control.conn = connection
+		err := control.request(context.Background(), "room_task_result", map[string]any{})
+		if (err != nil) != test.wantError {
+			t.Fatalf("received=%v reason=%q error=%v", test.received, test.reason, err)
+		}
+		var terminal *dispatch.TerminalDeliveryError
+		wantTerminal := test.reason == "stale_attempt" || test.reason == "invalid_room_task_result_payload"
+		if errors.As(err, &terminal) != wantTerminal {
+			t.Fatalf("reason=%q terminal disposition=%v, want %v", test.reason, errors.As(err, &terminal), wantTerminal)
+		}
+	}
+}
 
 func TestBeamCoreConnectorRejectsConcurrentRun(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")

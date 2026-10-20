@@ -38,9 +38,13 @@ func boxPartOffer() TaskOffer {
 }
 
 func TestToWorkloadMapsAuthenticatedBoxPart(t *testing.T) {
-	spec, err := ToWorkload(boxPartOffer(), time.Minute, time.Now())
+	now := time.Now()
+	spec, err := ToWorkload(boxPartOffer(), time.Minute, now)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !spec.Lease.OfferExpiresAt.Equal(now.Add(time.Minute)) || !spec.Lease.AssignmentExpiresAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("lease does not end at the Core deadline: %+v", spec.Lease)
 	}
 	var payload contracts.MultipartTransfer
 	if err := json.Unmarshal(spec.Payload, &payload); err != nil {
@@ -152,7 +156,7 @@ func TestToWorkloadMapsSourceDigestOffer(t *testing.T) {
 		t.Fatal(err)
 	}
 	if spec.Kind != domain.KindTransferSourceDigest || spec.WorkloadID != "offer-digest" || spec.AttemptID != "offer-digest" ||
-		!spec.Lease.OfferExpiresAt.Equal(now.Add(40*time.Minute)) {
+		!spec.Lease.OfferExpiresAt.Equal(now.Add(40*time.Minute)) || !spec.Lease.AssignmentExpiresAt.Equal(now.Add(40*time.Minute)) {
 		t.Fatalf("unexpected digest workload: %+v", spec)
 	}
 	if len(spec.RequiredCapabilities) != 1 || spec.RequiredCapabilities[0] != contracts.TransferSourceDigestCapability {

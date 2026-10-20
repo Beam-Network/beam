@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -131,7 +132,7 @@ func TestWorkerMediaRuntimePublishesProtectedSFUEndpoint(t *testing.T) {
 		t.Fatalf("unauthorized status = %d", response.StatusCode)
 	}
 	request, _ = http.NewRequest(http.MethodGet, details.Runtime.BaseURL, nil)
-	request.Header.Set("Authorization", "Bearer "+details.Runtime.AccessToken)
+	request.Header.Set("Authorization", "Bearer "+details.Runtime.ViewerAccessToken)
 	response, err = client.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -139,6 +140,84 @@ func TestWorkerMediaRuntimePublishesProtectedSFUEndpoint(t *testing.T) {
 	response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("authorized status = %d", response.StatusCode)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker media runtime did not stop")
+	}
+}
+
+func TestWorkerMediaTokensAuthorizeByRole(t *testing.T) {
+	spec := mediaSpec(t, "roles", "roles-session")
+	progress := make(chan map[string]string, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = workloadprogress.WithReporter(ctx, func(value map[string]string) {
+		select {
+		case progress <- value:
+		default:
+		}
+	})
+	done := make(chan error, 1)
+	handler := NewHandler(testMediaConfig())
+	t.Cleanup(func() { _ = handler.Close() })
+	go func() {
+		_, executeErr := handler.Execute(ctx, spec)
+		done <- executeErr
+	}()
+	var details contracts.MediaProgressDetails
+	select {
+	case value := <-progress:
+		if err := json.Unmarshal([]byte(value["room_progress_details"]), &details); err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker media runtime did not report readiness")
+	}
+	runtime := details.Runtime
+	if runtime == nil || runtime.SchemaVersion != contracts.RoomMediaRuntimeSchema ||
+		!contracts.ValidRoomWorkerAccessToken(runtime.PublisherAccessToken) ||
+		!contracts.ValidRoomWorkerAccessToken(runtime.ViewerAccessToken) ||
+		runtime.PublisherAccessToken == runtime.ViewerAccessToken {
+		t.Fatalf("runtime = %#v", runtime)
+	}
+	client := pinnedMediaClient(t, runtime.TLSCertificateSHA256)
+	cases := []struct {
+		name, method, path, token string
+		want                      int
+	}{
+		{"no token", http.MethodGet, "", "", http.StatusUnauthorized},
+		{"unknown token", http.MethodPost, "/whip", "unknown", http.StatusUnauthorized},
+		{"viewer reads the session", http.MethodGet, "", runtime.ViewerAccessToken, http.StatusOK},
+		{"viewer cannot publish", http.MethodPost, "/whip", runtime.ViewerAccessToken, http.StatusForbidden},
+		{"viewer cannot remove the publisher", http.MethodDelete, "/participants/publisher", runtime.ViewerAccessToken, http.StatusForbidden},
+		{"viewer cannot remove the publisher through an escaped room", http.MethodDelete, "%2Fother/participants/publisher",
+			runtime.ViewerAccessToken, http.StatusForbidden},
+		{"viewer views", http.MethodPost, "/whep", runtime.ViewerAccessToken, http.StatusBadRequest},
+		{"viewer ends a viewer session", http.MethodDelete, "/participants/viewer-resource", runtime.ViewerAccessToken, http.StatusNoContent},
+		{"publisher reads the session", http.MethodGet, "", runtime.PublisherAccessToken, http.StatusOK},
+		{"publisher publishes", http.MethodPost, "/whip", runtime.PublisherAccessToken, http.StatusBadRequest},
+		{"publisher views", http.MethodPost, "/whep", runtime.PublisherAccessToken, http.StatusBadRequest},
+		{"publisher ends the publisher session", http.MethodDelete, "/participants/publisher", runtime.PublisherAccessToken, http.StatusNoContent},
+	}
+	for _, test := range cases {
+		var body io.Reader
+		if test.method == http.MethodPost {
+			body = strings.NewReader("not an offer")
+		}
+		request, _ := http.NewRequest(test.method, runtime.BaseURL+test.path, body)
+		if test.token != "" {
+			request.Header.Set("Authorization", "Bearer "+test.token)
+		}
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatalf("%s: %v", test.name, err)
+		}
+		response.Body.Close()
+		if response.StatusCode != test.want {
+			t.Errorf("%s: status = %d, want %d", test.name, response.StatusCode, test.want)
+		}
 	}
 	cancel()
 	select {
@@ -183,7 +262,7 @@ func TestWorkerMediaRuntimeMultiplexesConcurrentSessions(t *testing.T) {
 	}
 	for _, runtime := range runtimes {
 		request, _ := http.NewRequest(http.MethodGet, runtime.BaseURL, nil)
-		request.Header.Set("Authorization", "Bearer "+runtime.AccessToken)
+		request.Header.Set("Authorization", "Bearer "+runtime.PublisherAccessToken)
 		response, err := pinnedMediaClient(t, runtime.TLSCertificateSHA256).Do(request)
 		if err != nil {
 			t.Fatal(err)

@@ -675,8 +675,12 @@ func (control *roomControl) request(ctx context.Context, messageType string, pay
 		if err := json.Unmarshal(encodedPayload, &acknowledgement); err != nil {
 			return err
 		}
-		if !acknowledgement.Received {
-			return fmt.Errorf("BeamCore rejected %s: %s", messageType, fallback(acknowledgement.Reason, "not received"))
+		if !acknowledgement.Received && acknowledgement.Reason != "transfer_not_found" {
+			err := fmt.Errorf("BeamCore rejected %s: %s", messageType, fallback(acknowledgement.Reason, "not received"))
+			if acknowledgement.Reason == "stale_attempt" || acknowledgement.Reason == "invalid_room_task_result_payload" {
+				return dispatch.TerminalDelivery(err)
+			}
+			return err
 		}
 	}
 	return nil

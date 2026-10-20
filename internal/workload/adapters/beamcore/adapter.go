@@ -153,7 +153,7 @@ func transferWorkload(offer TaskOffer, assignmentTimeout time.Duration, received
 		Source:               domain.Source{System: "beamcore", Reference: offer.OfferID},
 		RequiredCapabilities: []string{contracts.TransferMultipartCapability},
 		Resources:            MultipartTransferResources(),
-		Lease:                domain.Lease{OfferExpiresAt: receivedAt.Add(assignmentTimeout)},
+		Lease:                domain.Lease{OfferExpiresAt: receivedAt.Add(assignmentTimeout), AssignmentExpiresAt: receivedAt.Add(assignmentTimeout)},
 		Evidence:             domain.EvidencePolicy{ReceiptRequired: true, Commitments: commitments},
 		Payload:              payload,
 	}
@@ -196,7 +196,7 @@ func sourceDigestWorkload(offer TaskOffer, assignmentTimeout time.Duration, rece
 		Source:               domain.Source{System: "beamcore", Reference: offer.OfferID},
 		RequiredCapabilities: []string{contracts.TransferSourceDigestCapability},
 		Resources:            SourceDigestResources(),
-		Lease:                domain.Lease{OfferExpiresAt: receivedAt.Add(assignmentTimeout)},
+		Lease:                domain.Lease{OfferExpiresAt: receivedAt.Add(assignmentTimeout), AssignmentExpiresAt: receivedAt.Add(assignmentTimeout)},
 		Evidence:             domain.EvidencePolicy{ReceiptRequired: true, Commitments: slices.Clone(SourceDigestEvidence)},
 		Payload:              payload,
 	}, nil
