@@ -187,10 +187,14 @@ func (c *framedConn) read() (Envelope, error) {
 	if size == 0 || size > maxFrameBytes {
 		return Envelope{}, errors.New("invalid WCP frame size")
 	}
-	encoded := make([]byte, size)
-	if _, err := io.ReadFull(c.reader, encoded); err != nil {
+	var body bytes.Buffer
+	if _, err := io.CopyN(&body, c.reader, int64(size)); err != nil {
+		if errors.Is(err, io.EOF) {
+			err = io.ErrUnexpectedEOF
+		}
 		return Envelope{}, err
 	}
+	encoded := body.Bytes()
 	var envelope Envelope
 	if err := json.Unmarshal(encoded, &envelope); err != nil {
 		return Envelope{}, err
