@@ -58,10 +58,12 @@ All totals equal: performanceScore = 0.5
 Otherwise: performanceScore = (points − bottom) / (highest − bottom)
 bottom = lowest       if lowest ≤ −3 × √V
          −3 × √V      otherwise (lowest − 1 if lowest ≥ 0)
-PRISM final score = performanceScore × readinessMultiplier × penaltyMultiplier
+PRISM final score = performanceScore × reliabilityMultiplier × readinessMultiplier × penaltyMultiplier
 ```
 
 V is the sum of the squared duel point changes behind the lowest total in the last 24 hours. Only a total that is clearly behind, not just the lowest of a few duels, scores 0.
+
+reliabilityMultiplier is the share of your tasks of that kind of work in the last 24 hours, recovery included, that were verified successful, or 1 without any.
 
 Readiness reflects a healthy control connection and availability. Independently verified integrity, fraud and Sybil penalties can reduce the final score. Keep your worker pool reliable and your control connection healthy to improve your opportunities.
 
