@@ -141,7 +141,7 @@ Chunk boundaries are deterministic given a file size. Each chunk becomes an inde
 
 ## Fault Tolerance
 
-When an active task-offer batch has a **5 second** gap between valid task results for current in-progress tasks, BeamCore reassigns the affected active chunk indices. See **[Recovery Timeouts](./transfer-overseer)** for the recovery windows.
+When an active task-offer batch reaches its deadline or is taken back before it, BeamCore reassigns the affected active chunk indices. See **[Recovery Timeouts](./transfer-overseer)** for the recovery windows.
 
 Recovery follows the same orchestrator flow as initial delivery:
 

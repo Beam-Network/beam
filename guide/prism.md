@@ -26,7 +26,7 @@ Reliability is the assignment's success rate. The higher rate wins, compared bef
 successRate = verified successful original tasks / accountable original assigned tasks
 ```
 
-Neutral exclusions are not accountable tasks. For example, 100% beats 80% regardless of speed. **3/3 and 2/2 both equal 100%**, so their duel is decided by duration. For storage-backed work, completion time comes from verified provider metadata:
+Neutral exclusions are not accountable tasks, including a room path Beam left unanswered. For example, 100% beats 80% regardless of speed. **3/3 and 2/2 both equal 100%**, so their duel is decided by duration. For storage-backed work, completion time comes from verified provider metadata:
 
 ```text
 assignmentDuration = latest verified original-task upload timestamp from provider metadata
@@ -47,7 +47,7 @@ r = clamp((n − 2) / (F − 2), 0, 1)  otherwise
 Stake = round(5 + 10r)              (5 to 15 points)
 ```
 
-Every duel in a wave has the same stake: the winner gains it and the loser loses it, whichever neighbor it faces. A participant alone earns no duel points. If more than half of a wave's participants fail, the wave is neutral.
+A duel won on speed multiplies the stake by 1 + log2(slower duration ÷ faster duration), at most 8. The winner gains the duel's stake and the loser loses it, whichever neighbor it faces. A participant alone earns no duel points. If more than half of a wave's participants fail, the wave is neutral.
 
 ## Reading your score
 
@@ -67,7 +67,7 @@ reliabilityMultiplier is the share of your tasks of that kind of work in the las
 
 Readiness reflects a healthy control connection and availability. Independently verified integrity, fraud and Sybil penalties can reduce the final score. Keep your worker pool reliable and your control connection healthy to improve your opportunities.
 
-Recovery work earns no duel points or qualification progress. Each failed recovery assignment of a standard transfer costs 3 × the stake of that transfer's first wave. A rescue does not erase the failed original assignment. Verified recovery work can still earn work credit. An intervention affects the original task's result once; it adds no second performance penalty.
+Recovery work earns no duel points or qualification progress. Each recovery assignment of a standard transfer that fails or reaches the deadline in its offer costs 3 × the stake of that transfer's first wave. A recovery assignment taken back before that deadline costs no points and counts as failed in reliabilityMultiplier. A rescue does not erase the failed original assignment. Verified recovery work can still earn work credit. An intervention affects the original task's result once; it adds no second performance penalty.
 
 ## Qualification
 
@@ -102,5 +102,7 @@ curl 'https://api.b1m.ai/v1/telemetry/participants/orchestrator/ORCHESTRATOR_ID/
 ```
 
 Read `performancePoints24h`, `performanceScore`, `prismFinalScore`, `pool` and `confidenceScore` for each workload. Participant details include all profiles; lists and history support `workload` filters.
+
+Task evidence includes a `failureReason` for each attempt that ended without a verified result; see [Recovery Timeouts](./transfer-overseer). `/v1/telemetry/transfers/TRANSFER_ID/participants` returns `recoveryChargePoints` on an orchestrator's recovery row of that transfer.
 
 Published telemetry snapshots are available for up to 30 days from their observation time and release one subnet epoch late. Compare records using their snapshot versions and timestamps. See the [API reference](./api-reference) for endpoints and snapshot details.

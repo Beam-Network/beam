@@ -75,6 +75,18 @@ BeamCore pushes a batch of executable worker offers:
 
 Each offer delivers one source range to every listed destination. The orchestrator forwards every delivered offer to a worker as `workload.offer`.
 
+### `task_offer_batch_cancel`
+
+```json
+{
+	"type": "task_offer_batch_cancel",
+	"batch_ids": ["uuid"],
+	"reason": "deadline_expired"
+}
+```
+
+BeamCore stops the listed batches. `reason` is one of the values in [Recovery Timeouts](./transfer-overseer).
+
 ### `room_task_offer_batch`
 
 BeamCore pushes Room transfer work with schema `room-transfer/v1`. Eligible workers advertise `room.transfer`, and orchestrators return `room_task_result`.
