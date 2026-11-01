@@ -20,6 +20,7 @@ The `reason` on `task_offer_batch_cancel` and the `failureReason` on telemetry a
 | Value | Meaning |
 | --- | --- |
 | `deadline_expired` | The batch reached the deadline in its offer. |
+| `progress_timeout` | A room lane stopped making progress. |
 | `no_delivery_cut` | The batch had delivered nothing and was taken back before that deadline. |
 | `tail_cut` | The batch was taken back before that deadline, late in the transfer. |
 | `worker_failed` | The participant failed the work. |

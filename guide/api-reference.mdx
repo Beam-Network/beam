@@ -91,6 +91,7 @@ Find request fields, response examples and errors in the [supported API referenc
 | Published emission epochs | `/v1/telemetry/epochs` |
 | An epoch's orchestrator ranks and shares | `/v1/telemetry/epochs/{epoch}/orchestrators` |
 | Scoped public transfer proof | `/v1/audit/transfers/{id}/assignment-plan` |
+| Scoped public failed attempts and recovery charges | `/v1/audit/transfers/{id}` |
 | Scoped public scoring proof | `/v1/audit/scoring/{epoch}/{kind}/{id}` |
 
 Transfer IDs may be UUIDs or room publication IDs beginning with `btr_pub_`. Lists, histories, task, participant-performance and assignment reads support a `workload` filter. Detail reads return all profiles. Keep the same filters while following `nextCursor`; use the returned snapshot identity to pin a version where supported.

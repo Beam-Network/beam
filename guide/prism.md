@@ -91,7 +91,15 @@ Missing or invalid duration produces an unavailable metric. Aggregates are durat
 
 ## Scores and history through the API
 
-Use a customer organization key with `telemetry:read`:
+Read your own scores without a key, using the `epoch` from the first call and your registered `orchestrator_id`:
+
+```bash
+curl 'https://api.b1m.ai/v1/audit/sell-allowance/HOTKEY'
+
+curl 'https://api.b1m.ai/v1/audit/scoring/EPOCH/orchestrator/ORCHESTRATOR_ID'
+```
+
+For lists and history, use a customer organization key with `telemetry:read`:
 
 ```bash
 curl 'https://api.b1m.ai/v1/telemetry/participants/orchestrator?workload=standard_transfers' \
@@ -101,8 +109,8 @@ curl 'https://api.b1m.ai/v1/telemetry/participants/orchestrator/ORCHESTRATOR_ID/
   -H 'x-api-key: YOUR_CUSTOMER_KEY'
 ```
 
-Read `performancePoints24h`, `performanceScore`, `prismFinalScore`, `pool` and `confidenceScore` for each workload. Participant details include all profiles; lists and history support `workload` filters.
+Read `performancePoints24h`, `performanceScore`, `reliabilityMultiplier`, `prismFinalScore`, `pool` and `confidenceScore` for each workload. Participant details include all profiles; lists and history support `workload` filters.
 
-Task evidence includes a `failureReason` for each attempt that ended without a verified result; see [Recovery Timeouts](./transfer-overseer). `/v1/telemetry/transfers/TRANSFER_ID/participants` returns `recoveryChargePoints` on an orchestrator's recovery row of that transfer.
+Task evidence includes a `failureReason` for each attempt that ended without a verified result; see [Recovery Timeouts](./transfer-overseer). `/v1/telemetry/transfers/TRANSFER_ID/participants` returns `recoveryChargePoints` on an orchestrator's recovery row of that transfer. `/v1/audit/transfers/TRANSFER_ID?participantId=ORCHESTRATOR_ID` returns both without a key.
 
 Published telemetry snapshots are available for up to 30 days from their observation time and release one subnet epoch late. Compare records using their snapshot versions and timestamps. See the [API reference](./api-reference) for endpoints and snapshot details.
