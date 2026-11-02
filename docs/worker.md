@@ -156,8 +156,8 @@ bearer credential arrives in the offer's destination headers, and the worker
 sends it only with that destination's upload requests.
 
 Destinations without a protocol keep the presigned path (`presigned_put`),
-which streams the range with the method derived from the presigned URL; an
-offered `method` applies only to the authenticated protocols.
+which streams the range with `PUT`; an offered `method` applies only to the
+authenticated protocols.
 
 For an authenticated destination the worker:
 

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -216,12 +215,10 @@ func requestsSourceDigestAlgorithms(digest *OfferDigest) bool {
 	return true
 }
 
-// offerDestinationMethod derives a presigned destination's method from its URL and
-// ignores any offered method; authenticated protocols always declare theirs.
 func offerDestinationMethod(destination OfferDestination) (string, error) {
 	switch destination.Protocol {
 	case "", contracts.UploadProtocolPresignedPut:
-		return destinationMethod(destination.URL), nil
+		return http.MethodPut, nil
 	case contracts.UploadProtocolAuthenticatedPart, contracts.UploadProtocolAuthenticatedForm:
 		method := strings.ToUpper(strings.TrimSpace(destination.Method))
 		if method == "" {
@@ -231,17 +228,4 @@ func offerDestinationMethod(destination OfferDestination) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported destination protocol %q", destination.Protocol)
 	}
-}
-
-func destinationMethod(rawURL string) string {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return http.MethodPut
-	}
-	query := parsed.Query()
-	if query.Has("X-Amz-Signature") || query.Has("X-Goog-Signature") ||
-		strings.Contains(parsed.Host, "cloudflarestorage.com") || strings.Contains(parsed.Host, "storage.googleapis.com") {
-		return http.MethodPut
-	}
-	return http.MethodPost
 }

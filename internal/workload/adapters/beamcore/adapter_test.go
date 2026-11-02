@@ -95,8 +95,7 @@ func TestToWorkloadKeepsPresignedMethodsAndRejectsUnknownProtocols(t *testing.T)
 	offer := singleDestinationOffer()
 	offer.Destinations[0].URL = "https://upload.example/part"
 	offer.Destinations[0].Protocol = contracts.UploadProtocolPresignedPut
-	// A presigned destination's method comes from its URL; an offered one is ignored.
-	offer.Destinations[0].Method = http.MethodPut
+	offer.Destinations[0].Method = http.MethodPost
 	spec, err := ToWorkload(offer, time.Minute, time.Now())
 	if err != nil {
 		t.Fatal(err)
@@ -105,7 +104,7 @@ func TestToWorkloadKeepsPresignedMethodsAndRejectsUnknownProtocols(t *testing.T)
 	if err := json.Unmarshal(spec.Payload, &payload); err != nil {
 		t.Fatal(err)
 	}
-	if part := payload.Parts[0]; part.Destination.Method != "POST" || part.Protocol != "" || part.Authenticated() ||
+	if part := payload.Parts[0]; part.Destination.Method != http.MethodPut || part.Protocol != "" || part.Authenticated() ||
 		len(spec.RequiredCapabilities) != 1 || spec.Resources != MultipartTransferResources() {
 		t.Fatalf("presigned destination changed: %+v %+v", part, spec)
 	}
