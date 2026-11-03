@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -22,6 +24,10 @@ import (
 
 const defaultResponseBodyLimit = 64 << 10
 const multipartCheckpointSchema = "beam.transfer.multipart/1"
+const defaultMaxPartAttempts = 3
+const defaultInitialBackoff = 100 * time.Millisecond
+const defaultMaxBackoff = 2 * time.Second
+const defaultMinDeadlineBudget = 1 * time.Second
 
 type multipartCheckpoint struct {
 	Parts map[string]partCheckpoint `json:"parts"`
@@ -38,16 +44,123 @@ type partCheckpoint struct {
 }
 
 type Handler struct {
-	client *http.Client
+	client            *http.Client
+	maxAttempts       int
+	initialBackoff    time.Duration
+	maxBackoff        time.Duration
+	minDeadlineBudget time.Duration
+	randDuration      func(time.Duration) time.Duration
 	// wait pauses between authenticated upload attempts.
 	wait func(context.Context, time.Duration) error
 }
 
-func NewHandler(client *http.Client) *Handler {
+type HandlerOption func(*Handler)
+
+func WithRetryConfig(maxAttempts int, initialBackoff, maxBackoff, minDeadlineBudget time.Duration) HandlerOption {
+	return func(h *Handler) {
+		h.maxAttempts = maxAttempts
+		h.initialBackoff = initialBackoff
+		h.maxBackoff = maxBackoff
+		h.minDeadlineBudget = minDeadlineBudget
+	}
+}
+
+func WithRandDuration(fn func(time.Duration) time.Duration) HandlerOption {
+	return func(h *Handler) {
+		h.randDuration = fn
+	}
+}
+
+func NewHandler(client *http.Client, opts ...HandlerOption) *Handler {
 	if client == nil {
 		client = storagehttp.NewClient(30 * time.Minute)
 	}
-	return &Handler{client: client, wait: sleepContext}
+	h := &Handler{client: client, wait: sleepContext}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
+}
+
+func (h *Handler) maxAttemptsCount() int {
+	if h.maxAttempts > 0 {
+		return h.maxAttempts
+	}
+	return defaultMaxPartAttempts
+}
+
+func (h *Handler) initialBackoffDuration() time.Duration {
+	if h.initialBackoff > 0 {
+		return h.initialBackoff
+	}
+	return defaultInitialBackoff
+}
+
+func (h *Handler) maxBackoffDuration() time.Duration {
+	if h.maxBackoff > 0 {
+		return h.maxBackoff
+	}
+	return defaultMaxBackoff
+}
+
+func (h *Handler) minDeadlineBudgetDuration() time.Duration {
+	if h.minDeadlineBudget > 0 {
+		return h.minDeadlineBudget
+	}
+	return defaultMinDeadlineBudget
+}
+
+func (h *Handler) rand(n time.Duration) time.Duration {
+	if n <= 0 {
+		return 0
+	}
+	var r time.Duration
+	if h != nil && h.randDuration != nil {
+		r = h.randDuration(n)
+	} else {
+		r = defaultRandDuration(n)
+	}
+	if r < 0 {
+		return 0
+	}
+	if r > n {
+		return n
+	}
+	return r
+}
+
+func defaultRandDuration(n time.Duration) time.Duration {
+	if n <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Int63n(int64(n)))
+}
+
+func (h *Handler) calculateBackoff(attempt int, retryAfter time.Duration) time.Duration {
+	maxBackoff := h.maxBackoffDuration()
+	if retryAfter > 0 {
+		if retryAfter > maxBackoff {
+			return maxBackoff
+		}
+		return retryAfter
+	}
+	base := h.initialBackoffDuration()
+	for i := 1; i < attempt; i++ {
+		base *= 2
+		if base >= maxBackoff {
+			base = maxBackoff
+			break
+		}
+	}
+	if base > maxBackoff {
+		base = maxBackoff
+	}
+	if base <= 0 {
+		return 0
+	}
+	half := base / 2
+	jitterRange := base - half
+	return half + h.rand(jitterRange)
 }
 
 func (h *Handler) Kind() domain.Kind { return domain.KindTransferMultipart }
@@ -118,6 +231,14 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 	}
 	outputs := make(map[string]string, len(transfer.Parts)*2)
 	total := resume.Bytes
+
+	remainingParts := 0
+	for _, p := range transfer.Parts {
+		if _, ok := resume.Parts[strconv.Itoa(p.Index)]; !ok {
+			remainingParts++
+		}
+	}
+
 	for _, part := range transfer.Parts {
 		partKey := strconv.Itoa(part.Index)
 		prefix := "part." + partKey + "."
@@ -126,7 +247,7 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 				requests: completed.RequestCount, providerPartID: completed.ProviderPartID}.record(outputs, prefix, part)
 			continue
 		}
-		partResult, err := h.executePart(ctx, part)
+		partResult, err := h.executePart(ctx, part, remainingParts)
 		if err != nil {
 			if part.Authenticated() {
 				partResult.record(outputs, prefix, part)
@@ -135,6 +256,7 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 			}
 			return domain.Result{BytesProcessed: total, Outputs: outputs}, fmt.Errorf("part %d: %w", part.Index, err)
 		}
+		remainingParts--
 		total += partResult.bytes
 		partResult.record(outputs, prefix, part)
 		resume.Bytes = total
@@ -179,13 +301,112 @@ func (r partResult) record(outputs map[string]string, prefix string, part contra
 	}
 }
 
-func (h *Handler) executePart(ctx context.Context, part contracts.TransferPart) (partResult, error) {
+type presignedAttemptResult struct {
+	result     partResult
+	retryable  bool
+	retryAfter time.Duration
+	err        error
+}
+
+func (h *Handler) executePart(ctx context.Context, part contracts.TransferPart, remainingParts int) (partResult, error) {
 	if part.Authenticated() {
 		return h.executeAuthenticatedPart(ctx, part)
 	}
-	sourceResponse, err := h.openSource(ctx, part)
+
+	maxAttempts := h.maxAttemptsCount()
+	minBudget := h.minDeadlineBudgetDuration()
+	if remainingParts <= 0 {
+		remainingParts = 1
+	}
+	budgetNeeded := time.Duration(remainingParts) * minBudget
+
+	var lastErr error
+	var nextRetryAfter time.Duration
+	var lastBytes int64
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		// Context cancellation check
+		if err := ctx.Err(); err != nil {
+			if lastErr != nil {
+				return partResult{bytes: lastBytes}, fmt.Errorf("%w: %v", err, lastErr)
+			}
+			return partResult{bytes: lastBytes}, err
+		}
+
+		// Deadline budget check
+		if deadline, ok := ctx.Deadline(); ok {
+			remaining := time.Until(deadline)
+			if remaining < budgetNeeded {
+				if lastErr != nil {
+					return partResult{bytes: lastBytes}, fmt.Errorf("insufficient deadline budget (%v remaining < %v required): %w", remaining, budgetNeeded, lastErr)
+				}
+				return partResult{bytes: lastBytes}, fmt.Errorf("insufficient deadline budget (%v remaining < %v required)", remaining, budgetNeeded)
+			}
+		}
+
+		// Backoff delay for retries
+		if attempt > 0 {
+			delay := h.calculateBackoff(attempt, nextRetryAfter)
+			nextRetryAfter = 0
+
+			if deadline, ok := ctx.Deadline(); ok {
+				if time.Until(deadline)-delay < budgetNeeded {
+					return partResult{bytes: lastBytes}, fmt.Errorf("insufficient deadline budget for retry backoff: %w", lastErr)
+				}
+			}
+
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return partResult{bytes: lastBytes}, ctx.Err()
+			case <-timer.C:
+			}
+		}
+
+		// Attempt execution
+		att := h.transferPresignedAttempt(ctx, part)
+		if att.err == nil {
+			return att.result, nil
+		}
+
+		lastErr = att.err
+		lastBytes = att.result.bytes
+		if !att.retryable || attempt == maxAttempts-1 {
+			return att.result, att.err
+		}
+		nextRetryAfter = att.retryAfter
+	}
+
+	return partResult{bytes: lastBytes}, lastErr
+}
+
+func (h *Handler) transferPresignedAttempt(ctx context.Context, part contracts.TransferPart) presignedAttemptResult {
+	sourceRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, part.Source.URL, nil)
 	if err != nil {
-		return partResult{}, err
+		return presignedAttemptResult{err: fmt.Errorf("create source request: %w", err), retryable: false}
+	}
+	copyHeaders(sourceRequest.Header, part.Source.Headers)
+	if part.SourceRange && part.Length > 0 {
+		sourceRequest.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", part.Offset, part.Offset+part.Length-1))
+	}
+	sourceResponse, err := h.client.Do(sourceRequest)
+	if err != nil {
+		return presignedAttemptResult{err: fmt.Errorf("fetch source: %w", err), retryable: isTransientNetworkError(err)}
+	}
+	if sourceResponse.StatusCode != http.StatusOK && sourceResponse.StatusCode != http.StatusPartialContent {
+		defer sourceResponse.Body.Close()
+		retryable := isRetryableHTTPStatus(sourceResponse.StatusCode)
+		retryAfter := parseRetryAfter(sourceResponse.Header, h.maxBackoffDuration())
+		return presignedAttemptResult{
+			err:        responseError("source", sourceResponse),
+			retryable:  retryable,
+			retryAfter: retryAfter,
+		}
+	}
+	if part.SourceRange && part.Length > 0 && sourceResponse.StatusCode != http.StatusPartialContent {
+		_ = sourceResponse.Body.Close()
+		return presignedAttemptResult{err: fmt.Errorf("source ignored required byte range: HTTP %d", sourceResponse.StatusCode), retryable: false}
 	}
 	defer sourceResponse.Body.Close()
 
@@ -201,7 +422,7 @@ func (h *Handler) executePart(ctx context.Context, part contracts.TransferPart) 
 	}
 	destinationRequest, err := http.NewRequestWithContext(ctx, destinationMethod, part.Destination.URL, counter)
 	if err != nil {
-		return partResult{}, fmt.Errorf("create destination request: %w", err)
+		return presignedAttemptResult{err: fmt.Errorf("create destination request: %w", err), retryable: false}
 	}
 	copyHeaders(destinationRequest.Header, part.Destination.Headers)
 	if destinationRequest.Header.Get("Content-Type") == "" {
@@ -214,24 +435,98 @@ func (h *Handler) executePart(ctx context.Context, part contracts.TransferPart) 
 	}
 	destinationResponse, err := h.client.Do(destinationRequest)
 	if err != nil {
-		return partResult{bytes: counter.count}, fmt.Errorf("write destination: %w", err)
+		return presignedAttemptResult{
+			result:    partResult{bytes: counter.count},
+			err:       fmt.Errorf("write destination: %w", err),
+			retryable: isTransientNetworkError(err),
+		}
 	}
 	defer destinationResponse.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(destinationResponse.Body, defaultResponseBodyLimit))
 	if destinationResponse.StatusCode < 200 || destinationResponse.StatusCode >= 300 {
-		return partResult{bytes: counter.count}, fmt.Errorf("destination returned HTTP %d", destinationResponse.StatusCode)
+		retryable := isRetryableHTTPStatus(destinationResponse.StatusCode)
+		retryAfter := parseRetryAfter(destinationResponse.Header, h.maxBackoffDuration())
+		return presignedAttemptResult{
+			result:     partResult{bytes: counter.count},
+			err:        fmt.Errorf("destination returned HTTP %d", destinationResponse.StatusCode),
+			retryable:  retryable,
+			retryAfter: retryAfter,
+		}
 	}
 	if part.Length > 0 && counter.count != part.Length {
-		return partResult{bytes: counter.count}, fmt.Errorf("source returned %d bytes, expected %d", counter.count, part.Length)
+		return presignedAttemptResult{
+			result:    partResult{bytes: counter.count},
+			err:       fmt.Errorf("source returned %d bytes, expected %d", counter.count, part.Length),
+			retryable: false,
+		}
 	}
 	digest := hex.EncodeToString(hash.Sum(nil))
 	if part.ExpectedSHA256 != "" && !strings.EqualFold(digest, part.ExpectedSHA256) {
-		return partResult{bytes: counter.count, sha256: digest}, fmt.Errorf("SHA-256 mismatch: got %s", digest)
+		return presignedAttemptResult{
+			result:    partResult{bytes: counter.count, sha256: digest},
+			err:       fmt.Errorf("SHA-256 mismatch: got %s", digest),
+			retryable: false,
+		}
 	}
-	return partResult{
-		bytes: counter.count, sha256: digest,
-		etag: strings.Trim(destinationResponse.Header.Get("ETag"), `"`),
-	}, nil
+	return presignedAttemptResult{
+		result: partResult{
+			bytes:  counter.count,
+			sha256: digest,
+			etag:   strings.Trim(destinationResponse.Header.Get("ETag"), `"`),
+		},
+		retryable: false,
+		err:       nil,
+	}
+}
+
+func isRetryableHTTPStatus(code int) bool {
+	return code == http.StatusTooManyRequests ||
+		code == http.StatusInternalServerError ||
+		code == http.StatusBadGateway ||
+		code == http.StatusServiceUnavailable ||
+		code == http.StatusGatewayTimeout
+}
+
+func isTransientNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	return false
+}
+
+func parseRetryAfter(header http.Header, maxDelay time.Duration) time.Duration {
+	val := strings.TrimSpace(header.Get("Retry-After"))
+	if val == "" {
+		return 0
+	}
+	if secs, err := strconv.ParseUint(val, 10, 32); err == nil {
+		d := time.Duration(secs) * time.Second
+		if d > maxDelay {
+			return maxDelay
+		}
+		return d
+	}
+	if t, err := http.ParseTime(val); err == nil {
+		d := time.Until(t)
+		if d < 0 {
+			return 0
+		}
+		if d > maxDelay {
+			return maxDelay
+		}
+		return d
+	}
+	return 0
 }
 
 // openSource returns a successful source response; the caller closes its body.
