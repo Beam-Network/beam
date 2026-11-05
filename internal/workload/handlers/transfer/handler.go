@@ -23,6 +23,8 @@ import (
 const defaultResponseBodyLimit = 64 << 10
 const multipartCheckpointSchema = "beam.transfer.multipart/1"
 
+const presignedAttempts = 3
+
 type multipartCheckpoint struct {
 	Parts map[string]partCheckpoint `json:"parts"`
 	Bytes int64                     `json:"bytes"`
@@ -39,7 +41,7 @@ type partCheckpoint struct {
 
 type Handler struct {
 	client *http.Client
-	// wait pauses between authenticated upload attempts.
+	// wait pauses between upload attempts.
 	wait func(context.Context, time.Duration) error
 }
 
@@ -183,6 +185,23 @@ func (h *Handler) executePart(ctx context.Context, part contracts.TransferPart) 
 	if part.Authenticated() {
 		return h.executeAuthenticatedPart(ctx, part)
 	}
+	for attempt := 1; ; attempt++ {
+		result, err := h.executePresignedPart(ctx, part)
+		var answer *statusError
+		if err == nil || attempt >= presignedAttempts || !errors.As(err, &answer) || !answer.transient() {
+			return result, err
+		}
+		delay := time.Duration(attempt) * uploadRetryBackoff
+		if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= delay {
+			return result, err
+		}
+		if h.wait(ctx, delay) != nil {
+			return result, err
+		}
+	}
+}
+
+func (h *Handler) executePresignedPart(ctx context.Context, part contracts.TransferPart) (partResult, error) {
 	sourceResponse, err := h.openSource(ctx, part)
 	if err != nil {
 		return partResult{}, err
@@ -219,7 +238,7 @@ func (h *Handler) executePart(ctx context.Context, part contracts.TransferPart) 
 	defer destinationResponse.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(destinationResponse.Body, defaultResponseBodyLimit))
 	if destinationResponse.StatusCode < 200 || destinationResponse.StatusCode >= 300 {
-		return partResult{bytes: counter.count}, fmt.Errorf("destination returned HTTP %d", destinationResponse.StatusCode)
+		return partResult{bytes: counter.count}, &statusError{label: "destination", status: destinationResponse.StatusCode}
 	}
 	if part.Length > 0 && counter.count != part.Length {
 		return partResult{bytes: counter.count}, fmt.Errorf("source returned %d bytes, expected %d", counter.count, part.Length)
@@ -269,11 +288,24 @@ func validateEndpoint(label string, endpoint contracts.HTTPEndpoint) error {
 
 func responseError(label string, response *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(response.Body, defaultResponseBodyLimit))
-	message := strings.TrimSpace(string(body))
-	if message == "" {
-		return fmt.Errorf("%s returned HTTP %d", label, response.StatusCode)
+	return &statusError{label: label, status: response.StatusCode, message: strings.TrimSpace(string(body))}
+}
+
+type statusError struct {
+	label   string
+	status  int
+	message string
+}
+
+func (e *statusError) Error() string {
+	if e.message == "" {
+		return fmt.Sprintf("%s returned HTTP %d", e.label, e.status)
 	}
-	return fmt.Errorf("%s returned HTTP %d: %s", label, response.StatusCode, message)
+	return fmt.Sprintf("%s returned HTTP %d: %s", e.label, e.status, e.message)
+}
+
+func (e *statusError) transient() bool {
+	return e.status == http.StatusRequestTimeout || e.status == http.StatusTooManyRequests || e.status >= 500
 }
 
 func copyHeaders(destination http.Header, source map[string]string) {

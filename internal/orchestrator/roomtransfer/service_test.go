@@ -181,6 +181,37 @@ func TestServiceReportsWorkerRejectionAsTerminalRecovery(t *testing.T) {
 	}
 }
 
+func TestDeliverCheckpointAfterTerminalResultIsNotSubmitted(t *testing.T) {
+	now := time.Now().UTC()
+	store := NewMemoryStore()
+	service, err := NewService(Config{Now: func() time.Time { return now }}, testDispatcher(t, now, &testControl{}), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.RegisterProvisioner(newTestProvisioner(t, now))
+	sink := &testRoomSink{}
+	service.RegisterSink(sink)
+	batch := testBatch(t, now)
+	batch.Lanes = batch.Lanes[:1]
+	if err := service.Submit(context.Background(), batch); err != nil {
+		t.Fatal(err)
+	}
+	workloadID, attemptID := workloadIdentity(batch.BatchID, batch.Lanes[0].LaneID, batch.SnapshotVersion, batch.Lanes[0].Attempt)
+	if err := service.DeliverResult(context.Background(), dispatch.Record{WorkloadKey: workloadID + "/" + attemptID},
+		domain.Result{WorkloadID: workloadID, AttemptID: attemptID, State: domain.StateCompleted, Outputs: map[string]string{}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DeliverCheckpoint(context.Background(), domain.Checkpoint{WorkloadID: workloadID, AttemptID: attemptID,
+		Kind: domain.KindRoomTransfer, Schema: contracts.RoomTransferSchemaVersion, Sequence: 1, Payload: []byte(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.results) != 1 {
+		t.Fatalf("submitted %d room results after the terminal result", len(sink.results))
+	}
+}
+
 func TestServiceReportsFullyUnprovisionedLaneAsTerminalRecovery(t *testing.T) {
 	now := time.Now().UTC()
 	control := &testControl{}

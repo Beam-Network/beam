@@ -275,6 +275,9 @@ func (s *Service) DeliverCheckpoint(ctx context.Context, checkpoint domain.Check
 		return errors.New("room transfer batch disappeared")
 	}
 	lane := record.Lanes[laneID]
+	if lane.State != LaneDispatched {
+		return nil
+	}
 	offer, ok := findOfferLane(record.Batch, laneID)
 	if !ok {
 		return errors.New("room transfer lane disappeared")

@@ -40,7 +40,7 @@ const (
 	classSourceChanged             = "room_source_changed"
 )
 
-const authenticatedRetryBackoff = 250 * time.Millisecond
+const uploadRetryBackoff = 250 * time.Millisecond
 
 // uploadProfile holds what a provider defines beyond the offer: the receipt field
 // that identifies the stored part and the error codes that reject the digest.
@@ -249,7 +249,7 @@ func (h *Handler) uploadAuthenticated(ctx context.Context, client *http.Client, 
 		}
 		delay := failure.delay
 		if delay <= 0 {
-			delay = time.Duration(attempt) * authenticatedRetryBackoff
+			delay = time.Duration(attempt) * uploadRetryBackoff
 		}
 		// A wait that outlasts the lease cannot lead to an accepted attempt.
 		if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= delay {
