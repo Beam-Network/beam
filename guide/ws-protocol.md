@@ -63,17 +63,18 @@ BeamCore pushes a batch of executable worker offers:
 			"source": {
 				"url": "https://source-presigned-url",
 				"headers": { "Range": "bytes=0-41943039" },
-				"chunk_size": 41943040
+				"chunk_size": 41943040,
+				"region": "enam"
 			},
 			"destinations": [
-				{ "url": "https://dest-presigned-url", "etag_required": true }
+				{ "url": "https://dest-presigned-url", "etag_required": true, "region": null }
 			]
 		}
 	]
 }
 ```
 
-Each offer delivers one source range to every listed destination. The orchestrator forwards every delivered offer to a worker as `workload.offer`.
+Each offer delivers one source range to every listed destination. The source and every destination carry `region`: the storage's broad region (`wnam`, `enam`, `sam`, `weur`, `eeur`, `apac`, `oc`, `afr` or `me`), or `null` when unknown. The orchestrator forwards every delivered offer to a worker as `workload.offer`.
 
 ### `task_offer_batch_cancel`
 
@@ -89,7 +90,7 @@ BeamCore stops the listed batches. `reason` is one of the values in [Recovery Ti
 
 ### `room_task_offer_batch`
 
-BeamCore pushes Room transfer work with schema `room-transfer/v1`. Eligible workers advertise `room.transfer`, and orchestrators return `room_task_result`.
+BeamCore pushes Room transfer work with schema `room-transfer/v1`. Its `source` and each target carry `region`, the member's broad region, or `null` when unknown. Eligible workers advertise `room.transfer`, and orchestrators return `room_task_result`.
 
 ### `task_offer_result`
 

@@ -73,19 +73,20 @@ BeamCore sends executable normal-transfer offers directly:
 			"source": {
 				"url": "https://source-presigned-url",
 				"headers": { "Range": "bytes=0-41943039" },
-				"chunk_size": 41943040
+				"chunk_size": 41943040,
+				"region": "enam"
 			},
 			"destinations": [
-				{ "url": "https://dest-presigned-url", "etag_required": true }
+				{ "url": "https://dest-presigned-url", "etag_required": true, "region": null }
 			]
 		}
 	]
 }
 ```
 
-Each offer delivers one source range to every listed destination; offers with several destinations go only to orchestrators that advertise `transfer.multipart.fanout.v1`. The orchestrator keeps worker assignment local and forwards every offer to a connected worker as `workload.offer`. Local validation or execution failures are reported as failed destinations in `task_offer_result`.
+Each offer delivers one source range to every listed destination; offers with several destinations go only to orchestrators that advertise `transfer.multipart.fanout.v1`. The source and every destination carry `region`: the storage's broad region (`wnam`, `enam`, `sam`, `weur`, `eeur`, `apac`, `oc`, `afr` or `me`), or `null` when unknown. The orchestrator keeps worker assignment local and forwards every offer to a connected worker as `workload.offer`. Local validation or execution failures are reported as failed destinations in `task_offer_result`.
 
-Room transfer offers arrive as `room_task_offer_batch` with schema `room-transfer/v1`. The orchestrator turns each eligible lane into a `room.transfer` workload.
+Room transfer offers arrive as `room_task_offer_batch` with schema `room-transfer/v1`; their `source` and each target carry `region` the same way. The orchestrator turns each eligible lane into a `room.transfer` workload.
 
 ## Capability Advertisement
 

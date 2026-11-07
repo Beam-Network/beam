@@ -82,6 +82,7 @@ type RoomTaskOfferBatch struct {
 	FileSizeBytes   int64                  `json:"file_size_bytes"`
 	ChunkSizeBytes  int64                  `json:"chunk_size_bytes"`
 	ChunkCount      int64                  `json:"chunk_count"`
+	Source          *RoomOfferSource       `json:"source,omitempty"`
 	Targets         []RoomTransferTarget   `json:"targets"`
 	Lanes           []RoomSourceLane       `json:"lanes"`
 	OfferExpiresAt  time.Time              `json:"offer_expires_at"`
@@ -108,10 +109,15 @@ func (cancel RoomTaskCancel) Validate() error {
 	return nil
 }
 
+type RoomOfferSource struct {
+	Region *string `json:"region,omitempty"`
+}
+
 type RoomTransferTarget struct {
-	Kind             string `json:"kind,omitempty"`
-	MemberID         string `json:"member_id"`
-	ReceiptPublicKey string `json:"receipt_public_key"`
+	Kind             string  `json:"kind,omitempty"`
+	MemberID         string  `json:"member_id"`
+	ReceiptPublicKey string  `json:"receipt_public_key"`
+	Region           *string `json:"region,omitempty"`
 }
 
 type RoomSourceLane struct {

@@ -42,6 +42,7 @@ type OfferSource struct {
 	Headers   map[string]string `json:"headers,omitempty"`
 	ChunkSize int64             `json:"chunk_size"`
 	Size      int64             `json:"size,omitempty"`
+	Region    *string           `json:"region,omitempty"`
 }
 
 // OfferDigest names the digests a source_digest offer requests.
@@ -62,6 +63,7 @@ type OfferDestination struct {
 	Receipt      *contracts.UploadReceipt `json:"receipt,omitempty"`
 	MaxAttempts  int                      `json:"max_attempts,omitempty"`
 	Form         *contracts.UploadForm    `json:"form,omitempty"`
+	Region       *string                  `json:"region,omitempty"`
 }
 
 func MultipartTransferResources() domain.Resources {

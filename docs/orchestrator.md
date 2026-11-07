@@ -98,7 +98,9 @@ curl -X POST http://127.0.0.1:8781/v1/orchestrator/memberships \
 
 `transfer.multipart` handles normal transfer chunks. A transfer offer is one
 source range delivered to every listed destination; `offer_id` is its only
-identity.
+identity. Every offer source and destination carries `region`, the storage's
+broad region (`wnam`, `enam`, `sam`, `weur`, `eeur`, `apac`, `oc`, `afr` or `me`), or `null` when
+unknown.
 
 A destination with `protocol` `authenticated_part_v1` or
 `authenticated_form_v1` (Box is the first `profile`) declares its `method`,
@@ -123,7 +125,9 @@ A transfer offer has no `kind`. A `task_offer_batch` with an invalid offer, an
 unknown destination `protocol` or any other offer `kind` is rejected before any
 of its offers is dispatched.
 
-`room.transfer` identifies Room data-transfer lanes.
+`room.transfer` identifies Room data-transfer lanes. A `room_task_offer_batch`
+carries `source.region` and each target's `region`, the member's broad region,
+or `null` when unknown.
 For current Room transfers, the orchestrator advertises eligibility only when
 connected workers also expose `room.transfer.direct.v1` and
 `room.transfer.e2ee.v2`.
