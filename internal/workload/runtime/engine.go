@@ -17,10 +17,11 @@ import (
 )
 
 var (
-	ErrWrongWorker       = errors.New("workload is assigned to another worker")
-	ErrInvalidState      = errors.New("invalid workload state")
-	ErrStalePlan         = errors.New("stale workload plan")
-	ErrCapabilityMissing = errors.New("required capability is unavailable")
+	ErrWrongWorker               = errors.New("workload is assigned to another worker")
+	ErrInvalidState              = errors.New("invalid workload state")
+	ErrStalePlan                 = errors.New("stale workload plan")
+	ErrCapabilityMissing         = errors.New("required capability is unavailable")
+	ErrLeaseExtensionUnsupported = errors.New("workload handler does not follow lease extensions")
 )
 
 type Decision struct {
@@ -40,6 +41,7 @@ type Engine struct {
 
 	mu          sync.Mutex
 	cancels     map[string]context.CancelFunc
+	leases      map[string]*leaseContext
 	results     chan domain.Result
 	resultSaved chan struct{}
 	progress    chan domain.Progress
@@ -63,7 +65,8 @@ func NewEngine(workerID string, capabilities []string, registry *Registry, gover
 	return &Engine{
 		workerID: workerID, capabilities: capabilitySet, registry: registry,
 		governor: governor, store: store, now: time.Now,
-		cancels: make(map[string]context.CancelFunc), results: make(chan domain.Result, 64), resultSaved: make(chan struct{}, 1),
+		cancels: make(map[string]context.CancelFunc), leases: make(map[string]*leaseContext),
+		results: make(chan domain.Result, 64), resultSaved: make(chan struct{}, 1),
 		progress: make(chan domain.Progress, 128), checkpoints: make(chan domain.Checkpoint, 128),
 	}, nil
 }
@@ -147,9 +150,10 @@ func (e *Engine) Recover(parent context.Context) error {
 			if err := e.governor.Commit(record.Spec.Key()); err != nil {
 				return err
 			}
-			ctx, cancel := context.WithDeadline(context.WithoutCancel(parent), record.Spec.Lease.AssignmentExpiresAt)
+			ctx, cancel := newLeaseContext(context.WithoutCancel(parent), record.Spec.Lease.AssignmentExpiresAt)
 			e.mu.Lock()
 			e.cancels[record.Spec.Key()] = cancel
+			e.leases[record.Spec.Key()] = ctx
 			e.mu.Unlock()
 			go e.execute(ctx, record)
 		}
@@ -239,11 +243,58 @@ func (e *Engine) Commit(parent context.Context, commit domain.Commit) error {
 
 	// The workload outlives the transport request that delivered the commit.
 	// Preserve its values while detaching cancellation from that request.
-	ctx, cancel := context.WithDeadline(context.WithoutCancel(parent), commit.AssignmentExpiresAt)
+	ctx, cancel := newLeaseContext(context.WithoutCancel(parent), commit.AssignmentExpiresAt)
 	e.mu.Lock()
 	e.cancels[commit.Key()] = cancel
+	e.leases[commit.Key()] = ctx
 	e.mu.Unlock()
 	go e.execute(ctx, record)
+	return nil
+}
+
+func (e *Engine) Extend(extension domain.Extension) error {
+	if err := extension.Validate(e.now()); err != nil {
+		return err
+	}
+	key := extension.Key()
+	e.mu.Lock()
+	lease := e.leases[key]
+	e.mu.Unlock()
+	if lease == nil {
+		return fmt.Errorf("%w: workload is not running", ErrInvalidState)
+	}
+	record, err := e.store.Get(key)
+	if err != nil {
+		return err
+	}
+	if record.State != domain.StateCommitted && record.State != domain.StateStarting && record.State != domain.StateRunning {
+		return fmt.Errorf("%w: cannot extend from %s", ErrInvalidState, record.State)
+	}
+	if !extension.AssignmentExpiresAt.After(record.Spec.Lease.AssignmentExpiresAt) {
+		return nil
+	}
+	handler, err := e.registry.Handler(record.Spec.Kind)
+	if err != nil {
+		return err
+	}
+	extender, ok := handler.(LeaseExtender)
+	if !ok {
+		return ErrLeaseExtensionUnsupported
+	}
+	spec, err := extender.ExtendLease(record.Spec, extension)
+	if err != nil {
+		return err
+	}
+	if !spec.Lease.AssignmentExpiresAt.After(record.Spec.Lease.AssignmentExpiresAt) {
+		return nil
+	}
+	record.Spec, record.UpdatedAt = spec, e.now()
+	if err := e.store.Save(record); err != nil {
+		return err
+	}
+	if !lease.extend(spec.Lease.AssignmentExpiresAt) {
+		return fmt.Errorf("%w: workload lease already ended", ErrInvalidState)
+	}
 	return nil
 }
 
@@ -280,6 +331,7 @@ func (e *Engine) execute(ctx context.Context, record Record) {
 			cancel()
 		}
 		delete(e.cancels, key)
+		delete(e.leases, key)
 		e.mu.Unlock()
 	}()
 
@@ -307,12 +359,15 @@ func (e *Engine) execute(ctx context.Context, record Record) {
 	result.AttemptID = record.Spec.AttemptID
 	result.StartedAt = started
 	result.CompletedAt = e.now()
+	deadline := record.Spec.Lease.AssignmentExpiresAt
+	if extended, ok := ctx.Deadline(); ok && extended.After(deadline) {
+		deadline = extended
+	}
 	if err != nil {
 		if errors.Is(ctx.Err(), context.Canceled) {
 			result.State = domain.StateCancelled
 			result.ErrorCode = "cancelled"
-		} else if errors.Is(ctx.Err(), context.DeadlineExceeded) ||
-			(!record.Spec.Lease.AssignmentExpiresAt.IsZero() && !result.CompletedAt.Before(record.Spec.Lease.AssignmentExpiresAt)) {
+		} else if errors.Is(ctx.Err(), context.DeadlineExceeded) || (!deadline.IsZero() && !result.CompletedAt.Before(deadline)) {
 			result.State = domain.StateExpired
 			result.ErrorCode = "lease_expired"
 		} else {
@@ -326,6 +381,7 @@ func (e *Engine) execute(ctx context.Context, record Record) {
 	record.State = result.State
 	record.Result = &result
 	if current, getErr := e.store.Get(key); getErr == nil {
+		record.Spec = current.Spec
 		record.Progress = current.Progress
 		record.Checkpoint = current.Checkpoint
 	}

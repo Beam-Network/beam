@@ -365,6 +365,14 @@ func (c *Client) readLoop(ctx context.Context, framed *framedConn, initialSequen
 			if err := c.config.Engine.Cancel(cancel.WorkloadID + "/" + cancel.AttemptID); err != nil {
 				_, _ = framed.write(TypeError, envelope.MessageID, ErrorMessage{Code: "cancel_rejected", Message: err.Error()}, lastSequence)
 			}
+		case TypeExtend:
+			extension, err := decodePayload[domain.Extension](envelope)
+			if err != nil {
+				return err
+			}
+			if err := c.config.Engine.Extend(extension); err != nil {
+				_, _ = framed.write(TypeError, envelope.MessageID, ErrorMessage{Code: "extend_rejected", Message: err.Error()}, lastSequence)
+			}
 		case TypeDrain:
 			c.draining.Store(true)
 		case TypeReceiptAck:

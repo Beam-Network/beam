@@ -17,6 +17,10 @@ type Handler interface {
 	Execute(context.Context, domain.Spec) (domain.Result, error)
 }
 
+type LeaseExtender interface {
+	ExtendLease(domain.Spec, domain.Extension) (domain.Spec, error)
+}
+
 type Registry struct {
 	mu       sync.RWMutex
 	handlers map[domain.Kind]Handler

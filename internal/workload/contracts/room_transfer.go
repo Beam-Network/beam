@@ -14,18 +14,19 @@ import (
 )
 
 const (
-	RoomTransferSchemaVersion         = "room-transfer/v1"
-	TransferMultipartCapability       = "transfer.multipart"
-	TransferMultipartFanoutCapability = "transfer.multipart.fanout.v1"
-	RoomTransferCapability            = "room.transfer"
-	RoomTransferDirectCapability      = "room.transfer.direct.v1"
-	RoomTransferE2EECapability        = "room.transfer.e2ee.v2"
-	RoomTransferProtectionScheme      = "btr.object.chunk.aead.v1"
-	RoomStorageSchemaVersion          = "room-storage-transfer/v2"
-	RoomStorageCapability             = "room.transfer.storage.v2"
-	RoomStorageProtectionScheme       = "btr.object.transport.tls.v1"
-	TunnelLeaseRoleSourceRead         = "source_read"
-	TunnelLeaseRoleTargetWrite        = "target_write"
+	RoomTransferSchemaVersion          = "room-transfer/v1"
+	TransferMultipartCapability        = "transfer.multipart"
+	TransferMultipartFanoutCapability  = "transfer.multipart.fanout.v1"
+	RoomTransferCapability             = "room.transfer"
+	RoomTransferDirectCapability       = "room.transfer.direct.v1"
+	RoomTransferE2EECapability         = "room.transfer.e2ee.v2"
+	RoomTransferProtectionScheme       = "btr.object.chunk.aead.v1"
+	RoomStorageSchemaVersion           = "room-storage-transfer/v2"
+	RoomStorageCapability              = "room.transfer.storage.v2"
+	RoomStorageProtectionScheme        = "btr.object.transport.tls.v1"
+	RoomTransferLeaseRenewalCapability = "room.transfer.lease_renewal.v1"
+	TunnelLeaseRoleSourceRead          = "source_read"
+	TunnelLeaseRoleTargetWrite         = "target_write"
 )
 
 // TransferAuthenticatedPartCapability executes authenticated_part_v1 and
@@ -105,6 +106,38 @@ func (cancel RoomTaskCancel) Validate() error {
 	if cancel.Type != "room_task_cancel" || (cancel.SchemaVersion != RoomTransferSchemaVersion && cancel.SchemaVersion != RoomStorageSchemaVersion) ||
 		strings.TrimSpace(cancel.TransferID) == "" || strings.TrimSpace(cancel.Reason) == "" || cancel.CancelledAt.IsZero() {
 		return errors.New("invalid room transfer cancellation")
+	}
+	return nil
+}
+
+type RoomLaneLeaseUpdate struct {
+	Type          string                `json:"type"`
+	SchemaVersion string                `json:"schema_version"`
+	TransferID    string                `json:"transfer_id"`
+	BatchID       string                `json:"batch_id"`
+	LaneID        string                `json:"lane_id"`
+	Attempt       int64                 `json:"attempt"`
+	ExpiresAt     time.Time             `json:"expires_at"`
+	Leases        []RoomLaneLeaseExpiry `json:"leases"`
+	UpdatedAt     time.Time             `json:"updated_at"`
+}
+
+type RoomLaneLeaseExpiry struct {
+	LeaseID   string    `json:"lease_id"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+func (update RoomLaneLeaseUpdate) Validate(now time.Time) error {
+	if update.Type != "room_lane_lease_update" ||
+		(update.SchemaVersion != RoomTransferSchemaVersion && update.SchemaVersion != RoomStorageSchemaVersion) ||
+		strings.TrimSpace(update.TransferID) == "" || strings.TrimSpace(update.BatchID) == "" || strings.TrimSpace(update.LaneID) == "" ||
+		update.Attempt <= 0 || !now.Before(update.ExpiresAt) || len(update.Leases) == 0 || len(update.Leases) > 64 {
+		return errors.New("invalid room lane lease update")
+	}
+	for _, lease := range update.Leases {
+		if strings.TrimSpace(lease.LeaseID) == "" || !now.Before(lease.ExpiresAt) {
+			return errors.New("invalid room lane lease update")
+		}
 	}
 	return nil
 }

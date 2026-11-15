@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,6 +25,10 @@ type Control interface {
 	Connected(string) bool
 	UpsertCircuit(context.Context, circuit.Plan) error
 	RevokeCircuit(context.Context, circuit.Revocation) error
+}
+
+type LeaseControl interface {
+	Extend(context.Context, string, domain.Extension) error
 }
 
 type ResultSink interface {
@@ -133,7 +138,7 @@ func (s *Service) Dispatch(ctx context.Context, request DispatchRequest) (Record
 		now := s.config.Now().UTC()
 		record = Record{Source: request.Source, ExternalID: request.ExternalID, WorkloadKey: key, BatchID: request.BatchID,
 			TransferID: request.TransferID,
-			State: StateReceived, Spec: request.Spec, CreatedAt: now, UpdatedAt: now}
+			State:      StateReceived, Spec: request.Spec, CreatedAt: now, UpdatedAt: now}
 		if err := s.save(record, "external task received"); err != nil {
 			return Record{}, err
 		}
@@ -393,6 +398,37 @@ func (s *Service) CancelWorkload(ctx context.Context, workloadKey, reason string
 	}
 	record.State, record.UpstreamError, record.UpdatedAt = StateCancelled, reason, s.config.Now().UTC()
 	return s.save(record, "BeamCore cancelled room transfer workload")
+}
+
+func (s *Service) ExtendWorkload(ctx context.Context, workloadKey, capability string, expiresAt time.Time,
+	expiries map[string]time.Time) error {
+	lock := s.recordLock(workloadKey)
+	lock.Lock()
+	defer lock.Unlock()
+	record, ok := s.store.Get(workloadKey)
+	if !ok {
+		return errors.New("lease extension does not match a dispatched workload")
+	}
+	if record.State == StateCompleted || record.State == StateFailed || record.State == StateCancelled || record.State == StateRejected {
+		return errors.New("lease extension names a finished workload")
+	}
+	observation, ok := s.registry.Observation(record.WorkerID)
+	if !ok || !slices.Contains(observation.Capabilities, capability) {
+		return errors.New("the workload's Worker does not follow lease extensions")
+	}
+	leases, ok := s.control.(LeaseControl)
+	if !ok {
+		return errors.New("worker control does not carry lease extensions")
+	}
+	if err := leases.Extend(ctx, record.WorkerID, domain.Extension{WorkloadID: record.Spec.WorkloadID,
+		AttemptID: record.Spec.AttemptID, AssignmentExpiresAt: expiresAt, LeaseExpiries: expiries}); err != nil {
+		return err
+	}
+	if !expiresAt.After(record.Spec.Lease.AssignmentExpiresAt) {
+		return nil
+	}
+	record.Spec.Lease.AssignmentExpiresAt, record.UpdatedAt = expiresAt, s.config.Now().UTC()
+	return s.save(record, "BeamCore renewed the workload lease")
 }
 
 // SelectWorker exposes the same placement policy used by Dispatch to composite

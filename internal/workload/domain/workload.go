@@ -217,6 +217,25 @@ func (c Commit) Validate(now time.Time) error {
 	return nil
 }
 
+type Extension struct {
+	WorkloadID          string               `json:"workload_id"`
+	AttemptID           string               `json:"attempt_id"`
+	AssignmentExpiresAt time.Time            `json:"assignment_expires_at"`
+	LeaseExpiries       map[string]time.Time `json:"lease_expiries,omitempty"`
+}
+
+func (e Extension) Key() string { return e.WorkloadID + "/" + e.AttemptID }
+
+func (e Extension) Validate(now time.Time) error {
+	if strings.TrimSpace(e.WorkloadID) == "" || strings.TrimSpace(e.AttemptID) == "" {
+		return errors.New("workload_id and attempt_id are required")
+	}
+	if e.AssignmentExpiresAt.IsZero() || !now.Before(e.AssignmentExpiresAt) {
+		return errors.New("extended assignment has expired")
+	}
+	return nil
+}
+
 type Result struct {
 	WorkloadID     string            `json:"workload_id"`
 	AttemptID      string            `json:"attempt_id"`
