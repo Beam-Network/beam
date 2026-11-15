@@ -141,6 +141,9 @@ func (control *roomControl) bind(ctx context.Context) (_ *roomControlSession, er
 		if err = subscribe("room_task_cancel"); err != nil {
 			return nil, err
 		}
+		if err = subscribe("room_lane_lease_update"); err != nil {
+			return nil, err
+		}
 	}
 	if control.workloads != nil {
 		if err = subscribe("room_workload_offer"); err != nil {
@@ -241,6 +244,10 @@ func (session *roomControlSession) run(ctx context.Context) error {
 			case "room_task_cancel":
 				if err := control.handleCancel(ctx, message.Data); err != nil {
 					log.Printf("ignore invalid BeamCore room cancellation: %v", err)
+				}
+			case "room_lane_lease_update":
+				if err := control.handleLeaseUpdate(ctx, message.Data); err != nil {
+					log.Printf("ignore BeamCore room lane lease update: %v", err)
 				}
 			case "room_task_offer_batch":
 				if err := control.handleOffer(ctx, message.Data); err != nil {
@@ -420,6 +427,18 @@ func (control *roomControl) handleCancel(ctx context.Context, encoded []byte) er
 	return control.rooms.Cancel(ctx, request)
 }
 
+func (control *roomControl) handleLeaseUpdate(ctx context.Context, encoded []byte) error {
+	payload, err := decodeControlPayload(encoded, "room_lane_lease_update")
+	if err != nil {
+		return err
+	}
+	var update contracts.RoomLaneLeaseUpdate
+	if err := json.Unmarshal(payload, &update); err != nil {
+		return err
+	}
+	return control.rooms.ExtendLease(ctx, update)
+}
+
 func (control *roomControl) handleOffer(ctx context.Context, encoded []byte) error {
 	payload, err := decodeControlPayload(encoded, "room_task_offer_batch")
 	if err != nil {
@@ -547,6 +566,9 @@ func (control *roomControl) capabilityManifest(now time.Time) contracts.Capabili
 		}
 		if storage {
 			capabilities = append(capabilities, contracts.RoomStorageCapability)
+		}
+		if (e2ee || storage) && control.rooms.LeaseRenewalAvailable() {
+			capabilities = append(capabilities, contracts.RoomTransferLeaseRenewalCapability)
 		}
 	}
 	for _, kind := range []domain.Kind{domain.KindRoomDatagram, domain.KindRoomMessage, domain.KindRoomCommand,

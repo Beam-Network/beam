@@ -164,6 +164,15 @@ func (s *Server) Cancel(_ context.Context, workerID, workloadID, attemptID strin
 	return err
 }
 
+func (s *Server) Extend(_ context.Context, workerID string, extension domain.Extension) error {
+	session, err := s.session(workerID)
+	if err != nil {
+		return err
+	}
+	_, err = session.send(TypeExtend, "", extension)
+	return err
+}
+
 func (s *Server) Connected(workerID string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

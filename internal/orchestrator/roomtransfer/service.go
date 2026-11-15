@@ -101,6 +101,75 @@ func (s *Service) StorageCapabilityAvailable() bool {
 	return err == nil
 }
 
+func (s *Service) LeaseRenewalAvailable() bool {
+	s.mu.RLock()
+	ready := s.provisioner != nil && s.sink != nil
+	s.mu.RUnlock()
+	if !ready {
+		return false
+	}
+	_, err := s.dispatcher.SelectWorker([]string{contracts.RoomTransferCapability, contracts.RoomTransferLeaseRenewalCapability},
+		s.config.Resources, nil)
+	return err == nil
+}
+
+func (s *Service) ExtendLease(ctx context.Context, update contracts.RoomLaneLeaseUpdate) error {
+	if err := update.Validate(s.config.Now().UTC()); err != nil {
+		return err
+	}
+	lock := s.batchLock(update.BatchID)
+	lock.Lock()
+	defer lock.Unlock()
+	record, ok := s.store.Get(update.BatchID)
+	if !ok || record.Batch.TransferID != update.TransferID || record.Batch.SchemaVersion != update.SchemaVersion {
+		return errors.New("room lane lease update does not match a batch")
+	}
+	offer, ok := findOfferLane(record.Batch, update.LaneID)
+	if !ok || offer.Attempt != update.Attempt {
+		return errors.New("room lane lease update does not match a lane")
+	}
+	lane := record.Lanes[update.LaneID]
+	if lane.State != LaneDispatched || lane.WorkloadKey == "" || lane.SourceLease == nil {
+		return errors.New("room lane lease update names a lane that is not running")
+	}
+	expiries := make(map[string]time.Time, len(update.Leases))
+	for _, lease := range update.Leases {
+		expiries[lease.LeaseID] = lease.ExpiresAt.UTC()
+	}
+	named := 0
+	extend := func(lease contracts.TunnelLease) contracts.TunnelLease {
+		if expiresAt, ok := expiries[lease.LeaseID]; ok {
+			named++
+			if expiresAt.After(lease.ExpiresAt) {
+				lease.ExpiresAt = expiresAt
+			}
+		}
+		return lease
+	}
+	current := lane.SourceLease.ExpiresAt
+	source := extend(*lane.SourceLease)
+	targets := make(map[string]contracts.TunnelLease, len(lane.TargetLeases))
+	expiresAt := source.ExpiresAt
+	for memberID, lease := range lane.TargetLeases {
+		current = minTime(current, lease.ExpiresAt)
+		targets[memberID] = extend(lease)
+		expiresAt = minTime(expiresAt, targets[memberID].ExpiresAt)
+	}
+	if named != len(expiries) {
+		return errors.New("room lane lease update names a lease of another lane")
+	}
+	if !expiresAt.After(current) {
+		return nil
+	}
+	if err := s.dispatcher.ExtendWorkload(ctx, lane.WorkloadKey, contracts.RoomTransferLeaseRenewalCapability, expiresAt, expiries); err != nil {
+		return err
+	}
+	lane.SourceLease, lane.TargetLeases = &source, targets
+	record.Lanes[update.LaneID] = lane
+	record.UpdatedAt = s.config.Now().UTC()
+	return s.store.Put(record)
+}
+
 func (s *Service) Cancel(ctx context.Context, request contracts.RoomTaskCancel) error {
 	if err := request.Validate(); err != nil {
 		return err
@@ -486,8 +555,9 @@ func (s *Service) DeliverProgress(ctx context.Context, task dispatch.Record, pro
 		return errors.New("worker transport protection differs from its assignment")
 	}
 	roomResult := contracts.RoomTaskResult{Type: "room_task_result", SchemaVersion: record.Batch.SchemaVersion,
-		ResultID: resultID(record.Batch.TransferID, laneID, offer.Attempt, "runtime:"+directRuntime.AccessToken),
-		BatchID:  record.Batch.BatchID, RoomID: record.Batch.RoomID, TransferID: record.Batch.TransferID,
+		ResultID: resultID(record.Batch.TransferID, laneID, offer.Attempt,
+			"runtime:"+directRuntime.AccessToken+":"+directRuntime.ExpiresAt.UTC().Format(time.RFC3339Nano)),
+		BatchID: record.Batch.BatchID, RoomID: record.Batch.RoomID, TransferID: record.Batch.TransferID,
 		LaneID: laneID, Attempt: offer.Attempt, WorkerID: lane.WorkerID,
 		WorkerAcknowledgedAt: lane.WorkerAcknowledgedAt, ExecutableLeaseIssuedAt: lane.ExecutableLeaseIssuedAt,
 		ExecutionStage: "streaming", Runtime: &directRuntime, ReportedAt: progress.ObservedAt.UTC()}

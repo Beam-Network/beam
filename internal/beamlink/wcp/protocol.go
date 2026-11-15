@@ -37,6 +37,7 @@ const (
 	TypeDecision      = "workload.decision"
 	TypeCommit        = "workload.commit"
 	TypeCancel        = "workload.cancel"
+	TypeExtend        = "workload.extend"
 	TypeResult        = "workload.result"
 	TypeProgress      = "workload.progress"
 	TypeCheckpoint    = "workload.checkpoint"

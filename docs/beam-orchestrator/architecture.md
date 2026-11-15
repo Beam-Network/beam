@@ -40,6 +40,13 @@ direct runtime. The base capability alone is not eligible for these lanes.
 `room.transfer.e2ee.v2` requires `btr.object.chunk.aead.v1` ciphertext from
 source agents. Room/channel keys and plaintext remain outside Workers.
 
+`room.transfer.lease_renewal.v1` keeps a running Room lane on its attempt
+across lease boundaries. BeamCore sends `room_lane_lease_update` with the later
+expiry of the lane's own leases; the orchestrator forwards it to the lane's
+Worker (WCP `workload.extend`), which moves its deadline and reports its
+runtime at that expiry. The orchestrator advertises it while a selectable Room
+Worker does.
+
 ## Setup Guides
 
 - [Orchestrator guide](../orchestrator.md)

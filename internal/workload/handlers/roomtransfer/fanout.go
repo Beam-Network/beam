@@ -27,7 +27,8 @@ func (h *Handler) deliverChunk(ctx context.Context, workerID string, active *ses
 	var workers sync.WaitGroup
 	storageTargets := make([]contracts.RoomTransferDestination, 0)
 	agentTargets := make(map[string]contracts.RoomTransferDestination)
-	for _, target := range active.transfer.Targets {
+	transfer := active.current()
+	for _, target := range transfer.Targets {
 		if targetDelivered(*resume, target, index) || active.targetFailed(target.MemberID) {
 			continue
 		}
@@ -52,7 +53,7 @@ func (h *Handler) deliverChunk(ctx context.Context, workerID string, active *ses
 			go func() {
 				defer workers.Done()
 				for target := range jobs {
-					result, err := writeStorageChunk(ctx, h.storageClient, active.transfer, workerID, target, index, current.payload, current.source.RangeSHA256, contentMD5, h.now)
+					result, err := writeStorageChunk(ctx, h.storageClient, transfer, workerID, target, index, current.payload, current.source.RangeSHA256, contentMD5, h.now)
 					outcomes <- deliveryOutcome{target: target, storage: result, err: err}
 				}
 			}()

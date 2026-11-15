@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	workloadcheckpoint "github.com/Beam-Network/beam/internal/workload/checkpoint"
@@ -74,8 +75,11 @@ type session struct {
 	failure       *contracts.SourceFailureReceipt
 	// targetFailures holds each member's signed persist failure; that member's
 	// delivery stops for this attempt while the other members continue.
-	targetFailures map[string]contracts.TargetFailureReceipt
-	changed        chan struct{}
+	targetFailures  map[string]contracts.TargetFailureReceipt
+	changed         chan struct{}
+	sourceExpiresAt atomic.Int64
+	targetExpiresAt map[string]*atomic.Int64
+	reportExpiry    func(time.Time)
 }
 
 type chunk struct {
@@ -182,6 +186,7 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 		chunks: make(map[int64]*chunk), completed: make(map[int64]*completedChunk),
 		targetFailures: make(map[string]contracts.TargetFailureReceipt), expected: transfer.ChunkStart, changed: make(chan struct{}, 1)}
 	active.restoreCompleted(resume)
+	active.trackLeases()
 	if err := shared.add(sessionID, active); err != nil {
 		return domain.Result{}, err
 	}
@@ -209,6 +214,18 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 		directRuntime.TLSCertificateSHA256 = fingerprint
 	}
 	reportRuntime(ctx, directRuntime)
+	active.reportExpiry = func(expiresAt time.Time) {
+		next := directRuntime
+		next.ExpiresAt = expiresAt
+		if next.Capability == contracts.RoomStorageCapability {
+			fingerprint, err := shared.certificates.ForLease(expiresAt)
+			if err != nil {
+				return
+			}
+			next.TLSCertificateSHA256 = fingerprint
+		}
+		reportRuntime(ctx, next)
+	}
 
 	var bytesProcessed int64
 	for chunkIndex := transfer.ChunkStart; chunkIndex <= transfer.ChunkEnd; chunkIndex++ {
@@ -219,7 +236,7 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 			break
 		}
 		if transfer.SourceLease.Storage != nil {
-			payload, evidence, err := readStorageChunk(ctx, h.storageClient, transfer, spec.Identity.WorkerID, chunkIndex, h.now)
+			payload, evidence, err := readStorageChunk(ctx, h.storageClient, active.current(), spec.Identity.WorkerID, chunkIndex, h.now)
 			if err != nil {
 				return result(transfer, resume, active.withTargetFailures([]contracts.RoomFailure{{Origin: "storage_provider", Code: storageFailureCode(err), Retryable: storageFailureCode(err) != "room_storage_source_mutated", ChunkIndices: []int64{chunkIndex}, Detail: storageFailureClass(err)}}), bytesProcessed)
 			}
@@ -613,7 +630,7 @@ func (s *session) acceptTargetFailure(response http.ResponseWriter, request *htt
 func (s *session) authorizeSource(request *http.Request, rawIndex string) (int64, error) {
 	index, err := strconv.ParseInt(rawIndex, 10, 64)
 	if err != nil || index < s.transfer.ChunkStart || index > s.transfer.ChunkEnd ||
-		!s.now().UTC().Before(s.transfer.SourceLease.ExpiresAt) ||
+		!s.now().UTC().Before(s.sourceExpiry()) ||
 		!secureEqual(request.Header.Get("X-Beam-Path-Token"), pathToken(s.transfer.SourceLease)) {
 		return 0, errors.New("source path is not authorized")
 	}
@@ -630,12 +647,110 @@ func (s *session) authorizeTarget(request *http.Request, rawMember, rawIndex str
 		return "", 0, contracts.RoomTransferDestination{}, errors.New("invalid target chunk")
 	}
 	for _, target := range s.transfer.Targets {
-		if target.MemberID == memberID && s.now().UTC().Before(target.Lease.ExpiresAt) &&
+		if target.MemberID == memberID && s.now().UTC().Before(s.targetExpiry(memberID)) &&
 			secureEqual(request.Header.Get("X-Beam-Path-Token"), pathToken(target.Lease)) {
 			return memberID, index, target, nil
 		}
 	}
 	return "", 0, contracts.RoomTransferDestination{}, errors.New("target path is not authorized")
+}
+
+func (s *session) trackLeases() {
+	s.sourceExpiresAt.Store(s.transfer.SourceLease.ExpiresAt.UnixNano())
+	s.targetExpiresAt = make(map[string]*atomic.Int64, len(s.transfer.Targets))
+	for _, target := range s.transfer.Targets {
+		expiry := &atomic.Int64{}
+		expiry.Store(target.Lease.ExpiresAt.UnixNano())
+		s.targetExpiresAt[target.MemberID] = expiry
+	}
+}
+
+func (s *session) current() contracts.RoomTransfer {
+	transfer := s.transfer
+	transfer.SourceLease.ExpiresAt = s.sourceExpiry()
+	transfer.Targets = append([]contracts.RoomTransferDestination(nil), s.transfer.Targets...)
+	for index := range transfer.Targets {
+		transfer.Targets[index].Lease.ExpiresAt = s.targetExpiry(transfer.Targets[index].MemberID)
+	}
+	return transfer
+}
+
+func (s *session) sourceExpiry() time.Time {
+	if expiry := s.sourceExpiresAt.Load(); expiry != 0 {
+		return time.Unix(0, expiry).UTC()
+	}
+	return s.transfer.SourceLease.ExpiresAt
+}
+
+func (s *session) targetExpiry(memberID string) time.Time {
+	if expiry := s.targetExpiresAt[memberID]; expiry != nil {
+		return time.Unix(0, expiry.Load()).UTC()
+	}
+	for _, target := range s.transfer.Targets {
+		if target.MemberID == memberID {
+			return target.Lease.ExpiresAt
+		}
+	}
+	return time.Time{}
+}
+
+func (s *session) extend(transfer contracts.RoomTransfer, expiresAt time.Time) {
+	s.sourceExpiresAt.Store(transfer.SourceLease.ExpiresAt.UnixNano())
+	for _, target := range transfer.Targets {
+		if expiry := s.targetExpiresAt[target.MemberID]; expiry != nil {
+			expiry.Store(target.Lease.ExpiresAt.UnixNano())
+		}
+	}
+	if s.reportExpiry != nil {
+		s.reportExpiry(expiresAt)
+	}
+}
+
+func (h *Handler) ExtendLease(spec domain.Spec, extension domain.Extension) (domain.Spec, error) {
+	transfer, err := decodeTransfer(spec)
+	if err != nil {
+		return domain.Spec{}, err
+	}
+	extend := func(lease *contracts.TunnelLease) {
+		if expiresAt, ok := extension.LeaseExpiries[lease.LeaseID]; ok && expiresAt.After(lease.ExpiresAt) {
+			lease.ExpiresAt = expiresAt.UTC()
+		}
+	}
+	extend(&transfer.SourceLease)
+	expiresAt := transfer.SourceLease.ExpiresAt
+	for index := range transfer.Targets {
+		extend(&transfer.Targets[index].Lease)
+		if transfer.Targets[index].Lease.ExpiresAt.Before(expiresAt) {
+			expiresAt = transfer.Targets[index].Lease.ExpiresAt
+		}
+	}
+	if extension.AssignmentExpiresAt.Before(expiresAt) {
+		expiresAt = extension.AssignmentExpiresAt
+	}
+	if !expiresAt.After(spec.Lease.AssignmentExpiresAt) {
+		return domain.Spec{}, errors.New("room lane lease extension extends no lease of the lane")
+	}
+	payload, err := json.Marshal(transfer)
+	if err != nil {
+		return domain.Spec{}, err
+	}
+	spec.Payload, spec.Lease.AssignmentExpiresAt = payload, expiresAt
+	if live := h.session(fmt.Sprintf("%s-%s-%d", transfer.TransferID, transfer.LaneID, transfer.Attempt)); live != nil {
+		live.extend(transfer, expiresAt)
+	}
+	return spec, nil
+}
+
+func (h *Handler) session(id string) *session {
+	h.serverMu.Lock()
+	server := h.server
+	h.serverMu.Unlock()
+	if server == nil {
+		return nil
+	}
+	server.mu.RLock()
+	defer server.mu.RUnlock()
+	return server.sessions[id]
 }
 
 func (s *session) waitForSource(ctx context.Context, index int64) (*chunk, error) {
