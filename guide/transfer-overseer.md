@@ -28,6 +28,7 @@ The `reason` on `task_offer_batch_cancel` and the `failureReason` on telemetry a
 | `path_failed` | The participant reported that a room path was refused. |
 | `endpoint_failed` | A room endpoint failed. |
 | `beam_side` | Beam failed. |
+| `storage_route_path_saturated` | The storage bucket's route path was saturated. |
 | `superseded` | Another attempt covered the work. |
 | `transfer_ended` | The transfer ended first. |
 
