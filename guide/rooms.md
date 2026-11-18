@@ -55,7 +55,7 @@ Advertise a room capability after the worker can run that workload end to end. A
 
 Room transfers have their own eligibility and [PRISM profile](./prism). Room membership identifies senders and recipients, not worker assignments.
 
-A room transfer's initial lanes go to the highest-scored eligible orchestrators, one lane per orchestrator, up to the source member's lane limit, [assignment plan](./api-reference).
+Each room transfer splits its chunks into ranges, one range per orchestrator. The highest-scored eligible qualified orchestrators receive the ranges, and larger transfers spread across more orchestrators. Each range holds a share of the chunks proportional to its orchestrator's room PRISM score. The source agent serves a set number of connections at once. Each range transfers over one connection, and the next range starts as soon as a connection frees. Calibration room transfers give eligible qualifying orchestrators equal ranges in random order. See the [assignment plan](./api-reference).
 
 ---
 
