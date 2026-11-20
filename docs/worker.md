@@ -156,7 +156,9 @@ bearer credential arrives in the offer's destination headers, and the worker
 sends it only with that destination's upload requests.
 
 Destinations without a protocol keep the presigned path (`presigned_put`),
-which streams the range with `PUT`; an offered `method` applies only to the
+which streams the range with `PUT`. After a 408, 429 or 5xx answer from the
+source or destination, the worker reads and writes the range again, up to three
+attempts within the assignment lease. An offered `method` applies only to the
 authenticated protocols.
 
 For an authenticated destination the worker:
