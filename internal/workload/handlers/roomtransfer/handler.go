@@ -27,7 +27,6 @@ import (
 	"github.com/Beam-Network/beam/internal/workload/contracts"
 	"github.com/Beam-Network/beam/internal/workload/domain"
 	workloadprogress "github.com/Beam-Network/beam/internal/workload/progress"
-	"github.com/Beam-Network/beam/internal/workload/storagehttp"
 )
 
 const (
@@ -64,19 +63,22 @@ type sharedServer struct {
 }
 
 type session struct {
-	transfer      contracts.RoomTransfer
-	token         string
-	now           func() time.Time
-	mu            sync.Mutex
-	chunks        map[int64]*chunk
-	completed     map[int64]*completedChunk
-	expected      int64
-	readingSource bool
-	failure       *contracts.SourceFailureReceipt
+	transfer  contracts.RoomTransfer
+	token     string
+	now       func() time.Time
+	mu        sync.Mutex
+	chunks    map[int64]*chunk
+	completed map[int64]*completedChunk
+	expected  int64
+	relay     *relayChunk
+	failure   *contracts.SourceFailureReceipt
 	// targetFailures holds each member's signed persist failure; that member's
 	// delivery stops for this attempt while the other members continue.
 	targetFailures  map[string]contracts.TargetFailureReceipt
 	changed         chan struct{}
+	notify          chan struct{}
+	closed          chan struct{}
+	hold            time.Duration
 	sourceExpiresAt atomic.Int64
 	targetExpiresAt map[string]*atomic.Int64
 	reportExpiry    func(time.Time)
@@ -184,13 +186,15 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 	sessionID := fmt.Sprintf("%s-%s-%d", transfer.TransferID, transfer.LaneID, transfer.Attempt)
 	active := &session{transfer: transfer, token: runtimeToken, now: h.now,
 		chunks: make(map[int64]*chunk), completed: make(map[int64]*completedChunk),
-		targetFailures: make(map[string]contracts.TargetFailureReceipt), expected: transfer.ChunkStart, changed: make(chan struct{}, 1)}
+		targetFailures: make(map[string]contracts.TargetFailureReceipt), expected: transfer.ChunkStart, changed: make(chan struct{}, 1),
+		closed: make(chan struct{})}
 	active.restoreCompleted(resume)
 	active.trackLeases()
 	if err := shared.add(sessionID, active); err != nil {
 		return domain.Result{}, err
 	}
 	defer shared.remove(sessionID)
+	defer close(active.closed)
 	expiresAt := transfer.SourceLease.ExpiresAt
 	for _, target := range transfer.Targets {
 		if target.Lease.ExpiresAt.Before(expiresAt) {
@@ -227,6 +231,12 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 		reportRuntime(ctx, next)
 	}
 
+	checkpoints := newLaneCheckpoints(ctx, transfer.SchemaVersion, resume)
+	defer checkpoints.close()
+	readAhead := transfer.SourceLease.Storage != nil &&
+		spec.Resources.MemoryBytes >= contracts.RoomStorageSourceMemoryBytes(transfer.FileSizeBytes, transfer.ChunkSizeBytes)
+	var ahead *sourceAhead
+	defer func() { ahead.stop() }()
 	var bytesProcessed int64
 	for chunkIndex := transfer.ChunkStart; chunkIndex <= transfer.ChunkEnd; chunkIndex++ {
 		if allTargetsDelivered(resume, transfer.Targets, chunkIndex) {
@@ -236,11 +246,16 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 			break
 		}
 		if transfer.SourceLease.Storage != nil {
-			payload, evidence, err := readStorageChunk(ctx, h.storageClient, active.current(), spec.Identity.WorkerID, chunkIndex, h.now)
+			payload, evidence, err := h.sourceChunk(ctx, active, spec.Identity.WorkerID, chunkIndex, ahead)
+			ahead = nil
+			if next, ok := nextUndelivered(resume, transfer, chunkIndex+1); ok && err == nil {
+				ahead = h.startSourceAhead(ctx, active, spec.Identity.WorkerID, next, readAhead)
+			}
 			if err != nil {
 				return result(transfer, resume, active.withTargetFailures([]contracts.RoomFailure{{Origin: "storage_provider", Code: storageFailureCode(err), Retryable: storageFailureCode(err) != "room_storage_source_mutated", ChunkIndices: []int64{chunkIndex}, Detail: storageFailureClass(err)}}), bytesProcessed)
 			}
 			resume.StorageResults[storageResultKey(evidence)] = evidence
+			checkpoints.queue(recordStorageResult(evidence))
 			active.mu.Lock()
 			active.chunks[chunkIndex] = &chunk{payload: payload,
 				source: contracts.SourceRangeReceipt{TransferID: transfer.TransferID, LaneID: transfer.LaneID, ChunkIndex: chunkIndex,
@@ -254,7 +269,9 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 			return result(transfer, resume, active.withTargetFailures(sourceFailure(waitErr, chunkIndex)), bytesProcessed)
 		}
 		if transfer.SourceLease.Storage == nil {
-			resume.SourceReceipts[chunkIndex] = current.source
+			source := current.source
+			resume.SourceReceipts[chunkIndex] = source
+			checkpoints.queue(func(value *checkpointValue) { value.SourceReceipts[chunkIndex] = source })
 		}
 		bytesProcessed += current.source.Length
 		read := resume.SourceReads[chunkIndex]
@@ -263,9 +280,10 @@ func (h *Handler) Execute(ctx context.Context, spec domain.Spec) (domain.Result,
 		read.PayloadBytes += current.source.Length
 		read.WireBytes += int64(len(current.payload))
 		resume.SourceReads[chunkIndex] = read
-		failures, deliveryErr := h.deliverChunk(ctx, spec.Identity.WorkerID, active, current, chunkIndex, &resume)
-		if deliveryErr != nil {
-			return domain.Result{}, deliveryErr
+		checkpoints.queue(func(value *checkpointValue) { value.SourceReads[chunkIndex] = read })
+		failures := h.deliverChunk(ctx, spec.Identity.WorkerID, active, current, chunkIndex, &resume, checkpoints)
+		if err := checkpoints.failure(); err != nil {
+			return domain.Result{}, err
 		}
 		if len(failures) != 0 {
 			return result(transfer, resume, active.withTargetFailures(failures), bytesProcessed)
@@ -425,12 +443,9 @@ func (s *session) ServeHTTP(response http.ResponseWriter, request *http.Request,
 }
 
 func (s *session) acceptSource(response http.ResponseWriter, request *http.Request, rawIndex string) {
-	// An early final response must close HTTP/1 transport; otherwise Go clients
-	// may send the pending body to preserve the connection after a final status.
-	response.Header().Set("Connection", "close")
 	index, err := s.authorizeSource(request, rawIndex)
 	if err != nil {
-		http.Error(response, err.Error(), http.StatusForbidden)
+		refuseUnreadBody(response, err.Error(), http.StatusForbidden)
 		return
 	}
 	offset, length := contracts.ChunkRange(s.transfer.FileSizeBytes, s.transfer.ChunkSizeBytes, index)
@@ -456,63 +471,79 @@ func (s *session) acceptSource(response http.ResponseWriter, request *http.Reque
 	if reason != "" {
 		log.Printf("room transfer rejected source receipt: reason=%s transfer_id=%s lane_id=%s chunk=%d expected_key=%s receipt_key=%s",
 			reason, s.transfer.TransferID, s.transfer.LaneID, index, publicKeyFingerprint(s.transfer.SourceLease.AgentPublicKey), publicKeyFingerprint(receipt.AgentPublicKey))
-		http.Error(response, "invalid signed source receipt", http.StatusBadRequest)
+		refuseUnreadBody(response, "invalid signed source receipt", http.StatusBadRequest)
 		return
 	}
-	s.mu.Lock()
-	if completed := s.completed[index]; completed != nil {
-		if completed.source.RangeSHA256 != receipt.RangeSHA256 {
-			s.mu.Unlock()
-			http.Error(response, "source retry hash mismatch", http.StatusConflict)
-			return
-		}
-		s.mu.Unlock()
-		response.WriteHeader(http.StatusNoContent)
-		return
-	}
-	if index != s.expected {
-		s.mu.Unlock()
-		http.Error(response, "source chunk is not ready", http.StatusTooEarly)
-		return
-	}
-	if existing := s.chunks[index]; existing != nil {
-		if existing.source.RangeSHA256 != receipt.RangeSHA256 {
-			s.mu.Unlock()
-			http.Error(response, "source retry hash mismatch", http.StatusConflict)
-			return
-		}
-		s.mu.Unlock()
-		response.WriteHeader(http.StatusNoContent)
-		return
-	}
-	if s.readingSource {
-		s.mu.Unlock()
-		http.Error(response, "source chunk is being accepted", http.StatusTooEarly)
-		return
-	}
-	// Admit before reading: Expect: 100-continue keeps backpressure and retries
-	// from retransmitting a chunk that is not needed by this worker.
-	s.readingSource = true
-	s.mu.Unlock()
-	response.Header().Del("Connection")
 	wireLength := length
 	if s.transfer.Protection.Valid() {
 		wireLength += protectedChunkOverhead
 	}
-	payload, readErr := storagehttp.ReadExact(request.Body, wireLength)
-	digest := sha256.Sum256(payload)
-	s.mu.Lock()
-	s.readingSource = false
-	if readErr != nil || !validProtectedChunk(payload, s.transfer.Protection, length) || receipt.RangeSHA256 != hex.EncodeToString(digest[:]) {
+	hold := time.NewTimer(s.holdLimit())
+	defer hold.Stop()
+	for {
+		s.mu.Lock()
+		stored := s.chunks[index]
+		if completed := s.completed[index]; completed != nil {
+			stored = &chunk{source: completed.source}
+		}
+		if stored != nil {
+			s.mu.Unlock()
+			if stored.source.RangeSHA256 != receipt.RangeSHA256 {
+				refuseUnreadBody(response, "source retry hash mismatch", http.StatusConflict)
+				return
+			}
+			refuseUnreadBody(response, "", http.StatusNoContent)
+			return
+		}
+		if index == s.expected && s.relay == nil {
+			relay := newRelayChunk(index, receipt, wireLength)
+			s.relay = relay
+			s.signalLocked()
+			s.mu.Unlock()
+			s.receiveSource(response, request, relay, length)
+			return
+		}
+		wait := s.waitLocked()
 		s.mu.Unlock()
+		select {
+		case <-wait:
+		case <-request.Context().Done():
+			return
+		case <-s.closed:
+			refuseUnreadBody(response, "room transfer session ended", http.StatusNotFound)
+			return
+		case <-hold.C:
+			refuseUnreadBody(response, "source chunk is not ready", http.StatusTooEarly)
+			return
+		}
+	}
+}
+
+func (s *session) receiveSource(response http.ResponseWriter, request *http.Request, relay *relayChunk, plaintextLength int64) {
+	verified := relay.receive(request.Body, s.transfer.Protection, plaintextLength)
+	s.mu.Lock()
+	s.relay = nil
+	if verified {
+		s.chunks[relay.index] = &chunk{payload: relay.payload, source: relay.receipt,
+			targets: make(map[string]contracts.TargetRangeReceipt), finals: make(map[string]contracts.FinalTargetReceipt)}
+	}
+	relay.finish(verified)
+	s.signalLocked()
+	s.mu.Unlock()
+	if !verified {
 		http.Error(response, "invalid protected source chunk", http.StatusBadRequest)
 		return
 	}
-	s.chunks[index] = &chunk{payload: payload, source: receipt,
-		targets: make(map[string]contracts.TargetRangeReceipt), finals: make(map[string]contracts.FinalTargetReceipt)}
-	s.signalLocked()
-	s.mu.Unlock()
 	response.WriteHeader(http.StatusNoContent)
+}
+
+func refuseUnreadBody(response http.ResponseWriter, message string, status int) {
+	response.Header().Set("Connection", "close")
+	if message == "" {
+		response.WriteHeader(status)
+		return
+	}
+	http.Error(response, message, status)
 }
 
 func publicKeyFingerprint(value string) string {
@@ -548,21 +579,43 @@ func (s *session) sendTargetChunk(response http.ResponseWriter, request *http.Re
 		http.Error(response, err.Error(), http.StatusForbidden)
 		return
 	}
-	s.mu.Lock()
-	current := s.chunks[index]
-	if current != nil {
-		// The immutable chunk remains alive while Write holds this slice.
-		payload := current.payload
-		digest := current.source.RangeSHA256
+	hold := time.NewTimer(s.holdLimit())
+	defer hold.Stop()
+	for {
+		s.mu.Lock()
+		if current := s.chunks[index]; current != nil {
+			// The immutable chunk remains alive while Write holds this slice.
+			payload := current.payload
+			digest := current.source.RangeSHA256
+			s.mu.Unlock()
+			writeChunkHeaders(response, len(payload), digest, memberID)
+			_, _ = response.Write(payload)
+			return
+		}
+		if relay := s.relay; relay != nil && relay.index == index {
+			s.mu.Unlock()
+			relay.stream(response, request, memberID)
+			return
+		}
+		if s.completed[index] != nil || index < s.expected {
+			s.mu.Unlock()
+			http.Error(response, "source chunk is not ready", http.StatusTooEarly)
+			return
+		}
+		wait := s.waitLocked()
 		s.mu.Unlock()
-		response.Header().Set("Content-Type", "application/octet-stream")
-		response.Header().Set("X-Beam-Range-SHA256", digest)
-		response.Header().Set("X-Beam-Target-Member-ID", memberID)
-		_, _ = response.Write(payload)
-		return
+		select {
+		case <-wait:
+		case <-request.Context().Done():
+			return
+		case <-s.closed:
+			http.Error(response, "room transfer session ended", http.StatusNotFound)
+			return
+		case <-hold.C:
+			http.Error(response, "source chunk is not ready", http.StatusTooEarly)
+			return
+		}
 	}
-	s.mu.Unlock()
-	http.Error(response, "source chunk is not ready", http.StatusTooEarly)
 }
 
 func (s *session) acceptTargetReceipt(response http.ResponseWriter, request *http.Request, rawMember, rawIndex string) {
@@ -807,6 +860,24 @@ func (s *session) signalLocked() {
 	case s.changed <- struct{}{}:
 	default:
 	}
+	if s.notify != nil {
+		close(s.notify)
+		s.notify = nil
+	}
+}
+
+func (s *session) holdLimit() time.Duration {
+	if s.hold > 0 {
+		return s.hold
+	}
+	return requestHoldLimit
+}
+
+func (s *session) waitLocked() <-chan struct{} {
+	if s.notify == nil {
+		s.notify = make(chan struct{})
+	}
+	return s.notify
 }
 
 type sourceFailureError struct {

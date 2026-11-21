@@ -139,7 +139,7 @@ func (s *Service) Dispatch(ctx context.Context, request DispatchRequest) (Record
 		record = Record{Source: request.Source, ExternalID: request.ExternalID, WorkloadKey: key, BatchID: request.BatchID,
 			TransferID: request.TransferID,
 			State:      StateReceived, Spec: request.Spec, CreatedAt: now, UpdatedAt: now}
-		if err := s.save(record, "external task received"); err != nil {
+		if err := s.stage(record, "external task received"); err != nil {
 			return Record{}, err
 		}
 	}
@@ -186,7 +186,7 @@ func (s *Service) Dispatch(ctx context.Context, request DispatchRequest) (Record
 	record.State = StateOffered
 	record.UpstreamError = ""
 	record.UpdatedAt = s.config.Now().UTC()
-	if err := s.save(record, "Orchestrator selected Worker and sent workload offer"); err != nil {
+	if err := s.stage(record, "Orchestrator selected Worker and sent workload offer"); err != nil {
 		return record, err
 	}
 	decision, err := s.control.Offer(ctx, workerID, record.Spec)
@@ -196,7 +196,7 @@ func (s *Service) Dispatch(ctx context.Context, request DispatchRequest) (Record
 	if err != nil {
 		record.UpstreamError = "WCP offer failed: " + err.Error()
 		record.UpdatedAt = s.config.Now().UTC()
-		_ = s.save(record, "WCP offer failed; dispatch will be retried")
+		_ = s.stage(record, "WCP offer failed; dispatch will be retried")
 		return record, err
 	}
 	if !decision.Accepted {
@@ -208,7 +208,7 @@ func (s *Service) Dispatch(ctx context.Context, request DispatchRequest) (Record
 	}
 	record.State = StateReserved
 	record.UpdatedAt = s.config.Now().UTC()
-	if err := s.save(record, "Worker reserved resources"); err != nil {
+	if err := s.stage(record, "Worker reserved resources"); err != nil {
 		return record, err
 	}
 	if request.BeforeCommit != nil {
@@ -287,7 +287,7 @@ func (s *Service) HandleProgressContext(ctx context.Context, progress domain.Pro
 		return nil
 	}
 	current.State, current.Progress, current.UpdatedAt = record.State, record.Progress, record.UpdatedAt
-	return s.save(current, "Worker reported progress")
+	return s.stage(current, "Worker reported progress")
 }
 
 func (s *Service) HandleResult(ctx context.Context, result domain.Result) error {
@@ -537,6 +537,19 @@ func (s *Service) save(record Record, message string) error {
 	if err := s.store.Put(record); err != nil {
 		return err
 	}
+	s.publish(record, message)
+	return nil
+}
+
+func (s *Service) stage(record Record, message string) error {
+	if err := s.store.Stage(record); err != nil {
+		return err
+	}
+	s.publish(record, message)
+	return nil
+}
+
+func (s *Service) publish(record Record, message string) {
 	event := Event{Sequence: s.sequence.Add(1), ObservedAt: s.config.Now().UTC(), Source: record.Source,
 		ExternalID: record.ExternalID, WorkloadKey: record.WorkloadKey, WorkerID: record.WorkerID,
 		State: record.State, Message: message}
@@ -548,7 +561,6 @@ func (s *Service) save(record Record, message string) error {
 		}
 	}
 	s.mu.RUnlock()
-	return nil
 }
 
 func randomToken(size int) (string, error) {

@@ -36,6 +36,12 @@ type FileStore struct {
 	records    map[string]Record
 	operations int
 	compacting bool
+	written    uint64
+	directory  bool
+	failure    error
+
+	syncMu sync.Mutex
+	synced uint64
 }
 
 func OpenFileStore(path string) (*FileStore, error) {
@@ -68,17 +74,20 @@ func OpenFileStore(path string) (*FileStore, error) {
 
 func (s *FileStore) Create(record Record) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	key := record.Spec.Key()
 	if _, exists := s.records[key]; exists {
+		s.mu.Unlock()
 		return ErrRecordExists
 	}
 	s.records[key] = cloneRecord(record)
-	if err := s.appendLocked(record); err != nil {
+	frame, err := s.appendLocked(record)
+	if err != nil {
 		delete(s.records, key)
+		s.mu.Unlock()
 		return err
 	}
-	return nil
+	s.mu.Unlock()
+	return s.sync(frame)
 }
 
 func (s *FileStore) Get(key string) (Record, error) {
@@ -93,18 +102,102 @@ func (s *FileStore) Get(key string) (Record, error) {
 
 func (s *FileStore) Save(record Record) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	key := record.Spec.Key()
 	previous, exists := s.records[key]
 	if !exists {
+		s.mu.Unlock()
 		return ErrRecordNotFound
 	}
 	s.records[key] = cloneRecord(record)
-	if err := s.appendLocked(record); err != nil {
+	frame, err := s.appendLocked(record)
+	if err != nil {
 		s.records[key] = previous
+		s.mu.Unlock()
 		return err
 	}
+	s.mu.Unlock()
+	return s.sync(frame)
+}
+
+func (s *FileStore) Update(key string, mutate func(*Record) error) (Record, error) {
+	s.mu.Lock()
+	previous, exists := s.records[key]
+	if !exists {
+		s.mu.Unlock()
+		return Record{}, ErrRecordNotFound
+	}
+	next := cloneRecord(previous)
+	if err := mutate(&next); err != nil {
+		s.mu.Unlock()
+		if errors.Is(err, errUnchanged) {
+			return cloneRecord(previous), nil
+		}
+		return Record{}, err
+	}
+	if next.Spec.Key() != key {
+		s.mu.Unlock()
+		return Record{}, errors.New("workload update changes the record identity")
+	}
+	s.records[key] = cloneRecord(next)
+	frame, err := s.appendLocked(next)
+	if err != nil {
+		s.records[key] = previous
+		s.mu.Unlock()
+		return Record{}, err
+	}
+	s.mu.Unlock()
+	return next, s.sync(frame)
+}
+
+func (s *FileStore) sync(frame uint64) error {
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
+	s.mu.Lock()
+	failure, upto, directory := s.failure, s.written, s.directory
+	if failure == nil && s.synced < frame {
+		s.directory = false
+	}
+	s.mu.Unlock()
+	if failure != nil {
+		return failure
+	}
+	if s.synced >= frame {
+		return nil
+	}
+	err := syncFile(s.path + ".wal")
+	if err == nil && directory {
+		err = syncDirectory(filepath.Dir(s.path))
+	}
+	if err != nil {
+		s.mu.Lock()
+		s.failure = err
+		s.mu.Unlock()
+		return err
+	}
+	s.synced = upto
 	return nil
+}
+
+func syncFile(path string) error {
+	file, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	err = file.Sync()
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	return err
+}
+
+func syncDirectory(path string) error {
+	handle, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	err = handle.Sync()
+	_ = handle.Close()
+	return err
 }
 
 func (s *FileStore) replayJournal() error {
@@ -142,45 +235,38 @@ func (s *FileStore) replayJournal() error {
 	return nil
 }
 
-func (s *FileStore) appendLocked(record Record) error {
+func (s *FileStore) appendLocked(record Record) (uint64, error) {
+	if s.failure != nil {
+		return 0, s.failure
+	}
 	path := s.path + ".wal"
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	info, err := file.Stat()
 	if err != nil {
 		_ = file.Close()
-		return err
+		return 0, err
 	}
-	if err = json.NewEncoder(file).Encode(workloadFrame{Record: record}); err == nil {
-		err = file.Sync()
-	}
-	if err != nil {
+	if err = json.NewEncoder(file).Encode(workloadFrame{Record: record}); err != nil {
 		_ = file.Truncate(info.Size())
 		_ = file.Close()
-		return err
+		return 0, err
 	}
 	if err := file.Close(); err != nil {
-		return err
+		return 0, err
 	}
 	if info.Size() == 0 {
-		handle, err := os.Open(filepath.Dir(path))
-		if err != nil {
-			return err
-		}
-		err = handle.Sync()
-		_ = handle.Close()
-		if err != nil {
-			return err
-		}
+		s.directory = true
 	}
+	s.written++
 	s.operations++
 	s.records = compactReceiptCommittedWorkloads(s.records, maxRetainedReceiptCommittedWorkloads)
 	if s.operations >= workloadCompactionOperations && !s.compacting {
 		s.startCompactionLocked()
 	}
-	return nil
+	return s.written, nil
 }
 
 func (s *FileStore) startCompactionLocked() {

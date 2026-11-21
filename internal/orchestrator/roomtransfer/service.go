@@ -42,6 +42,7 @@ type Config struct {
 type Service struct {
 	mu          sync.RWMutex
 	batchLocks  sync.Map
+	laneLocks   sync.Map
 	config      Config
 	dispatcher  *dispatch.Service
 	store       Store
@@ -113,11 +114,23 @@ func (s *Service) LeaseRenewalAvailable() bool {
 	return err == nil
 }
 
+func (s *Service) StreamRelayAvailable() bool {
+	s.mu.RLock()
+	ready := s.provisioner != nil && s.sink != nil
+	s.mu.RUnlock()
+	if !ready {
+		return false
+	}
+	_, err := s.dispatcher.SelectWorker([]string{contracts.RoomTransferCapability, contracts.RoomTransferStreamRelayCapability},
+		s.config.Resources, nil)
+	return err == nil
+}
+
 func (s *Service) ExtendLease(ctx context.Context, update contracts.RoomLaneLeaseUpdate) error {
 	if err := update.Validate(s.config.Now().UTC()); err != nil {
 		return err
 	}
-	lock := s.batchLock(update.BatchID)
+	lock := s.laneLock(update.BatchID, update.LaneID)
 	lock.Lock()
 	defer lock.Unlock()
 	record, ok := s.store.Get(update.BatchID)
@@ -165,9 +178,7 @@ func (s *Service) ExtendLease(ctx context.Context, update contracts.RoomLaneLeas
 		return err
 	}
 	lane.SourceLease, lane.TargetLeases = &source, targets
-	record.Lanes[update.LaneID] = lane
-	record.UpdatedAt = s.config.Now().UTC()
-	return s.store.Put(record)
+	return s.saveLane(update.BatchID, lane)
 }
 
 func (s *Service) Cancel(ctx context.Context, request contracts.RoomTaskCancel) error {
@@ -179,13 +190,24 @@ func (s *Service) Cancel(ctx context.Context, request contracts.RoomTaskCancel) 
 		if snapshot.Batch.TransferID != request.TransferID || snapshot.Batch.SchemaVersion != request.SchemaVersion {
 			continue
 		}
-		lock := s.batchLock(snapshot.Batch.BatchID)
+		failures = append(failures, s.cancelBatch(ctx, snapshot.Batch.BatchID, request)...)
+	}
+	return errors.Join(failures...)
+}
+
+func (s *Service) cancelBatch(ctx context.Context, batchID string, request contracts.RoomTaskCancel) []error {
+	var failures []error
+	cancelled, refused := make(map[string]bool), make(map[string]bool)
+	for round := 0; round < 4; round++ {
+		lock := s.batchLock(batchID)
 		lock.Lock()
-		record, ok := s.store.Get(snapshot.Batch.BatchID)
+		record, ok := s.store.Get(batchID)
 		if !ok {
 			lock.Unlock()
-			continue
+			return failures
 		}
+		pending := make(map[string]string)
+		changed := false
 		for laneID, lane := range record.Lanes {
 			if request.LaneID != "" {
 				offer, found := findOfferLane(record.Batch, laneID)
@@ -193,28 +215,40 @@ func (s *Service) Cancel(ctx context.Context, request contracts.RoomTaskCancel) 
 					continue
 				}
 			}
-			if lane.State == LaneCompleted || lane.State == LaneFailed || lane.State == LaneCancelled {
+			if lane.State == LaneCompleted || lane.State == LaneFailed || lane.State == LaneCancelled || refused[lane.WorkloadKey] {
 				continue
 			}
-			if lane.WorkloadKey != "" {
-				if err := s.dispatcher.CancelWorkload(ctx, lane.WorkloadKey, request.Reason); err != nil {
-					failures = append(failures, fmt.Errorf("cancel room lane %s: %w", laneID, err))
-					continue
-				}
+			if lane.WorkloadKey != "" && !cancelled[lane.WorkloadKey] {
+				pending[laneID] = lane.WorkloadKey
+				continue
 			}
 			lane.State, lane.Error = LaneCancelled, request.Reason
 			record.Lanes[laneID] = lane
+			changed = true
 		}
-		record.UpdatedAt = request.CancelledAt.UTC()
-		if err := s.store.Put(record); err != nil {
-			failures = append(failures, err)
+		if changed {
+			record.UpdatedAt = request.CancelledAt.UTC()
+			if err := s.store.Put(record); err != nil {
+				failures = append(failures, err)
+			}
 		}
 		lock.Unlock()
+		if len(pending) == 0 {
+			return failures
+		}
+		for laneID, key := range pending {
+			if err := s.dispatcher.CancelWorkload(ctx, key, request.Reason); err != nil {
+				failures = append(failures, fmt.Errorf("cancel room lane %s: %w", laneID, err))
+				refused[key] = true
+				continue
+			}
+			cancelled[key] = true
+		}
 	}
-	return errors.Join(failures...)
+	return failures
 }
 
-func (s *Service) Submit(ctx context.Context, batch contracts.RoomTaskOfferBatch) error {
+func (s *Service) Accept(batch contracts.RoomTaskOfferBatch) error {
 	lock := s.batchLock(batch.BatchID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -227,104 +261,111 @@ func (s *Service) Submit(ctx context.Context, batch contracts.RoomTaskOfferBatch
 		if !sameBatch(record.Batch, batch) {
 			return errors.New("room transfer batch idempotency key belongs to another offer")
 		}
-	} else {
-		record = Record{Batch: batch, Lanes: make(map[string]LaneRecord), CreatedAt: now, UpdatedAt: now}
-		for _, lane := range batch.Lanes {
-			record.Lanes[lane.LaneID] = newLaneRecord(lane.LaneID)
+		return nil
+	}
+	record = Record{Batch: batch, Lanes: make(map[string]LaneRecord), CreatedAt: now, UpdatedAt: now}
+	for _, lane := range batch.Lanes {
+		record.Lanes[lane.LaneID] = newLaneRecord(lane.LaneID)
+	}
+	return s.store.Put(record)
+}
+
+func (s *Service) Submit(ctx context.Context, batch contracts.RoomTaskOfferBatch) error {
+	if err := s.Accept(batch); err != nil {
+		return err
+	}
+	failures := make([]error, len(batch.Lanes))
+	var group sync.WaitGroup
+	for index, offerLane := range batch.Lanes {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			failures[index] = s.runLane(ctx, batch, offerLane)
+		}()
+	}
+	group.Wait()
+	return errors.Join(failures...)
+}
+
+func (s *Service) runLane(ctx context.Context, batch contracts.RoomTaskOfferBatch, offerLane contracts.RoomSourceLane) error {
+	lock := s.laneLock(batch.BatchID, offerLane.LaneID)
+	lock.Lock()
+	defer lock.Unlock()
+	err := s.startLane(ctx, batch, offerLane)
+	if errors.Is(err, errLaneCancelled) {
+		return nil
+	}
+	return err
+}
+
+func (s *Service) startLane(ctx context.Context, batch contracts.RoomTaskOfferBatch, offerLane contracts.RoomSourceLane) error {
+	record, ok := s.store.Get(batch.BatchID)
+	if !ok {
+		return errors.New("room transfer batch disappeared")
+	}
+	lane := record.Lanes[offerLane.LaneID]
+	if lane.State == LaneCompleted || lane.State == LaneDispatched || lane.State == LaneFailed || lane.State == LaneCancelled {
+		return nil
+	}
+	if lane.WorkerID == "" {
+		placement, err := s.dispatcher.SelectWorker(batchCapabilities(batch), s.resourcesFor(batch, offerLane), nil)
+		if err != nil {
+			return fmt.Errorf("select Worker for room lane %s: %w", offerLane.LaneID, err)
 		}
-		if err := s.store.Put(record); err != nil {
+		lane.WorkerID, lane.NodeID = placement.WorkerID, placement.NodeID
+	}
+	if lane.SourceLease == nil || len(lane.TargetLeases) == 0 && len(lane.ProvisionFailures) == 0 {
+		provisionErr := s.provision(ctx, batch, offerLane, &lane)
+		if err := s.saveLane(batch.BatchID, lane); err != nil {
+			return err
+		}
+		if provisionErr != nil {
+			return provisionErr
+		}
+	}
+	if len(lane.ProvisionFailures) > 0 {
+		result := s.provisioningResult(batch, offerLane, lane)
+		if err := s.submitResult(ctx, &lane, result); err != nil {
+			return err
+		}
+		if err := s.saveLane(batch.BatchID, lane); err != nil {
 			return err
 		}
 	}
-	for _, offerLane := range batch.Lanes {
-		lane := record.Lanes[offerLane.LaneID]
-		if lane.State == LaneCompleted || lane.State == LaneDispatched {
-			continue
-		}
-		if lane.WorkerID == "" {
-			placement, err := s.dispatcher.SelectWorker(batchCapabilities(batch), s.resourcesFor(batch, offerLane), nil)
-			if err != nil {
-				return fmt.Errorf("select Worker for room lane %s: %w", offerLane.LaneID, err)
-			}
-			lane.WorkerID, lane.NodeID = placement.WorkerID, placement.NodeID
-		}
-		if lane.SourceLease == nil || len(lane.TargetLeases) == 0 && len(lane.ProvisionFailures) == 0 {
-			if err := s.provision(ctx, batch, offerLane, &lane); err != nil {
-				record.Lanes[lane.LaneID] = lane
-				record.UpdatedAt = s.config.Now().UTC()
-				if saveErr := s.store.Put(record); saveErr != nil {
-					return saveErr
-				}
-				return err
-			}
-			record.Lanes[lane.LaneID] = lane
-			record.UpdatedAt = s.config.Now().UTC()
-			if err := s.store.Put(record); err != nil {
-				return err
-			}
-		}
-		if len(lane.ProvisionFailures) > 0 {
-			result := s.provisioningResult(batch, offerLane, lane)
-			if err := s.submitResult(ctx, &lane, result); err != nil {
-				return err
-			}
-			record.Lanes[lane.LaneID] = lane
-			if err := s.store.Put(record); err != nil {
-				return err
-			}
-		}
-		if lane.SourceLease == nil || len(lane.TargetLeases) == 0 {
-			lane.State = LaneCompleted
-			record.Lanes[lane.LaneID] = lane
-			record.UpdatedAt = s.config.Now().UTC()
-			if err := s.store.Put(record); err != nil {
-				return err
-			}
-			continue
-		}
-		lane.State = LaneProvisioned
-		workload, err := s.workload(batch, offerLane, lane)
-		if err != nil {
-			return err
-		}
-		dispatched, err := s.dispatcher.Dispatch(ctx, dispatch.DispatchRequest{Source: dispatch.SourceRoomTransfer,
-			ExternalID: batch.BatchID + "/" + lane.LaneID, Spec: workload, WorkerID: lane.WorkerID, NodeID: lane.NodeID,
-			BeforeCommit: func(_ context.Context, task dispatch.Record) error {
-				acknowledgedAt := s.config.Now().UTC()
-				lane.WorkloadKey, lane.WorkerAcknowledgedAt = task.WorkloadKey, &acknowledgedAt
-				lane.State = LaneProvisioned
-				record.Lanes[lane.LaneID] = lane
-				record.UpdatedAt = acknowledgedAt
-				return s.store.Put(record)
-			}})
-		if err != nil {
-			lane.Error = err.Error()
-			result := s.dispatchFailureResult(batch, offerLane, lane, err)
-			if resultErr := s.submitResult(ctx, &lane, result); resultErr != nil {
-				record.Lanes[lane.LaneID] = lane
-				record.UpdatedAt = s.config.Now().UTC()
-				if saveErr := s.store.Put(record); saveErr != nil {
-					return errors.Join(err, resultErr, saveErr)
-				}
-				return errors.Join(err, resultErr)
-			}
-			lane.State = LaneCompleted
-			record.Lanes[lane.LaneID] = lane
-			record.UpdatedAt = result.ReportedAt
-			if saveErr := s.store.Put(record); saveErr != nil {
-				return saveErr
-			}
-			continue
-		}
-		acknowledgedAt := s.config.Now().UTC()
-		lane.State, lane.WorkloadKey = LaneDispatched, dispatched.WorkloadKey
-		record.Lanes[lane.LaneID] = lane
-		record.UpdatedAt = acknowledgedAt
-		if err := s.store.Put(record); err != nil {
-			return err
-		}
+	if lane.SourceLease == nil || len(lane.TargetLeases) == 0 {
+		lane.State = LaneCompleted
+		return s.saveLane(batch.BatchID, lane)
 	}
-	return nil
+	lane.State = LaneProvisioned
+	workload, err := s.workload(batch, offerLane, lane)
+	if err != nil {
+		return err
+	}
+	dispatched, err := s.dispatcher.Dispatch(ctx, dispatch.DispatchRequest{Source: dispatch.SourceRoomTransfer,
+		ExternalID: batch.BatchID + "/" + lane.LaneID, Spec: workload, WorkerID: lane.WorkerID, NodeID: lane.NodeID,
+		BeforeCommit: func(_ context.Context, task dispatch.Record) error {
+			acknowledgedAt := s.config.Now().UTC()
+			lane.WorkloadKey, lane.WorkerAcknowledgedAt = task.WorkloadKey, &acknowledgedAt
+			lane.State = LaneProvisioned
+			return s.saveLane(batch.BatchID, lane)
+		}})
+	if errors.Is(err, errLaneCancelled) {
+		return err
+	}
+	if err != nil {
+		lane.Error = err.Error()
+		result := s.dispatchFailureResult(batch, offerLane, lane, err)
+		if resultErr := s.submitResult(ctx, &lane, result); resultErr != nil {
+			if saveErr := s.saveLane(batch.BatchID, lane); saveErr != nil {
+				return errors.Join(err, resultErr, saveErr)
+			}
+			return errors.Join(err, resultErr)
+		}
+		lane.State = LaneCompleted
+		return s.saveLane(batch.BatchID, lane)
+	}
+	lane.State, lane.WorkloadKey = LaneDispatched, dispatched.WorkloadKey
+	return s.saveLane(batch.BatchID, lane)
 }
 
 func (s *Service) DeliverCheckpoint(ctx context.Context, checkpoint domain.Checkpoint) error {
@@ -334,9 +375,9 @@ func (s *Service) DeliverCheckpoint(ctx context.Context, checkpoint domain.Check
 	key := checkpoint.WorkloadID + "/" + checkpoint.AttemptID
 	record, laneID, found := s.findByWorkload(key)
 	if !found {
-		return errors.New("room transfer checkpoint does not match a durable lane")
+		return dispatch.TerminalDelivery(errors.New("room transfer checkpoint does not match a durable lane"))
 	}
-	lock := s.batchLock(record.Batch.BatchID)
+	lock := s.laneLock(record.Batch.BatchID, laneID)
 	lock.Lock()
 	defer lock.Unlock()
 	record, ok := s.store.Get(record.Batch.BatchID)
@@ -394,9 +435,7 @@ func (s *Service) DeliverCheckpoint(ctx context.Context, checkpoint domain.Check
 	lane.SourceReceipts, lane.TargetReceipts, lane.FinalTargetReceipts = result.SourceReceipts, result.TargetReceipts, result.FinalTargetReceipts
 	lane.StorageResults = result.StorageResults
 	lane.SourceReads = result.SourceReads
-	record.Lanes[laneID] = lane
-	record.UpdatedAt = result.ReportedAt
-	return s.store.Put(record)
+	return s.saveLane(record.Batch.BatchID, lane)
 }
 
 func (s *Service) provision(ctx context.Context, batch contracts.RoomTaskOfferBatch, offer contracts.RoomSourceLane, lane *LaneRecord) error {
@@ -462,9 +501,9 @@ func (s *Service) provision(ctx context.Context, batch contracts.RoomTaskOfferBa
 func (s *Service) DeliverResult(ctx context.Context, task dispatch.Record, result domain.Result) error {
 	record, laneID, found := s.findByWorkload(task.WorkloadKey)
 	if !found {
-		return errors.New("room transfer result does not match a durable lane")
+		return dispatch.TerminalDelivery(errors.New("room transfer result does not match a durable lane"))
 	}
-	lock := s.batchLock(record.Batch.BatchID)
+	lock := s.laneLock(record.Batch.BatchID, laneID)
 	lock.Lock()
 	defer lock.Unlock()
 	record, ok := s.store.Get(record.Batch.BatchID)
@@ -518,9 +557,7 @@ func (s *Service) DeliverResult(ctx context.Context, task dispatch.Record, resul
 	lane.StorageResults = roomResult.StorageResults
 	lane.SourceReads = roomResult.SourceReads
 	lane.State = LaneCompleted
-	record.Lanes[laneID] = lane
-	record.UpdatedAt = s.config.Now().UTC()
-	return s.store.Put(record)
+	return s.saveLane(record.Batch.BatchID, lane)
 }
 
 func (s *Service) DeliverProgress(ctx context.Context, task dispatch.Record, progress domain.Progress) error {
@@ -532,7 +569,7 @@ func (s *Service) DeliverProgress(ctx context.Context, task dispatch.Record, pro
 	if !found {
 		return errors.New("room transfer progress does not match a durable lane")
 	}
-	lock := s.batchLock(record.Batch.BatchID)
+	lock := s.laneLock(record.Batch.BatchID, laneID)
 	lock.Lock()
 	defer lock.Unlock()
 	record, ok := s.store.Get(record.Batch.BatchID)
@@ -565,9 +602,7 @@ func (s *Service) DeliverProgress(ctx context.Context, task dispatch.Record, pro
 		return err
 	}
 	lane.Runtime = &directRuntime
-	record.Lanes[laneID] = lane
-	record.UpdatedAt = roomResult.ReportedAt
-	return s.store.Put(record)
+	return s.saveLane(record.Batch.BatchID, lane)
 }
 
 func (s *Service) Replay(ctx context.Context) {

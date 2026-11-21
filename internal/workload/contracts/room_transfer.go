@@ -25,8 +25,10 @@ const (
 	RoomStorageCapability              = "room.transfer.storage.v2"
 	RoomStorageProtectionScheme        = "btr.object.transport.tls.v1"
 	RoomTransferLeaseRenewalCapability = "room.transfer.lease_renewal.v1"
+	RoomTransferStreamRelayCapability  = "room.transfer.stream_relay.v1"
 	TunnelLeaseRoleSourceRead          = "source_read"
 	TunnelLeaseRoleTargetWrite         = "target_write"
+	RoomObjectStorageTargetKind        = "object_storage"
 )
 
 // TransferAuthenticatedPartCapability executes authenticated_part_v1 and
@@ -369,7 +371,7 @@ func (b RoomTaskOfferBatch) Validate(now time.Time) error {
 	targets := make(map[string]RoomTransferTarget, len(b.Targets))
 	for _, target := range b.Targets {
 		validTarget := (target.Kind == "" || target.Kind == "agent") && validEd25519Key(target.ReceiptPublicKey)
-		if b.SchemaVersion == RoomStorageSchemaVersion && target.Kind == "object_storage" {
+		if b.SchemaVersion == RoomStorageSchemaVersion && target.Kind == RoomObjectStorageTargetKind {
 			validTarget = target.ReceiptPublicKey == ""
 		}
 		if target.MemberID == "" || !validTarget {

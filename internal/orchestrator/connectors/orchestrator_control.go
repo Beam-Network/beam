@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Beam-Network/beam/internal/orchestrator/dispatch"
@@ -214,6 +215,12 @@ func (session *roomControlSession) run(ctx context.Context) error {
 			<-stopped
 		}()
 	}
+	jobsCtx, stopJobs := context.WithCancel(ctx)
+	var jobs sync.WaitGroup
+	defer func() {
+		stopJobs()
+		jobs.Wait()
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -246,13 +253,26 @@ func (session *roomControlSession) run(ctx context.Context) error {
 					log.Printf("ignore invalid BeamCore room cancellation: %v", err)
 				}
 			case "room_lane_lease_update":
-				if err := control.handleLeaseUpdate(ctx, message.Data); err != nil {
-					log.Printf("ignore BeamCore room lane lease update: %v", err)
-				}
+				jobs.Add(1)
+				go func(encoded []byte) {
+					defer jobs.Done()
+					if err := control.handleLeaseUpdate(jobsCtx, encoded); err != nil {
+						log.Printf("ignore BeamCore room lane lease update: %v", err)
+					}
+				}(message.Data)
 			case "room_task_offer_batch":
-				if err := control.handleOffer(ctx, message.Data); err != nil {
+				batch, err := control.acceptOffer(message.Data)
+				if err != nil {
 					log.Printf("ignore invalid BeamCore room transfer offer: %v", err)
+					continue
 				}
+				jobs.Add(1)
+				go func() {
+					defer jobs.Done()
+					if err := control.rooms.Submit(jobsCtx, batch); err != nil {
+						log.Printf("room transfer offer %s: %v", batch.BatchID, err)
+					}
+				}()
 			default:
 				log.Printf("ignore BeamCore control message of unknown type %q", messageType)
 			}
@@ -439,16 +459,16 @@ func (control *roomControl) handleLeaseUpdate(ctx context.Context, encoded []byt
 	return control.rooms.ExtendLease(ctx, update)
 }
 
-func (control *roomControl) handleOffer(ctx context.Context, encoded []byte) error {
+func (control *roomControl) acceptOffer(encoded []byte) (contracts.RoomTaskOfferBatch, error) {
 	payload, err := decodeControlPayload(encoded, "room_task_offer_batch")
 	if err != nil {
-		return err
+		return contracts.RoomTaskOfferBatch{}, err
 	}
 	var batch contracts.RoomTaskOfferBatch
 	if err := json.Unmarshal(payload, &batch); err != nil {
-		return err
+		return contracts.RoomTaskOfferBatch{}, err
 	}
-	return control.rooms.Submit(ctx, batch)
+	return batch, control.rooms.Accept(batch)
 }
 
 func (control *roomControl) handleTaskOfferBatchCancel(ctx context.Context, encoded []byte) error {
@@ -569,6 +589,9 @@ func (control *roomControl) capabilityManifest(now time.Time) contracts.Capabili
 		}
 		if (e2ee || storage) && control.rooms.LeaseRenewalAvailable() {
 			capabilities = append(capabilities, contracts.RoomTransferLeaseRenewalCapability)
+		}
+		if (e2ee || storage) && control.rooms.StreamRelayAvailable() {
+			capabilities = append(capabilities, contracts.RoomTransferStreamRelayCapability)
 		}
 	}
 	for _, kind := range []domain.Kind{domain.KindRoomDatagram, domain.KindRoomMessage, domain.KindRoomCommand,

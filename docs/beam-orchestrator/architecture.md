@@ -47,6 +47,13 @@ Worker (WCP `workload.extend`), which moves its deadline and reports its
 runtime at that expiry. The orchestrator advertises it while a selectable Room
 Worker does.
 
+`room.transfer.stream_relay.v1` marks a Worker that holds a Room lane's source
+upload until it can accept the chunk and holds target downloads until the chunk
+arrives, on kept-alive connections. Targets receive the bytes while the upload
+is in progress; the final byte follows once the Worker verified the whole chunk
+against the source's signed range hash. The orchestrator advertises it while a
+selectable Room Worker does.
+
 ## Setup Guides
 
 - [Orchestrator guide](../orchestrator.md)

@@ -288,8 +288,13 @@ func (e *Engine) Extend(extension domain.Extension) error {
 	if !spec.Lease.AssignmentExpiresAt.After(record.Spec.Lease.AssignmentExpiresAt) {
 		return nil
 	}
-	record.Spec, record.UpdatedAt = spec, e.now()
-	if err := e.store.Save(record); err != nil {
+	if _, err := e.store.Update(key, func(current *Record) error {
+		if !spec.Lease.AssignmentExpiresAt.After(current.Spec.Lease.AssignmentExpiresAt) {
+			return errUnchanged
+		}
+		current.Spec, current.UpdatedAt = spec, e.now()
+		return nil
+	}); err != nil {
 		return err
 	}
 	if !lease.extend(spec.Lease.AssignmentExpiresAt) {
@@ -338,7 +343,12 @@ func (e *Engine) execute(ctx context.Context, record Record) {
 	started := e.now()
 	record.State = domain.StateRunning
 	record.UpdatedAt = started
-	_ = e.store.Save(record)
+	if current, err := e.store.Update(key, func(current *Record) error {
+		current.State, current.UpdatedAt = domain.StateRunning, started
+		return nil
+	}); err == nil {
+		record = current
+	}
 
 	handler, err := e.registry.Handler(record.Spec.Kind)
 	var result domain.Result
@@ -378,15 +388,10 @@ func (e *Engine) execute(ctx context.Context, record Record) {
 	} else {
 		result.State = domain.StateCompleted
 	}
-	record.State = result.State
-	record.Result = &result
-	if current, getErr := e.store.Get(key); getErr == nil {
-		record.Spec = current.Spec
-		record.Progress = current.Progress
-		record.Checkpoint = current.Checkpoint
-	}
-	record.UpdatedAt = result.CompletedAt
-	_ = e.store.Save(record)
+	_, _ = e.store.Update(key, func(current *Record) error {
+		current.State, current.Result, current.UpdatedAt = result.State, &result, result.CompletedAt
+		return nil
+	})
 	select {
 	case e.resultSaved <- struct{}{}:
 	default:
@@ -398,28 +403,26 @@ func (e *Engine) execute(ctx context.Context, record Record) {
 }
 
 func (e *Engine) reportCheckpoint(key string, checkpoint domain.Checkpoint) error {
-	record, err := e.store.Get(key)
-	if err != nil {
-		return err
-	}
 	if strings.TrimSpace(checkpoint.Schema) == "" || checkpoint.Sequence == 0 ||
 		len(checkpoint.Payload) > 8<<20 || !json.Valid(checkpoint.Payload) {
 		return errors.New("invalid workload checkpoint")
 	}
-	if checkpoint.WorkloadID != record.Spec.WorkloadID || checkpoint.AttemptID != record.Spec.AttemptID || checkpoint.Kind != record.Spec.Kind {
-		return errors.New("checkpoint identity does not match workload")
-	}
-	expected := uint64(1)
-	if record.Checkpoint != nil {
-		expected = record.Checkpoint.Sequence + 1
-	}
-	if checkpoint.Sequence != expected {
-		return fmt.Errorf("checkpoint sequence %d does not follow %d", checkpoint.Sequence, expected-1)
-	}
-	checkpoint.ObservedAt = e.now().UTC()
-	record.Checkpoint = &checkpoint
-	record.UpdatedAt = checkpoint.ObservedAt
-	if err := e.store.Save(record); err != nil {
+	if _, err := e.store.Update(key, func(record *Record) error {
+		if checkpoint.WorkloadID != record.Spec.WorkloadID || checkpoint.AttemptID != record.Spec.AttemptID || checkpoint.Kind != record.Spec.Kind {
+			return errors.New("checkpoint identity does not match workload")
+		}
+		expected := uint64(1)
+		if record.Checkpoint != nil {
+			expected = record.Checkpoint.Sequence + 1
+		}
+		if checkpoint.Sequence != expected {
+			return fmt.Errorf("checkpoint sequence %d does not follow %d", checkpoint.Sequence, expected-1)
+		}
+		checkpoint.ObservedAt = e.now().UTC()
+		record.Checkpoint = &checkpoint
+		record.UpdatedAt = checkpoint.ObservedAt
+		return nil
+	}); err != nil {
 		return err
 	}
 	select {
@@ -438,13 +441,14 @@ func (e *Engine) reportProgress(key string, outputs map[string]string) {
 		WorkloadID: record.Spec.WorkloadID, AttemptID: record.Spec.AttemptID,
 		State: record.State, Outputs: maps.Clone(outputs), ObservedAt: e.now(),
 	}
-	record.Progress = &progress
-	record.UpdatedAt = progress.ObservedAt
 	select {
 	case e.progress <- progress:
 	default:
 	}
-	_ = e.store.Save(record)
+	_, _ = e.store.Update(key, func(current *Record) error {
+		current.Progress, current.UpdatedAt = &progress, progress.ObservedAt
+		return nil
+	})
 }
 
 func decisionFor(record Record) Decision {
