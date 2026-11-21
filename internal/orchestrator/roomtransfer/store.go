@@ -132,6 +132,10 @@ func (s *FileStore) Put(value Record) error {
 	defer s.mu.Unlock()
 	previous, existed := s.records[value.Batch.BatchID]
 	s.records[value.Batch.BatchID] = clone(value)
+	finished := finishedBatches(s.records, time.Now())
+	for _, batchID := range finished {
+		delete(s.records, batchID)
+	}
 	if err := s.persist(); err != nil {
 		if existed {
 			s.records[value.Batch.BatchID] = previous
@@ -141,6 +145,34 @@ func (s *FileStore) Put(value Record) error {
 		return err
 	}
 	return nil
+}
+
+const finishedBatchRetention = 10 * time.Minute
+
+func finishedBatches(records map[string]Record, now time.Time) []string {
+	var finished []string
+	for batchID, record := range records {
+		ends := record.Batch.OfferExpiresAt
+		done := len(record.Lanes) > 0
+		for _, lane := range record.Lanes {
+			if lane.State != LaneCompleted && lane.State != LaneFailed && lane.State != LaneCancelled {
+				done = false
+				break
+			}
+			if lane.SourceLease != nil && lane.SourceLease.ExpiresAt.After(ends) {
+				ends = lane.SourceLease.ExpiresAt
+			}
+			for _, lease := range lane.TargetLeases {
+				if lease.ExpiresAt.After(ends) {
+					ends = lease.ExpiresAt
+				}
+			}
+		}
+		if done && now.Sub(ends) > finishedBatchRetention {
+			finished = append(finished, batchID)
+		}
+	}
+	return finished
 }
 func (s *FileStore) persist() error {
 	directory := filepath.Dir(s.path)

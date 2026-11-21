@@ -13,6 +13,7 @@ import (
 type Store interface {
 	Get(string) (Record, bool)
 	Put(Record) error
+	Stage(Record) error
 	List() []Record
 }
 
@@ -39,6 +40,8 @@ func (s *MemoryStore) Put(record Record) error {
 	s.mu.Unlock()
 	return nil
 }
+
+func (s *MemoryStore) Stage(record Record) error { return s.Put(record) }
 
 func (s *MemoryStore) List() []Record {
 	s.mu.RLock()
@@ -120,6 +123,16 @@ func (s *FileStore) Put(record Record) error {
 		}
 		return err
 	}
+	return nil
+}
+
+func (s *FileStore) Stage(record Record) error {
+	if err := record.Validate(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.records[record.WorkloadKey] = cloneRecord(record)
+	s.mu.Unlock()
 	return nil
 }
 

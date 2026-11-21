@@ -22,10 +22,15 @@ import (
 	"github.com/Beam-Network/beam/internal/workload/storagehttp"
 )
 
+const storageIdleConnectionsPerHost = 256
+
 // A redirect could forward an assignment token or a signed provider request to
 // a different authority. Errors deliberately omit URLs, headers and bodies.
 func storageHTTPClient() *http.Client {
-	return &http.Client{Timeout: 35 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 0
+	transport.MaxIdleConnsPerHost = storageIdleConnectionsPerHost
+	return &http.Client{Timeout: 35 * time.Second, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error {
 		return storageFault("redirect", "storage redirects are not permitted")
 	}}
 }
@@ -158,11 +163,16 @@ func storageRange(transfer contracts.RoomTransfer, index int64) (int64, int64) {
 
 func readStorageChunk(ctx context.Context, client *http.Client, transfer contracts.RoomTransfer,
 	workerID string, index int64, now func() time.Time) ([]byte, contracts.StorageRangeResult, error) {
-	lease := transfer.SourceLease
-	route, err := resolveStorageRoute(ctx, client, transfer, workerID, lease, index, "", now())
+	route, err := resolveStorageRoute(ctx, client, transfer, workerID, transfer.SourceLease, index, "", now())
 	if err != nil {
 		return nil, contracts.StorageRangeResult{}, err
 	}
+	return readStorageRoute(ctx, client, transfer, route, index, now)
+}
+
+func readStorageRoute(ctx context.Context, client *http.Client, transfer contracts.RoomTransfer,
+	route contracts.StorageRoute, index int64, now func() time.Time) ([]byte, contracts.StorageRangeResult, error) {
+	lease := transfer.SourceLease
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, route.Endpoint.URL, nil)
 	if err != nil {
 		return nil, contracts.StorageRangeResult{}, storageFault("source_request_invalid", "invalid storage source request")

@@ -9,7 +9,6 @@ import (
 	"sync"
 
 	"github.com/Beam-Network/beam/internal/workload/contracts"
-	workloadprogress "github.com/Beam-Network/beam/internal/workload/progress"
 )
 
 type deliveryOutcome struct {
@@ -22,7 +21,7 @@ type deliveryOutcome struct {
 // Destination concurrency is independent of snapshot size. Every destination
 // uses current.payload; the source reader is never called by delivery retries.
 func (h *Handler) deliverChunk(ctx context.Context, workerID string, active *session, current *chunk,
-	index int64, resume *checkpointValue) ([]contracts.RoomFailure, error) {
+	index int64, resume *checkpointValue, checkpoints *laneCheckpoints) []contracts.RoomFailure {
 	outcomes := make(chan deliveryOutcome, 8)
 	var workers sync.WaitGroup
 	storageTargets := make([]contracts.RoomTransferDestination, 0)
@@ -67,7 +66,6 @@ func (h *Handler) deliverChunk(ctx context.Context, workerID string, active *ses
 	}
 	go func() { workers.Wait(); close(outcomes) }()
 	var failures []contracts.RoomFailure
-	var checkpointErr error
 	for outcome := range outcomes {
 		target := outcome.target
 		if outcome.err != nil {
@@ -80,21 +78,28 @@ func (h *Handler) deliverChunk(ctx context.Context, workerID string, active *ses
 			continue
 		}
 		key := receiptKey(target.MemberID, index)
+		var change func(*checkpointValue)
 		if target.Lease.Storage != nil {
 			resume.StorageResults[storageResultKey(outcome.storage)] = outcome.storage
+			change = recordStorageResult(outcome.storage)
 		} else {
-			resume.TargetReceipts[key] = outcome.agent.RangeReceipt
-			if outcome.agent.FinalReceipt != nil {
-				resume.FinalReceipts[target.MemberID] = *outcome.agent.FinalReceipt
+			receipt, final := outcome.agent.RangeReceipt, outcome.agent.FinalReceipt
+			resume.TargetReceipts[key] = receipt
+			if final != nil {
+				resume.FinalReceipts[target.MemberID] = *final
+			}
+			memberID := target.MemberID
+			change = func(value *checkpointValue) {
+				value.TargetReceipts[key] = receipt
+				if final != nil {
+					value.FinalReceipts[memberID] = *final
+				}
 			}
 		}
-		if err := saveCheckpoint(ctx, active.transfer.SchemaVersion, *resume, key); err != nil {
-			checkpointErr = err
-		}
-		workloadprogress.Report(ctx, map[string]string{"phase": "delivered", "lane_id": active.transfer.LaneID,
+		checkpoints.record(change, key, map[string]string{"phase": "delivered", "lane_id": active.transfer.LaneID,
 			"target_member_id": target.MemberID, "chunk_index": strconv.FormatInt(index, 10)})
 	}
-	return failures, checkpointErr
+	return failures
 }
 
 func targetDelivered(resume checkpointValue, target contracts.RoomTransferDestination, index int64) bool {

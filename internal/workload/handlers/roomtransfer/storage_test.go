@@ -195,12 +195,10 @@ func TestPendingAgentsDoNotBlockStorageAndCoalescedReceiptsComplete(t *testing.T
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	done := make(chan []contracts.RoomFailure, 1)
+	checkpoints := newLaneCheckpoints(ctx, transfer.SchemaVersion, resume)
+	defer checkpoints.close()
 	go func() {
-		failures, err := handler.deliverChunk(ctx, "worker", active, current, 0, &resume)
-		if err != nil {
-			t.Error(err)
-		}
-		done <- failures
+		done <- handler.deliverChunk(ctx, "worker", active, current, 0, &resume, checkpoints)
 	}()
 	select {
 	case <-stored:

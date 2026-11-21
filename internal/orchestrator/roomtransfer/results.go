@@ -19,7 +19,11 @@ import (
 
 func (s *Service) resourcesFor(batch contracts.RoomTaskOfferBatch, lane contracts.RoomSourceLane) domain.Resources {
 	resources := s.config.Resources
-	resources.MemoryBytes = max(resources.MemoryBytes, contracts.RoomBufferMemoryBytes(batch.FileSizeBytes, batch.ChunkSizeBytes))
+	memory := contracts.RoomBufferMemoryBytes(batch.FileSizeBytes, batch.ChunkSizeBytes)
+	if storageSourceLane(batch, lane) {
+		memory = contracts.RoomStorageSourceMemoryBytes(batch.FileSizeBytes, batch.ChunkSizeBytes)
+	}
+	resources.MemoryBytes = max(resources.MemoryBytes, memory)
 	connections := len(lane.TargetMemberIDs) + 1
 	if batch.SchemaVersion == contracts.RoomStorageSchemaVersion {
 		connections = min(8, len(lane.TargetMemberIDs)) + 1
@@ -226,6 +230,22 @@ func verifyTargetFailure(batch contracts.RoomTaskOfferBatch, offer contracts.Roo
 	return nil
 }
 
+func storageSourceLane(batch contracts.RoomTaskOfferBatch, lane contracts.RoomSourceLane) bool {
+	if batch.SchemaVersion != contracts.RoomStorageSchemaVersion {
+		return false
+	}
+	kinds := make(map[string]string, len(batch.Targets))
+	for _, target := range batch.Targets {
+		kinds[target.MemberID] = target.Kind
+	}
+	for _, memberID := range lane.TargetMemberIDs {
+		if kinds[memberID] == contracts.RoomObjectStorageTargetKind {
+			return false
+		}
+	}
+	return true
+}
+
 func batchCapabilities(batch contracts.RoomTaskOfferBatch) []string {
 	if batch.SchemaVersion == contracts.RoomStorageSchemaVersion {
 		return []string{contracts.RoomTransferCapability, contracts.RoomStorageCapability}
@@ -299,6 +319,33 @@ func (s *Service) findByWorkload(key string) (Record, string, bool) {
 func (s *Service) batchLock(batchID string) *sync.Mutex {
 	value, _ := s.batchLocks.LoadOrStore(batchID, &sync.Mutex{})
 	return value.(*sync.Mutex)
+}
+
+func (s *Service) laneLock(batchID, laneID string) *sync.Mutex {
+	value, _ := s.laneLocks.LoadOrStore(batchID+"\x00"+laneID, &sync.Mutex{})
+	return value.(*sync.Mutex)
+}
+
+var errLaneCancelled = errors.New("room lane was cancelled")
+
+func (s *Service) saveLane(batchID string, lane LaneRecord) error {
+	lock := s.batchLock(batchID)
+	lock.Lock()
+	defer lock.Unlock()
+	record, ok := s.store.Get(batchID)
+	if !ok {
+		return errors.New("room transfer batch disappeared")
+	}
+	if current := record.Lanes[lane.LaneID]; current.State == LaneCancelled &&
+		(lane.State == LanePending || lane.State == LaneProvisioned || lane.State == LaneDispatched) {
+		lane.State, lane.Error = current.State, current.Error
+		record.Lanes[lane.LaneID] = lane
+		record.UpdatedAt = s.config.Now().UTC()
+		return errors.Join(errLaneCancelled, s.store.Put(record))
+	}
+	record.Lanes[lane.LaneID] = lane
+	record.UpdatedAt = s.config.Now().UTC()
+	return s.store.Put(record)
 }
 
 func newLaneRecord(laneID string) LaneRecord {

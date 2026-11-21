@@ -11,6 +11,7 @@ import (
 var (
 	ErrRecordExists   = errors.New("workload record already exists")
 	ErrRecordNotFound = errors.New("workload record not found")
+	errUnchanged      = errors.New("workload record unchanged")
 )
 
 type Record struct {
@@ -29,6 +30,7 @@ type Store interface {
 	Create(Record) error
 	Get(string) (Record, error)
 	Save(Record) error
+	Update(string, func(*Record) error) (Record, error)
 	List() []Record
 }
 
@@ -71,6 +73,27 @@ func (s *MemoryStore) Save(record Record) error {
 	}
 	s.records[key] = record
 	return nil
+}
+
+func (s *MemoryStore) Update(key string, mutate func(*Record) error) (Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.records[key]
+	if !ok {
+		return Record{}, ErrRecordNotFound
+	}
+	next := record
+	if err := mutate(&next); err != nil {
+		if errors.Is(err, errUnchanged) {
+			return record, nil
+		}
+		return Record{}, err
+	}
+	if next.Spec.Key() != key {
+		return Record{}, errors.New("workload update changes the record identity")
+	}
+	s.records[key] = next
+	return next, nil
 }
 
 func (s *MemoryStore) List() []Record {

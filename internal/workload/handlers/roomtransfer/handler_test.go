@@ -69,7 +69,8 @@ func TestDirectSessionBackpressuresAndAcceptsCompletedSourceRetry(t *testing.T) 
 		Targets: []contracts.RoomTransferDestination{{MemberID: "member-b",
 			Lease: directLease("target-lease", contracts.TunnelLeaseRoleTargetWrite, "member-b", targetKey.Public().(ed25519.PublicKey), now)}}}
 	active := &session{transfer: transfer, token: "runtime-token", now: func() time.Time { return now },
-		chunks: make(map[int64]*chunk), completed: make(map[int64]*completedChunk), expected: 0, changed: make(chan struct{}, 1)}
+		chunks: make(map[int64]*chunk), completed: make(map[int64]*completedChunk), expected: 0, changed: make(chan struct{}, 1),
+		hold: 200 * time.Millisecond}
 
 	post := func(index int64, payload []byte, readBody bool) *httptest.ResponseRecorder {
 		plaintextLength := int64(len(payload))

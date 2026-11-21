@@ -6,15 +6,24 @@ import (
 	"time"
 )
 
+const roomBufferOverheadBytes = int64(32 << 20)
+
 // RoomBufferMemoryBytes reserves one source chunk plus transport overhead.
 // Chunk policy belongs to Core; worker memory admission bounds buffering.
 func RoomBufferMemoryBytes(fileSize, chunkSize int64) int64 {
 	payload := min(fileSize, chunkSize)
-	const overhead = int64(32 << 20)
-	if payload <= 0 || payload > math.MaxInt64-overhead {
+	if payload <= 0 || payload > math.MaxInt64-roomBufferOverheadBytes {
 		return 0
 	}
-	return payload + overhead
+	return payload + roomBufferOverheadBytes
+}
+
+func RoomStorageSourceMemoryBytes(fileSize, chunkSize int64) int64 {
+	payload := min(fileSize, chunkSize)
+	if payload <= 0 || payload > (math.MaxInt64-roomBufferOverheadBytes)/2 {
+		return 0
+	}
+	return 2*payload + roomBufferOverheadBytes
 }
 
 // These counters measure admitted source payloads, independently of fanout.
