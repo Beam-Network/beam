@@ -26,7 +26,7 @@ Workers connect to `BEAM_WCP_ADDRESS` using `BEAM_WORKER_ID`, `BEAM_ORCHESTRATOR
 
 ```text
 ./bin/beam-worker serve --node-key data/worker/node.key \
-  --capabilities transfer.multipart,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v2,room.transfer.lease_renewal.v1 \
+  --capabilities transfer.multipart,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v2,room.transfer.lease_renewal.v1,room.transfer.stream_relay.v1 \
   --room-transfer-addr 0.0.0.0:9470 \
   --room-transfer-advertise-url http://worker.example.com:9470
 ```
@@ -96,9 +96,9 @@ For normal transfers, the worker receives a `workload.offer`:
 
 The worker downloads the source range, uploads the destination chunk or multipart part, and sends a result. Room transfer workloads use `room.transfer` with room-scoped source and target leases. For direct multipart signed URL transfers, the worker returns the provider `ETag`.
 
-Agent-only room transfers require `room.transfer`, `room.transfer.direct.v1` and `room.transfer.e2ee.v2` together. The advertised `http://` URL must reach the worker's room-transfer listener through its firewall/NAT; the listener starts on the first room task. A healthy WCP connection alone does not establish room-transfer reachability.
+Agent-only room transfers require `room.transfer`, `room.transfer.direct.v1`, `room.transfer.e2ee.v2` and `room.transfer.lease_renewal.v1` together. The advertised `http://` URL must reach the worker's room-transfer listener through its firewall/NAT; the listener starts on the first room task. A healthy WCP connection alone does not establish room-transfer reachability.
 
-Storage-backed room publications require `room.transfer.storage.v2` with `room.transfer`, plus `--room-storage-addr` and a directly reachable `https://` `--room-storage-advertise-url`. See the participant [worker setup](https://github.com/Beam-Network/beam/blob/main/docs/worker.md) for transport requirements.
+Storage-backed room publications require `room.transfer.storage.v2` and `room.transfer.lease_renewal.v1` with `room.transfer`, plus `--room-storage-addr` and a directly reachable `https://` `--room-storage-advertise-url`. See the participant [worker setup](https://github.com/Beam-Network/beam/blob/main/docs/worker.md) for transport requirements.
 
 ## Pool Membership
 
