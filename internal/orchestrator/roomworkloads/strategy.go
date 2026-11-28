@@ -171,9 +171,13 @@ func (s strategyBase[T, R]) Aggregate(def genericDefinition[T], attempts map[str
 			return contracts.RoomGenericResult{Identity: identity, State: contracts.RoomCompleted, Details: details}, true
 		case roomworkload.AttemptFailed:
 			detail := attempt.Error
-			details, _ := failedResultDetails[R](s.kind, def.Workload, detail, "worker_failed")
+			terminal, code := "worker_failed", "execution_failed"
+			if reason := contracts.MediaStateLostReason(detail); s.kind == domain.KindRoomMedia && reason != "" {
+				terminal, code = reason, reason
+			}
+			details, _ := failedResultDetails[R](s.kind, def.Workload, detail, terminal)
 			return contracts.RoomGenericResult{Identity: identity, State: contracts.RoomFailed,
-				Details: details, Failures: []contracts.RoomWorkloadFailure{{Origin: "worker", Code: "execution_failed", Retryable: true, Detail: &detail}}}, true
+				Details: details, Failures: []contracts.RoomWorkloadFailure{{Origin: "worker", Code: code, Retryable: true, Detail: &detail}}}, true
 		case roomworkload.AttemptCancelled:
 			detail := attempt.Error
 			details, _ := failedResultDetails[R](s.kind, def.Workload, detail, "expired")
@@ -248,11 +252,11 @@ func workerPayload[T, R any](definition contracts.RoomWorkloadDefinition[T], att
 	identity := definition.Identity
 	identity.WorkerID = attempt.WorkerID
 	return json.Marshal(contracts.RoomWorkerSpec[T]{Schema: contracts.RoomWorkloadSchema, Identity: identity,
-		Source: *attempt.Source.Credential, Targets: targets, Details: definition.Details})
+		Source: *attempt.Source.Credential, Targets: targets, Details: definition.Details, Redelivery: attempt.Redelivered})
 }
 
 func mediaPayload(definition contracts.RoomWorkloadDefinition[contracts.MediaUnitDetails], attempt genericAttempt[contracts.MediaUnitDetails, contracts.MediaResultDetails]) (json.RawMessage, error) {
-	if definition.Details.Profile == contracts.RoomMediaWebRTCWorkerProfile {
+	if definition.Details.Profile == contracts.RoomMediaWebRTCWorkerProfile || contracts.IsRoomMediaNodeProfile(definition.Details.Profile) {
 		return workerPayload[contracts.MediaUnitDetails, contracts.MediaResultDetails](definition, attempt)
 	}
 	if attempt.Source.Credential == nil {
@@ -405,7 +409,7 @@ func validateDetails(value any) error {
 		}
 	case contracts.MediaResultDetails:
 		if current.Packets < 0 || current.Bytes < 0 || current.Dropped < 0 || current.Tracks == nil || len(current.Tracks) > 128 ||
-			(current.TerminalReason != "ended" && current.TerminalReason != "source_closed" && current.TerminalReason != "worker_failed" && current.TerminalReason != "expired") {
+			!slices.Contains(contracts.MediaTerminalReasons, current.TerminalReason) {
 			return errors.New("invalid room.media result")
 		}
 		if err := validateMediaCounters(current.Tracks); err != nil {

@@ -33,16 +33,43 @@ type Certificates struct {
 }
 
 func WrapListener(listener net.Listener, now func() time.Time) (net.Listener, *Certificates) {
+	return WrapListenerWithFallback(listener, now, nil)
+}
+
+func WrapListenerWithFallback(listener net.Listener, now func() time.Time,
+	fallback func(*tls.ClientHelloInfo) (*tls.Certificate, error)) (net.Listener, *Certificates) {
+	return WrapListenerWithOptions(listener, now, ListenerOptions{Fallback: fallback})
+}
+
+type ListenerOptions struct {
+	Fallback   func(*tls.ClientHelloInfo) (*tls.Certificate, error)
+	MinVersion uint16
+	NextProtos []string
+}
+
+func WrapListenerWithOptions(listener net.Listener, now func() time.Time, options ListenerOptions) (net.Listener, *Certificates) {
 	store := &Certificates{now: now, byServer: make(map[string]*certificate)}
-	config := &tls.Config{MinVersion: tls.VersionTLS13, GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-		store.mu.Lock()
-		defer store.mu.Unlock()
-		entry := store.byServer[strings.ToLower(hello.ServerName)]
-		if entry == nil || !store.now().Before(entry.expiresAt) {
+	minimum := options.MinVersion
+	if minimum == 0 {
+		minimum = tls.VersionTLS13
+	}
+	fallback := options.Fallback
+	config := &tls.Config{MinVersion: minimum, NextProtos: append([]string(nil), options.NextProtos...),
+		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			store.mu.Lock()
+			entry := store.byServer[strings.ToLower(hello.ServerName)]
+			valid := entry != nil && store.now().Before(entry.expiresAt)
+			store.mu.Unlock()
+			if valid {
+				return &entry.value, nil
+			}
+			if fallback != nil {
+				if certificate, err := fallback(hello); err == nil && certificate != nil {
+					return certificate, nil
+				}
+			}
 			return nil, errors.New("worker certificate is not assigned")
-		}
-		return &entry.value, nil
-	}}
+		}}
 	return tls.NewListener(listener, config), store
 }
 
@@ -96,4 +123,35 @@ func newCertificate(now time.Time) (tls.Certificate, string, time.Time, error) {
 	}
 	digest := sha256.Sum256(der)
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, hex.EncodeToString(digest[:]), expiry, nil
+}
+
+func (store *Certificates) ServerNames() []string {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	now := store.now()
+	names := make([]string, 0, len(store.byServer))
+	for name, entry := range store.byServer {
+		if now.Before(entry.expiresAt) {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+func (store *Certificates) Current() *tls.Certificate {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.current == nil || !store.now().Before(store.current.expiresAt) {
+		return nil
+	}
+	return &store.current.value
+}
+
+func (store *Certificates) CurrentFingerprint() string {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.current == nil || !store.now().Before(store.current.expiresAt) {
+		return ""
+	}
+	return store.current.fingerprint
 }

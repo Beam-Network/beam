@@ -6,12 +6,14 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log"
 	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/Beam-Network/beam/internal/beamlink/circuit"
+	orchestratordomain "github.com/Beam-Network/beam/internal/orchestrator/domain"
 	"github.com/Beam-Network/beam/internal/orchestrator/registry"
 	"github.com/Beam-Network/beam/internal/orchestrator/scheduling"
 	"github.com/Beam-Network/beam/internal/workload/domain"
@@ -111,6 +113,8 @@ func (s *Service) RegisterSink(source Source, sink ResultSink) {
 	s.mu.Unlock()
 }
 
+var ErrAdmissionRejected = errors.New("Worker admission rejected")
+
 func (s *Service) Dispatch(ctx context.Context, request DispatchRequest) (Record, error) {
 	if request.Source == SourceBeamCore && s.BatchCancelled(request.BatchID) {
 		return Record{}, errors.New("batch_cancelled")
@@ -134,6 +138,9 @@ func (s *Service) Dispatch(ctx context.Context, request DispatchRequest) (Record
 			return existing, nil
 		}
 		record = existing
+		if request.ReplaceSpec {
+			record.Spec = request.Spec
+		}
 	} else {
 		now := s.config.Now().UTC()
 		record = Record{Source: request.Source, ExternalID: request.ExternalID, WorkloadKey: key, BatchID: request.BatchID,
@@ -204,7 +211,7 @@ func (s *Service) Dispatch(ctx context.Context, request DispatchRequest) (Record
 		if reason == "" {
 			reason = "Worker rejected workload"
 		}
-		return s.terminal(record, StateRejected, reason, fmt.Errorf("Worker admission rejected: %s", reason))
+		return s.terminal(record, StateRejected, reason, fmt.Errorf("%w: %s", ErrAdmissionRejected, reason))
 	}
 	record.State = StateReserved
 	record.UpdatedAt = s.config.Now().UTC()
@@ -248,11 +255,11 @@ func (s *Service) Dispatch(ctx context.Context, request DispatchRequest) (Record
 	return record, nil
 }
 
-func (s *Service) HandleProgress(progress domain.Progress) error {
-	return s.HandleProgressContext(context.Background(), progress)
+func (s *Service) HandleProgress(workerID string, progress domain.Progress) error {
+	return s.HandleProgressContext(context.Background(), workerID, progress)
 }
 
-func (s *Service) HandleProgressContext(ctx context.Context, progress domain.Progress) error {
+func (s *Service) HandleProgressContext(ctx context.Context, workerID string, progress domain.Progress) error {
 	key := progress.WorkloadID + "/" + progress.AttemptID
 	delivery := &s.deliveryLocks[lockIndex(key)]
 	delivery.Lock()
@@ -261,11 +268,14 @@ func (s *Service) HandleProgressContext(ctx context.Context, progress domain.Pro
 	lock.Lock()
 	defer lock.Unlock()
 	record, ok := s.store.Get(key)
-	if !ok {
-		return errors.New("progress does not match an external task")
-	}
-	if record.State == StateCompleted || record.State == StateFailed || record.State == StateCancelled || record.State == StateRejected {
-		return nil
+	if !ok || record.WorkerID != workerID ||
+		record.State == StateCompleted || record.State == StateFailed || record.State == StateCancelled || record.State == StateRejected {
+		held := "not held here"
+		if ok {
+			held = "held here as " + string(record.State) + " on Worker " + record.WorkerID
+		}
+		log.Printf("Worker %s runs workload %s (%s): cancel it there", workerID, key, held)
+		return s.control.Cancel(ctx, workerID, progress.WorkloadID, progress.AttemptID)
 	}
 	record.State = StateRunning
 	record.Progress = &progress
@@ -439,6 +449,18 @@ func (s *Service) SelectWorker(required []string, resources domain.Resources, ex
 		MaxObservationAge: s.config.MaxObservationAge, ExcludedWorkerIDs: excluded}, s.config.Now().UTC())
 }
 
+func (s *Service) SelectMediaWorker(required []string, resources domain.Resources, excluded []string,
+	media scheduling.MediaRequest) (scheduling.Placement, error) {
+	return s.scheduler.SelectMedia(scheduling.Request{RequiredCapabilities: required, Resources: resources,
+		MaxObservationAge: s.config.MaxObservationAge, ExcludedWorkerIDs: excluded}, media, s.config.Now().UTC())
+}
+
+func (s *Service) WorkerObservations() []orchestratordomain.WorkerObservation {
+	return s.registry.Observations()
+}
+
+func (s *Service) WorkerConnected(workerID string) bool { return s.control.Connected(workerID) }
+
 func (s *Service) CapabilityAvailable(capability string, resources domain.Resources) bool {
 	_, err := s.SelectWorker([]string{capability}, resources, nil)
 	return err == nil
@@ -459,6 +481,27 @@ func (s *Service) Cancel(ctx context.Context, key, reason string) error {
 	}
 	if err := s.control.Cancel(ctx, record.WorkerID, record.Spec.WorkloadID, record.Spec.AttemptID); err != nil {
 		return err
+	}
+	record.State = StateCancelled
+	record.UpstreamError = reason
+	record.UpdatedAt = s.config.Now().UTC()
+	return s.save(record, "external authority cancelled workload")
+}
+
+func (s *Service) CancelRecorded(ctx context.Context, key, reason string) error {
+	lock := s.recordLock(key)
+	lock.Lock()
+	defer lock.Unlock()
+	record, ok := s.store.Get(key)
+	if !ok {
+		return errors.New("workload cancellation does not match an external task")
+	}
+	if record.State == StateCompleted || record.State == StateFailed || record.State == StateCancelled || record.State == StateRejected {
+		return nil
+	}
+	if err := s.control.Cancel(ctx, record.WorkerID, record.Spec.WorkloadID, record.Spec.AttemptID); err != nil {
+		log.Printf("cancel of %s not delivered to Worker %s (%v): recorded, its next report gets it", key, record.WorkerID, err)
+		reason += " (not delivered to its Worker)"
 	}
 	record.State = StateCancelled
 	record.UpstreamError = reason

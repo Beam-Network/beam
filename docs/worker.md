@@ -5,7 +5,7 @@ transfer, and worker-hosted room workloads.
 
 ## Requirements
 
-- Go 1.24+
+- Go 1.26+
 - Bittensor worker hotkey (no subnet registration required)
 - BeamCore worker registration response with `worker_id`
 - Orchestrator WCP address, CA, server name, and membership
@@ -137,6 +137,31 @@ the media public IP to the address they reach. For clients behind restrictive
 networks, optionally list STUN/TURN URLs in `--media-ice-servers`
 (`BEAM_MEDIA_ICE_SERVERS`) and set `--media-turn-secret`
 (`BEAM_MEDIA_TURN_SECRET`) to issue temporary TURN credentials.
+
+## Media Roles
+
+`--media-roles` (`BEAM_MEDIA_ROLES`) enables the media roles a worker serves:
+`media.sfu`, `media.relay`, `media.ingest`, `media.transcode`, `media.package`,
+`media.shield` and `media.edge`. Each role adds `room.media` and the role's
+capability to `--capabilities`. A media worker needs a public IP
+(`--media-public-ip`), a region claim (`--media-region`) and its declared egress
+(`--media-egress-mbps`); `beam-worker serve -h` lists every `--media-*` flag.
+Startup fails closed when a role misses what it needs.
+
+Each media node reserves worker memory: 128 MiB for an SFU, relay or ingest
+node, 256 MiB for a packager, shield or edge node, and 512 MiB for a transcoder.
+Raise `--memory-bytes` to fit the nodes the worker holds at once.
+
+`media.transcode` runs ffmpeg in a sandbox container with Docker, and with the
+NVIDIA container runtime on GPU workers. Build its image once from the
+repository root:
+
+```bash
+docker build -f actors/worker/media-transcoder.Dockerfile -t media-transcoder:latest .
+```
+
+See [Media Roles](../guide/media-roles.md) for ports, certificates, bandwidth
+probes and draining.
 
 ## Authenticated Part Uploads
 

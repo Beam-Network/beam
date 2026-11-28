@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Beam-Network/beam/internal/workload/contracts/mediacontracts"
 	workload "github.com/Beam-Network/beam/internal/workload/domain"
 )
 
@@ -56,6 +57,7 @@ type WorkerObservation struct {
 	ObservedAt      time.Time
 	PlanVersion     uint64
 	CircuitEndpoint string
+	Media           *mediacontracts.WorkerCapacity `json:"-"`
 }
 
 type Manifest struct {

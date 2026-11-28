@@ -9,13 +9,16 @@ Beam validator weights are the final UID vector submitted to Bittensor. BeamCore
 
 ## Final weight formula
 
-BeamCore first computes a base raw score for every qualified orchestrator with a subnet UID:
+BeamCore first computes a base raw score for every qualified orchestrator with a subnet UID, rounded to the millionth:
 
 ```text
-raw_weight_i = verified_uploaded_mib_i
+raw_weight_i          = SUM over workloads w (verified_mib_i,w x workload_multiplier_w)
+workload_multiplier_w = billed_share_w / mib_share_w
 ```
 
-It then ranks qualified orchestrators by `raw_weight` and places them in five fixed-rank tiers, each with a multiplier per MiB:
+`verified_mib_i,w` is the orchestrator's verified MiB of workload `w` in the PRISM evidence window. `billed_share_w` is the workload's share of the list-price credits billed for counted work in that window, and `mib_share_w` is its share of all verified MiB. Each workload's share of the total raw weight is its share of billed credits. Without billed credits, every multiplier is 1.
+
+It then ranks qualified orchestrators by `raw_weight` and places them in five fixed-rank tiers, each with a multiplier:
 
 | Tier  | Rank band      | Tier multiplier |
 | ----- | -------------- | --------------- |
@@ -160,7 +163,7 @@ Each award expires independently **7 days (168 hours)** after application by def
 
 Awards follow your hotkey on the same subnet through resets and UID changes. Timers continue during inactivity or qualification.
 
-The bonus affects base emission shares. Tier membership follows raw uploads; routing and qualification follow workload profiles. Positive uploads and a positive penalty multiplier are required for positive weight.
+The bonus affects base emission shares. Tier membership follows raw weights; routing and qualification follow workload profiles. Positive uploads and a positive penalty multiplier are required for positive weight.
 
 Report them on the [bug desk](./bug-reports.md) with the **Exploit** or **Security** category.
 
@@ -194,7 +197,7 @@ The response includes matching `uids` and `weights` arrays. `workload_scoring` r
 	"uids": [12, 47, 52],
 	"weights": [0.5, 0.3, 0.2],
 	"uint16_weights": [32768, 19660, 13107],
-	"formula_version": "tier_multiplier_verified_uploaded_mib_x_fraud_report_reward_x_accumulated_allowance_x_sell_allowance_x_penalty_v9",
+	"formula_version": "tier_multiplier_workload_bill_share_mib_x_fraud_report_reward_x_accumulated_allowance_x_sell_allowance_x_penalty_v10",
 	"source": "epoch_summary",
 	"reward_evaluated_at": "2026-10-01T00:00:00.000Z",
 	"all_weights_zero": false

@@ -5,9 +5,11 @@ package roomworkload
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/Beam-Network/beam/internal/orchestrator/dispatch"
+	"github.com/Beam-Network/beam/internal/orchestrator/scheduling"
 	"github.com/Beam-Network/beam/internal/workload/domain"
 )
 
@@ -65,6 +67,8 @@ type RoomAttempt[U, I, C, P, R any] struct {
 	Progress    *RoomProgress[P]          `json:"progress,omitempty"`
 	Result      *RoomResult[R]            `json:"result,omitempty"`
 	Error       string                    `json:"error,omitempty"`
+	Redelivered bool                      `json:"redelivered,omitempty"`
+	Withheld    string                    `json:"withheld,omitempty"`
 }
 
 type Record[D, U, I, C, P, R any] struct {
@@ -102,6 +106,30 @@ type ResultSink[O any] interface {
 type ProgressSink[P any] interface {
 	DeliverRoomWorkloadProgress(context.Context, P) error
 }
+
+type Placer[D, U any] interface {
+	Place(RoomWorkloadDefinition[D], RoomExecutionUnit[U], []string, domain.Resources, []string) (scheduling.Placement, error)
+}
+
+type Refresher[D any] interface {
+	NeedsRefresh(RoomWorkloadDefinition[D]) bool
+	Refresh(ctx context.Context, definition RoomWorkloadDefinition[D], workerID, reason string) (D, error)
+}
+
+const (
+	RefreshOrchestratorRestarted = "orchestrator_restarted"
+	RefreshWorkerReconnected     = "worker_reconnected"
+	RefreshRedelivery            = "redelivery"
+)
+
+var ErrRefreshLater = errors.New("fresh offer not available yet")
+
+type RefreshRefused struct {
+	Reason      string
+	KeepRunning bool
+}
+
+func (r *RefreshRefused) Error() string { return "fresh offer refused: " + r.Reason }
 
 // Strategy is deliberately typed end-to-end: generic orchestration never
 // inspects workload payloads, lease details, progress fields, or proofs.

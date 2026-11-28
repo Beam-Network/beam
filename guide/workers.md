@@ -126,6 +126,12 @@ Workers can serve Room stream channels directly. Streams are opt-in:
 
 The orchestrator places streams only on workers that advertise `room.stream.direct.v1`, so update the orchestrator and its workers together. Stream frames are end-to-end encrypted between agents: the worker holds each frame until every live target has acknowledged it and never sees plaintext.
 
+## Media Roles
+
+Workers with a public IP can also serve calls, stages and broadcasts: SFU,
+relay, ingest, transcode, packager, shield and edge roles, enabled with
+`--media-roles`. See [Media Roles](./media-roles).
+
 ## Requirements
 
 | Requirement          | Notes                                                                      |

@@ -9,6 +9,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/Beam-Network/beam/internal/workload/contracts/mediacontracts"
 	"github.com/Beam-Network/beam/internal/workload/domain"
 )
 
@@ -169,6 +170,10 @@ type RoomWorkloadOfferWire[T any] struct {
 // Validate checks a canonical offer. allowNoTargets admits an empty destination
 // snapshot; callers set it only for late-join room media.
 func (v RoomWorkloadOfferWire[T]) Validate(now time.Time, allowNoTargets bool) error {
+	return v.ValidateProtocol(now, allowNoTargets, RoomPathProtocol(v.Kind))
+}
+
+func (v RoomWorkloadOfferWire[T]) ValidateProtocol(now time.Time, allowNoTargets bool, protocol string) error {
 	if v.Type != RoomWorkloadOffer || v.SchemaVersion != RoomWorkloadSchema || !IsLogicalRoomWorkloadKind(v.Kind) || v.WorkloadID == "" || v.RoomID == "" ||
 		v.ChannelID == "" || v.SourceMemberID == "" || v.DestinationSnapshot.SnapshotVersion == 0 ||
 		(len(v.DestinationSnapshot.Targets) == 0 && !allowNoTargets) || len(v.DestinationSnapshot.Targets) > 10_000 ||
@@ -186,14 +191,17 @@ func (v RoomWorkloadOfferWire[T]) Validate(now time.Time, allowNoTargets bool) e
 		}
 		seen[target.MemberID] = struct{}{}
 	}
-	if err := v.PathAuthorizations.Validate(v.Kind, v.UnitID, v.Epoch, v.Attempt, v.DestinationSnapshot.Targets, now); err != nil {
+	if err := v.PathAuthorizations.ValidateProtocol(protocol, v.UnitID, v.Epoch, v.Attempt, v.DestinationSnapshot.Targets, now); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (v RoomPathAuthorizations) Validate(kind domain.Kind, unitID string, epoch, attempt uint64, targets []RoomWireTarget, now time.Time) error {
-	protocol := RoomPathProtocol(kind)
+	return v.ValidateProtocol(RoomPathProtocol(kind), unitID, epoch, attempt, targets, now)
+}
+
+func (v RoomPathAuthorizations) ValidateProtocol(protocol, unitID string, epoch, attempt uint64, targets []RoomWireTarget, now time.Time) error {
 	attemptPath := fmt.Sprintf("%s/epoch-%d/attempt-%d", unitID, epoch, attempt)
 	if err := v.Source.validate(attemptPath+"/source", "source", "", protocol, now); err != nil {
 		return err
@@ -348,6 +356,11 @@ func IsLogicalRoomWorkloadKind(kind domain.Kind) bool {
 	}
 }
 
+const (
+	RoomWorkloadRefusedNoCapacity = "no_capacity"
+	RoomWorkloadRefusedDraining   = "draining"
+)
+
 type RoomWorkloadProvisioningResultWire struct {
 	Type           string      `json:"type"`
 	SchemaVersion  string      `json:"schema_version"`
@@ -357,7 +370,7 @@ type RoomWorkloadProvisioningResultWire struct {
 	Epoch          uint64      `json:"epoch"`
 	Attempt        uint64      `json:"attempt"`
 	ProvisioningID string      `json:"provisioning_id"`
-	WorkerID       string      `json:"worker_id"`
+	WorkerID       *string     `json:"worker_id"`
 	Admitted       bool        `json:"admitted"`
 	Reason         *string     `json:"reason"`
 	ReportedAt     time.Time   `json:"reported_at"`
@@ -451,11 +464,12 @@ type RoomWorkerTarget struct {
 }
 
 type RoomWorkerSpec[T any] struct {
-	Schema   string               `json:"schema"`
-	Identity RoomWorkloadIdentity `json:"identity"`
-	Source   RoomPathLease        `json:"source"`
-	Targets  []RoomWorkerTarget   `json:"targets"`
-	Details  T                    `json:"details"`
+	Schema     string               `json:"schema"`
+	Identity   RoomWorkloadIdentity `json:"identity"`
+	Source     RoomPathLease        `json:"source"`
+	Targets    []RoomWorkerTarget   `json:"targets"`
+	Details    T                    `json:"details"`
+	Redelivery bool                 `json:"redelivery,omitempty"`
 }
 
 type RoomPathRedemptionRequest struct {
@@ -905,6 +919,7 @@ type MediaProtection struct {
 	KeyScope string `json:"key_scope"`
 	Required bool   `json:"required"`
 }
+
 type MediaDefinitionDetails struct {
 	SessionID          string          `json:"session_id"`
 	Service            string          `json:"service"`
@@ -913,7 +928,9 @@ type MediaDefinitionDetails struct {
 	Layers             []MediaLayer    `json:"layers"`
 	Protection         MediaProtection `json:"protection"`
 	HeartbeatTimeoutMS int64           `json:"heartbeat_timeout_ms"`
+	MediaNodeFields
 }
+
 type MediaUnitDetails struct {
 	SessionID          string          `json:"session_id"`
 	ResumeFromSequence uint64          `json:"resume_from_sequence"`
@@ -923,6 +940,8 @@ type MediaUnitDetails struct {
 	Tracks             []MediaTrack    `json:"tracks"`
 	Layers             []MediaLayer    `json:"layers"`
 	Protection         MediaProtection `json:"protection"`
+	HeartbeatTimeoutMS int64           `json:"heartbeat_timeout_ms,omitempty"`
+	MediaNodeFields
 }
 type MediaTrackCounters struct {
 	TrackID string `json:"track_id"`
@@ -930,22 +949,27 @@ type MediaTrackCounters struct {
 	Bytes   int64  `json:"bytes"`
 	Dropped int64  `json:"dropped"`
 }
+
 type MediaProgressDetails struct {
-	Sequence uint64               `json:"sequence"`
-	Packets  int64                `json:"packets"`
-	Bytes    int64                `json:"bytes"`
-	Dropped  int64                `json:"dropped"`
-	Tracks   []MediaTrackCounters `json:"tracks"`
-	Runtime  *MediaRuntime        `json:"runtime,omitempty"`
+	Sequence    uint64                      `json:"sequence"`
+	Packets     int64                       `json:"packets"`
+	Bytes       int64                       `json:"bytes"`
+	Dropped     int64                       `json:"dropped"`
+	Tracks      []MediaTrackCounters        `json:"tracks"`
+	Runtime     *MediaRuntime               `json:"runtime,omitempty"`
+	NodeRuntime *mediacontracts.NodeRuntime `json:"-"`
+	Load        *mediacontracts.NodeLoad    `json:"load,omitempty"`
 }
 type MediaResultDetails struct {
-	Sequence       uint64               `json:"sequence"`
-	Packets        int64                `json:"packets"`
-	Bytes          int64                `json:"bytes"`
-	Dropped        int64                `json:"dropped"`
-	Tracks         []MediaTrackCounters `json:"tracks"`
-	Runtime        *MediaRuntime        `json:"runtime,omitempty"`
-	TerminalReason string               `json:"terminal_reason"`
+	Sequence       uint64                      `json:"sequence"`
+	Packets        int64                       `json:"packets"`
+	Bytes          int64                       `json:"bytes"`
+	Dropped        int64                       `json:"dropped"`
+	Tracks         []MediaTrackCounters        `json:"tracks"`
+	Runtime        *MediaRuntime               `json:"runtime,omitempty"`
+	NodeRuntime    *mediacontracts.NodeRuntime `json:"-"`
+	Load           *mediacontracts.NodeLoad    `json:"load,omitempty"`
+	TerminalReason string                      `json:"terminal_reason"`
 }
 
 // ValidateWebRTCMediaAdmission applies worker-hosted WebRTC media admission:

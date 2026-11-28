@@ -14,6 +14,7 @@ import (
 	"time"
 
 	workloadcheckpoint "github.com/Beam-Network/beam/internal/workload/checkpoint"
+	"github.com/Beam-Network/beam/internal/workload/delivery"
 	"github.com/Beam-Network/beam/internal/workload/domain"
 	workloadprogress "github.com/Beam-Network/beam/internal/workload/progress"
 	"github.com/Beam-Network/beam/internal/workload/runtime"
@@ -69,6 +70,7 @@ func (h *ProcessHandler) Execute(ctx context.Context, spec domain.Spec) (domain.
 		workloadprogress.Report(ctx, map[string]string{
 			"phase": "subsystem_restarting", "kind": string(h.Kind()), "attempt": fmt.Sprint(attempt + 1),
 		})
+		ctx = delivery.WithResumed(ctx)
 	}
 	return domain.Result{}, ErrProcessExited
 }
@@ -83,7 +85,7 @@ func (h *ProcessHandler) executeOnce(ctx context.Context, spec domain.Spec) (dom
 	if err != nil {
 		return domain.Result{}, err
 	}
-	request, err := json.Marshal(Request{Spec: spec, Checkpoint: workloadcheckpoint.Snapshot(ctx)})
+	request, err := json.Marshal(Request{Spec: spec, Checkpoint: workloadcheckpoint.Snapshot(ctx), Resumed: delivery.Resumed(ctx)})
 	if err != nil {
 		return domain.Result{}, err
 	}

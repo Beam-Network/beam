@@ -4,7 +4,7 @@ The Go worker connects to an orchestrator over BeamLink/WCP, advertises capabili
 
 ## Requirements
 
-- Go 1.24+
+- Go 1.26+
 - Bittensor worker hotkey (no subnet registration required)
 - BeamCore worker registration response with `worker_id`
 - Orchestrator WCP address, CA, server name, and membership

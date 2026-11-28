@@ -154,6 +154,13 @@ func (control *roomControl) bind(ctx context.Context) (_ *roomControlSession, er
 			return nil, err
 		}
 	}
+	if control.workloads != nil {
+		for _, messageType := range mediaControlFromRuntime {
+			if err = subscribe(messageType); err != nil {
+				return nil, err
+			}
+		}
+	}
 	if control.relays != nil {
 		// Relay frames have their own queue so offers never delay them.
 		for _, messageType := range []string{contracts.StorageProbeRelayOpenType, contracts.StorageProbeRelayDataType,
@@ -199,6 +206,27 @@ func (session *roomControlSession) run(ctx context.Context) error {
 			stopRelays()
 			<-stopped
 			control.relays.SetStorageProbeRelaySink(nil)
+		}()
+	}
+	if control.workloads != nil {
+		control.workloads.RegisterMediaOffers(control)
+		defer control.workloads.RegisterMediaOffers(nil)
+		mediaCtx, stopMedia := context.WithCancel(ctx)
+		stopped := make(chan struct{}, 2)
+		go func() {
+			control.keepCapacityReports(mediaCtx)
+			stopped <- struct{}{}
+		}()
+		go func() {
+			control.workloads.ForwardMediaUpstream(mediaCtx, control.submitMediaControl, func(err error) bool {
+				return transientMediaError(mediaCtx, err)
+			})
+			stopped <- struct{}{}
+		}()
+		defer func() {
+			stopMedia()
+			<-stopped
+			<-stopped
 		}()
 	}
 	var roomQueue *roomWorkloadQueue
@@ -273,6 +301,10 @@ func (session *roomControlSession) run(ctx context.Context) error {
 						log.Printf("room transfer offer %s: %v", batch.BatchID, err)
 					}
 				}()
+			case mediaTopologyUpdate, mediaCertResult:
+				if err := control.handleMediaControl(messageType, message.Data); err != nil {
+					log.Printf("ignore BeamCore %s: %v", messageType, err)
+				}
 			default:
 				log.Printf("ignore BeamCore control message of unknown type %q", messageType)
 			}
@@ -613,6 +645,9 @@ func (control *roomControl) capabilityManifest(now time.Time) contracts.Capabili
 		domain.KindRoomMedia, contracts.RoomMediaWebRTCCapability) {
 		capabilities = append(capabilities, contracts.RoomMediaWebRTCCapability)
 	}
+	if control.workloads != nil {
+		capabilities = append(capabilities, control.workloads.MediaCapabilities()...)
+	}
 	availableConnections := int64(0)
 	if len(capabilities) > 0 {
 		availableConnections = 1
@@ -656,13 +691,18 @@ func capabilityManifestFingerprint(manifest contracts.CapabilityManifest) string
 }
 
 func (control *roomControl) request(ctx context.Context, messageType string, payload any) error {
+	_, err := control.requestReply(ctx, messageType, payload)
+	return err
+}
+
+func (control *roomControl) requestReply(ctx context.Context, messageType string, payload any) (json.RawMessage, error) {
 	jsonPayload, err := json.Marshal(payload)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var normalizedPayload map[string]any
 	if err := json.Unmarshal(jsonPayload, &normalizedPayload); err != nil {
-		return err
+		return nil, err
 	}
 	if normalizedPayload == nil {
 		normalizedPayload = map[string]any{}
@@ -670,28 +710,31 @@ func (control *roomControl) request(ctx context.Context, messageType string, pay
 	normalizedPayload["type"] = messageType
 	encoded, err := msgpack.Marshal(normalizedPayload)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	requestContext, cancel := context.WithTimeout(ctx, control.config.RequestTimeout)
 	defer cancel()
 	message, err := control.conn.requestWithContext(requestContext, control.subject("orch", messageType), encoded)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var response map[string]any
 	if err := msgpack.Unmarshal(message.Data, &response); err != nil {
-		return err
+		return nil, err
 	}
 	if replyType, _ := response["type"].(string); replyType != controlReplyType(messageType) {
 		reason, _ := response["reason"].(string)
 		if reason == "" {
 			reason, _ = response["message"].(string)
 		}
-		return fmt.Errorf("BeamCore rejected %s with %v: %s", messageType, response["type"], fallback(reason, "no reason supplied"))
+		if mediaUpstreamTypes[messageType] {
+			return nil, mediaErrorReply(messageType, replyType, reason)
+		}
+		return nil, fmt.Errorf("BeamCore rejected %s with %v: %s", messageType, response["type"], fallback(reason, "no reason supplied"))
 	}
 	encodedPayload, err := json.Marshal(response)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if messageType == "capability_update" {
 		var acknowledgement struct {
@@ -699,18 +742,21 @@ func (control *roomControl) request(ctx context.Context, messageType string, pay
 			Reason   string `json:"reason"`
 		}
 		if err := json.Unmarshal(encodedPayload, &acknowledgement); err != nil {
-			return err
+			return nil, err
 		}
 		if !acknowledgement.Accepted {
-			return fmt.Errorf("BeamCore rejected capability_update: %s", fallback(acknowledgement.Reason, "not accepted"))
+			return nil, fmt.Errorf("BeamCore rejected capability_update: %s", fallback(acknowledgement.Reason, "not accepted"))
 		}
+	}
+	if mediaUpstreamTypes[messageType] {
+		return encodedPayload, mediaAcknowledgement(messageType, encodedPayload)
 	}
 	if messageType == "task_offer_result" {
 		var acknowledgement taskOfferResultAcknowledgement
 		if err := json.Unmarshal(encodedPayload, &acknowledgement); err != nil {
-			return err
+			return nil, err
 		}
-		return taskOfferResultDisposition(acknowledgement)
+		return encodedPayload, taskOfferResultDisposition(acknowledgement)
 	}
 	if messageType == "room_task_result" {
 		var acknowledgement struct {
@@ -718,17 +764,17 @@ func (control *roomControl) request(ctx context.Context, messageType string, pay
 			Reason   string `json:"reason"`
 		}
 		if err := json.Unmarshal(encodedPayload, &acknowledgement); err != nil {
-			return err
+			return nil, err
 		}
 		if !acknowledgement.Received && acknowledgement.Reason != "transfer_not_found" {
 			err := fmt.Errorf("BeamCore rejected %s: %s", messageType, fallback(acknowledgement.Reason, "not received"))
 			if acknowledgement.Reason == "stale_attempt" || acknowledgement.Reason == "invalid_room_task_result_payload" {
-				return dispatch.TerminalDelivery(err)
+				return nil, dispatch.TerminalDelivery(err)
 			}
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return encodedPayload, nil
 }
 
 func controlReplyType(messageType string) string {

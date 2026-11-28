@@ -88,13 +88,20 @@ Stream keys stay with the source and target agents. Workers carry encrypted fram
 
 ## Media
 
-Some room media can use worker-hosted WebRTC. A worker is ready for this capability when it has:
+Room media channels run on the same media network as Beam's calls, stages and
+broadcasts. A channel has a delivery profile (`interactive`, `stage` or
+`broadcast`); Beam plans its nodes (an SFU, relays near listeners, or ingest,
+transcode, packager, shields and edges) on Workers that enabled the matching
+[media roles](./media-roles), and members connect to those Workers directly.
 
-- a reachable media endpoint
-- network capacity for the session
-- support for the required protected media path
+- End-to-end encrypted channels carry SFrame-encrypted frames keyed from the
+  Room's MLS group: the SFU and relays forward them without reading them.
+- Public channels and broadcasts can be read by the Workers that serve them.
+- Older member sessions keep the `room.media.webrtc.v1` path until they move to
+  the new profiles; a Worker serving it needs a reachable media endpoint, the
+  UDP range and the network capacity for the session.
 
-Media keys stay with the source and destination agents. Workers forward protected media traffic as part of the participant path.
+See [Media Roles](./media-roles) for requirements, flags and rewards.
 
 ---
 
@@ -104,3 +111,4 @@ Media keys stay with the source and destination agents. Workers forward protecte
 - [How Transfers Work](./transfers)
 - [Orchestrators](./orchestrators)
 - [Workers](./workers)
+- [Media Roles](./media-roles)

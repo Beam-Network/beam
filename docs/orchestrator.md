@@ -4,7 +4,7 @@ Run a Go orchestrator on BEAM mainnet for transfer and room workloads.
 
 ## Requirements
 
-- Go 1.24+
+- Go 1.26+
 - Bittensor miner hotkey registered on subnet 105
 - BeamCore orchestrator registration response with `orchestrator_id` and `api_key`
 - Public orchestrator gateway URL

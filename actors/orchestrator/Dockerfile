@@ -2,7 +2,7 @@
 #
 #   docker build -f actors/orchestrator/Dockerfile -t beam-orchestrator:latest .
 
-FROM golang:1.24-bookworm AS build
+FROM golang:1.26-bookworm AS build
 
 WORKDIR /src
 

@@ -28,6 +28,7 @@ type Server struct {
 	control        ControlPlane
 	router         *routing.Orchestrator
 	tasks          *dispatch.Service
+	media          http.Handler
 }
 
 type ControlPlane interface {
@@ -54,6 +55,8 @@ func NewWithControl(orchestratorID string, orchestratorRegistry *registry.Regist
 // stream. Task ingress intentionally remains on the three NATS connectors.
 func (s *Server) AttachOrchestration(tasks *dispatch.Service) { s.tasks = tasks }
 
+func (s *Server) AttachMedia(handler http.Handler) { s.media = handler }
+
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
@@ -71,6 +74,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/orchestrator/network/links", s.observeLinks)
 	mux.HandleFunc("GET /v1/orchestrator/tasks", s.listTasks)
 	mux.HandleFunc("GET /v1/orchestrator/task-events", s.taskEvents)
+	if s.media != nil {
+		mux.Handle("/v1/orchestrator/media/", s.media)
+	}
 	return mux
 }
 

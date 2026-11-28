@@ -81,7 +81,10 @@ var _ roomworkloads.Provisioner = (*RoomTunnelHTTPProvisioner)(nil)
 func (p *RoomTunnelHTTPProvisioner) RedeemRoomPath(ctx context.Context,
 	request contracts.RoomPathRedemptionRequest) (contracts.RoomPathLease, error) {
 	identity, path := request.Identity, request.Path
-	protocol := contracts.RoomPathProtocol(identity.Kind)
+	protocol := path.Protocol
+	if protocol == "" {
+		protocol = contracts.RoomPathProtocol(identity.Kind)
+	}
 	payload, err := json.Marshal(map[string]any{
 		"schema_version": "room-workload-path/v1", "intent_id": path.PathID,
 		"workload_id": identity.WorkloadID, "kind": identity.Kind, "room_id": identity.RoomID,
@@ -125,7 +128,7 @@ func (p *RoomTunnelHTTPProvisioner) RedeemRoomPath(ctx context.Context,
 		return contracts.RoomPathLease{}, errors.New(fallback(result.Reason, "Tunnel coordinator rejected room workload path"))
 	}
 	return contracts.RoomPathLease{PathID: result.Lease.IntentID, Role: result.Lease.Role,
-		TargetMemberID: result.Lease.TargetMemberID, Protocol: path.Protocol, Endpoints: result.Lease.Endpoints,
+		TargetMemberID: result.Lease.TargetMemberID, Protocol: protocol, Endpoints: result.Lease.Endpoints,
 		ExpiresAt: result.Lease.ExpiresAt}, nil
 }
 

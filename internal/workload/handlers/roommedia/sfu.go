@@ -87,7 +87,10 @@ func newSFU(config Config, roomID string, expiresAt time.Time) (*sfu, error) {
 	settings := webrtc.SettingEngine{}
 	settings.SetReceiveMTU(mediaReceiveMTU)
 	if config.PublicIP != "" {
-		settings.SetNAT1To1IPs([]string{config.PublicIP}, webrtc.ICECandidateTypeHost)
+		if err := settings.SetICEAddressRewriteRules(webrtc.ICEAddressRewriteRule{External: []string{config.PublicIP},
+			AsCandidateType: webrtc.ICECandidateTypeHost}); err != nil {
+			return nil, err
+		}
 	}
 	if config.UDPPortMin != 0 {
 		if err := settings.SetEphemeralUDPPortRange(config.UDPPortMin, config.UDPPortMax); err != nil {

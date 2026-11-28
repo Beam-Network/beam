@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,16 +22,24 @@ const (
 )
 
 type RoomWorkloadService[D, U, I, C, P, R, O any] struct {
-	mu           sync.RWMutex
-	locks        KeyedLocks
-	config       Config
-	dispatcher   *dispatch.Service
-	store        Store[D, U, I, C, P, R]
-	strategy     Strategy[D, U, I, C, P, R, O]
-	provisioner  Provisioner[D, U, I, C]
-	sink         ResultSink[O]
-	progressSink ProgressSink[P]
-	cooldowns    map[string]time.Time
+	mu             sync.RWMutex
+	locks          KeyedLocks
+	config         Config
+	dispatcher     *dispatch.Service
+	store          Store[D, U, I, C, P, R]
+	strategy       Strategy[D, U, I, C, P, R, O]
+	provisioner    Provisioner[D, U, I, C]
+	sink           ResultSink[O]
+	progressSink   ProgressSink[P]
+	cooldowns      map[string]time.Time
+	started        time.Time
+	refreshing     map[string]bool
+	refreshBackoff map[string]refreshBackoff
+}
+
+type refreshBackoff struct {
+	next  time.Time
+	delay time.Duration
 }
 
 func NewRoomWorkloadService[D, U, I, C, P, R, O any](config Config, dispatcher *dispatch.Service,
@@ -41,7 +50,8 @@ func NewRoomWorkloadService[D, U, I, C, P, R, O any](config Config, dispatcher *
 	if config.Now == nil {
 		config.Now = time.Now
 	}
-	service := &RoomWorkloadService[D, U, I, C, P, R, O]{config: config, dispatcher: dispatcher, store: store, strategy: strategy}
+	service := &RoomWorkloadService[D, U, I, C, P, R, O]{config: config, dispatcher: dispatcher, store: store, strategy: strategy,
+		started: config.Now().UTC(), refreshing: map[string]bool{}, refreshBackoff: map[string]refreshBackoff{}}
 	dispatcher.RegisterSink(strategy.DispatchSource(), service)
 	return service, nil
 }
@@ -137,14 +147,21 @@ func (s *RoomWorkloadService[D, U, I, C, P, R, O]) Submit(ctx context.Context, d
 	}
 	for _, unit := range units {
 		attempt := record.Attempts[unit.ID]
-		if attempt.State == AttemptCompleted || attempt.State == AttemptFailed || attempt.State == AttemptCancelled || attempt.State == AttemptDispatched {
+		if attempt.State == AttemptCompleted || attempt.State == AttemptFailed || attempt.State == AttemptCancelled || attempt.State == AttemptDispatched ||
+			attempt.Withheld != "" {
 			continue
 		}
 		if attempt.WorkerID == "" {
 			required, resources := s.strategy.RequiredCapabilities(record.Definition, unit), s.strategy.Resources(record.Definition, unit)
-			placement, err := s.dispatcher.SelectWorker(required, resources, append(slices.Clone(excluded), cooling...))
+			selectWorker := s.dispatcher.SelectWorker
+			if placer, ok := any(s.strategy).(Placer[D, U]); ok {
+				selectWorker = func(required []string, resources domain.Resources, excluded []string) (scheduling.Placement, error) {
+					return placer.Place(record.Definition, unit, required, resources, excluded)
+				}
+			}
+			placement, err := selectWorker(required, resources, append(slices.Clone(excluded), cooling...))
 			if errors.Is(err, scheduling.ErrNoCandidate) && len(cooling) > 0 {
-				placement, err = s.dispatcher.SelectWorker(required, resources, excluded)
+				placement, err = selectWorker(required, resources, excluded)
 			}
 			if err != nil {
 				return fmt.Errorf("select Worker for room execution unit %s: %w", unit.ID, err)
@@ -231,6 +248,50 @@ func (s *RoomWorkloadService[D, U, I, C, P, R, O]) Submit(ctx context.Context, d
 		if redemptionErr != nil {
 			return redemptionErr
 		}
+		refreshed := false
+		if reason, again := s.deliveredBefore(record.Definition, record.CreatedAt, attempt); again {
+			if !s.dispatcher.WorkerConnected(attempt.WorkerID) {
+				return fmt.Errorf("room execution unit %s: Worker %s is not connected: its fresh offer waits", unit.ID, attempt.WorkerID)
+			}
+			if wait := s.refreshWait(record.Definition.ID, now); wait > 0 {
+				return fmt.Errorf("room execution unit %s: %w (next request in %s)", unit.ID, ErrRefreshLater, wait.Round(time.Millisecond))
+			}
+			refresher := any(s.strategy).(Refresher[D])
+			fresh, err := refresher.Refresh(ctx, record.Definition, attempt.WorkerID, reason)
+			var refused *RefreshRefused
+			switch {
+			case errors.As(err, &refused):
+				s.refreshSettled(record.Definition.ID)
+				return s.withhold(ctx, record, unit.ID, attempt, refused)
+			case errors.Is(err, ErrRefreshLater):
+				s.refreshDeferred(record.Definition.ID, now)
+				s.retryRefresh(ctx, record.Definition.ID)
+				return fmt.Errorf("room execution unit %s: %w", unit.ID, err)
+			case err != nil:
+				return fmt.Errorf("fresh offer for room execution unit %s: %w", unit.ID, err)
+			}
+			s.refreshSettled(record.Definition.ID)
+			candidate := record.Definition
+			candidate.Workload = fresh
+			if err := s.strategy.ValidateDefinition(candidate, now); err != nil {
+				return fmt.Errorf("fresh offer for room execution unit %s: %w", unit.ID, err)
+			}
+			freshUnits, err := s.strategy.ExecutionUnits(candidate)
+			if err != nil {
+				return err
+			}
+			replaced := false
+			for _, freshUnit := range freshUnits {
+				if freshUnit.ID == unit.ID {
+					attempt.Unit, replaced = freshUnit, true
+				}
+			}
+			if !replaced {
+				return fmt.Errorf("fresh offer for room execution unit %s names another unit", unit.ID)
+			}
+			record.Definition, unit = candidate, attempt.Unit
+			attempt.Redelivered, refreshed = true, true
+		}
 		attempt.State = AttemptProvisioned
 		spec, err := s.strategy.BuildWorkerSpec(record.Definition, attempt, now)
 		if err != nil {
@@ -246,7 +307,8 @@ func (s *RoomWorkloadService[D, U, I, C, P, R, O]) Submit(ctx context.Context, d
 			return err
 		}
 		dispatched, err := s.dispatcher.Dispatch(ctx, dispatch.DispatchRequest{Source: s.strategy.DispatchSource(),
-			ExternalID: record.Definition.ID + "/" + unit.ID, Spec: spec, WorkerID: attempt.WorkerID, NodeID: attempt.NodeID})
+			ExternalID: record.Definition.ID + "/" + unit.ID, Spec: spec, WorkerID: attempt.WorkerID, NodeID: attempt.NodeID,
+			ReplaceSpec: refreshed})
 		if err != nil {
 			return fmt.Errorf("dispatch room execution unit %s: %w", unit.ID, err)
 		}
@@ -267,6 +329,117 @@ func (s *RoomWorkloadService[D, U, I, C, P, R, O]) Submit(ctx context.Context, d
 		}
 	}
 	return nil
+}
+
+func (s *RoomWorkloadService[D, U, I, C, P, R, O]) deliveredBefore(definition RoomWorkloadDefinition[D], createdAt time.Time,
+	attempt RoomAttempt[U, I, C, P, R]) (string, bool) {
+	refresher, ok := any(s.strategy).(Refresher[D])
+	if !ok || !refresher.NeedsRefresh(definition) {
+		return "", false
+	}
+	if attempt.WorkloadKey == "" {
+		if !createdAt.IsZero() && createdAt.Before(s.started) {
+			return RefreshOrchestratorRestarted, true
+		}
+		return "", false
+	}
+	existing, found := s.dispatcher.Record(attempt.WorkloadKey)
+	if !found || (existing.State != dispatch.StateOffered && existing.State != dispatch.StateReserved) {
+		return "", false
+	}
+	switch {
+	case existing.UpdatedAt.Before(s.started):
+		return RefreshOrchestratorRestarted, true
+	case strings.HasPrefix(existing.UpstreamError, "WCP "):
+		return RefreshWorkerReconnected, true
+	default:
+		return RefreshRedelivery, true
+	}
+}
+
+func (s *RoomWorkloadService[D, U, I, C, P, R, O]) withhold(ctx context.Context, record Record[D, U, I, C, P, R], unitID string,
+	attempt RoomAttempt[U, I, C, P, R], refused *RefreshRefused) error {
+	attempt.Withheld = refused.Reason
+	if refused.KeepRunning {
+		record.Lifecycle = "running"
+	} else {
+		attempt.State = AttemptCancelled
+		attempt.Error = refused.Error()
+		for pathID, target := range attempt.Targets {
+			target.State = "dropped"
+			attempt.Targets[pathID] = target
+		}
+		record.Lifecycle = "cancelled"
+		record.UpstreamDelivered = true
+		if key := attempt.WorkloadKey; key != "" {
+			go func() {
+				_ = s.dispatcher.CancelRecorded(context.WithoutCancel(ctx), key, "fresh offer refused: "+refused.Reason)
+			}()
+		}
+	}
+	record.Attempts[unitID] = attempt
+	record.UpdatedAt = s.config.Now().UTC()
+	if err := s.store.Put(record); err != nil {
+		return err
+	}
+	return fmt.Errorf("room execution unit %s is not delivered again: %w", unitID, refused)
+}
+
+const refreshRetryMaximum = 30 * time.Second
+
+func (s *RoomWorkloadService[D, U, I, C, P, R, O]) refreshWait(definitionID string, now time.Time) time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return max(s.refreshBackoff[definitionID].next.Sub(now), 0)
+}
+
+func (s *RoomWorkloadService[D, U, I, C, P, R, O]) refreshDeferred(definitionID string, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	backoff := s.refreshBackoff[definitionID]
+	backoff.delay = min(max(2*backoff.delay, time.Second), refreshRetryMaximum)
+	backoff.next = now.Add(backoff.delay)
+	s.refreshBackoff[definitionID] = backoff
+}
+
+func (s *RoomWorkloadService[D, U, I, C, P, R, O]) refreshSettled(definitionID string) {
+	s.mu.Lock()
+	delete(s.refreshBackoff, definitionID)
+	s.mu.Unlock()
+}
+
+func (s *RoomWorkloadService[D, U, I, C, P, R, O]) retryRefresh(ctx context.Context, definitionID string) {
+	s.mu.Lock()
+	if s.refreshing[definitionID] {
+		s.mu.Unlock()
+		return
+	}
+	s.refreshing[definitionID] = true
+	s.mu.Unlock()
+	go func() {
+		defer func() {
+			s.mu.Lock()
+			delete(s.refreshing, definitionID)
+			s.mu.Unlock()
+		}()
+		for {
+			timer := time.NewTimer(max(s.refreshWait(definitionID, s.config.Now().UTC()), 100*time.Millisecond))
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			record, ok := s.store.Get(definitionID)
+			if !ok || record.UpstreamDelivered || record.Lifecycle == "cancelled" {
+				s.refreshSettled(definitionID)
+				return
+			}
+			if err := s.Submit(ctx, record.Definition); !errors.Is(err, ErrRefreshLater) {
+				return
+			}
+		}
+	}()
 }
 
 func (s *RoomWorkloadService[D, U, I, C, P, R, O]) redeem(ctx context.Context, definition RoomWorkloadDefinition[D],
@@ -380,11 +553,8 @@ func (s *RoomWorkloadService[D, U, I, C, P, R, O]) Cancel(ctx context.Context, d
 	}
 	unlock()
 
-	// Dispatch cancellation may synchronously race a Worker result. Do not hold
-	// the definition lock while taking the dispatcher's per-record lock: result
-	// delivery takes those locks in the opposite order.
 	for _, workloadKey := range workloadKeys {
-		if err := s.dispatcher.Cancel(ctx, workloadKey, reason); err != nil {
+		if err := s.dispatcher.CancelRecorded(ctx, workloadKey, reason); err != nil {
 			return err
 		}
 	}
@@ -419,6 +589,7 @@ func (s *RoomWorkloadService[D, U, I, C, P, R, O]) Cancel(ctx context.Context, d
 func (s *RoomWorkloadService[D, U, I, C, P, R, O]) Replay(ctx context.Context) {
 	for _, record := range s.store.List() {
 		if record.UpstreamDelivered {
+			s.refreshSettled(record.Definition.ID)
 			continue
 		}
 		if _, terminal := s.strategy.Aggregate(record.Definition, record.Attempts); terminal {

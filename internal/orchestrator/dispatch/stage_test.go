@@ -38,7 +38,7 @@ func TestWorkerProgressStaysInMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := storeServiceForTest(now, store)
-	if err := service.HandleProgress(domain.Progress{WorkloadID: "workload", AttemptID: "attempt", State: domain.StateRunning,
+	if err := service.HandleProgress("worker", domain.Progress{WorkloadID: "workload", AttemptID: "attempt", State: domain.StateRunning,
 		ObservedAt: now}); err != nil {
 		t.Fatal(err)
 	}

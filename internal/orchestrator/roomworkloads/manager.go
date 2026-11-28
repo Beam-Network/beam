@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/Beam-Network/beam/internal/orchestrator/dispatch"
 	"github.com/Beam-Network/beam/internal/orchestrator/roomworkload"
+	"github.com/Beam-Network/beam/internal/orchestrator/scheduling"
 	"github.com/Beam-Network/beam/internal/workload/contracts"
 	"github.com/Beam-Network/beam/internal/workload/domain"
 )
@@ -50,6 +52,7 @@ type Manager struct {
 	media         *service[contracts.MediaUnitDetails, contracts.MediaResultDetails]
 	provisioner   Provisioner
 	sink          Sink
+	mediaNodes    *mediaNodes
 }
 
 func OpenManager(stateDirectory string, dispatcher *dispatch.Service) (*Manager, error) {
@@ -94,11 +97,15 @@ func OpenManager(stateDirectory string, dispatcher *dispatch.Service) (*Manager,
 	if err != nil {
 		return nil, err
 	}
-	media, err := roomworkload.NewRoomWorkloadService(roomworkload.Config{Now: now}, dispatcher, mediaStore, newMediaStrategy())
+	nodes := newMediaNodes(dispatcher, now)
+	media, err := roomworkload.NewRoomWorkloadService(roomworkload.Config{Now: now}, dispatcher, mediaStore, newMediaStrategyWith(nodes))
 	if err != nil {
 		return nil, err
 	}
-	return &Manager{now: now, dispatcher: dispatcher, datagram: datagram, message: message, command: command, stream: stream, media: media}, nil
+	manager := &Manager{now: now, dispatcher: dispatcher, datagram: datagram, message: message, command: command, stream: stream, media: media,
+		mediaNodes: nodes}
+	nodes.records = media.Records
+	return manager, nil
 }
 
 // CapabilityAvailable keeps capability advertisement aligned with live
@@ -169,7 +176,11 @@ func (m *Manager) Submit(ctx context.Context, encoded []byte) error {
 		return errors.New("room workload id is required")
 	}
 	defer m.workloadLocks.Lock(envelope.WorkloadID)()
-	if err := requireCanonicalDetails(encoded, envelope.Type, envelope.Kind); err != nil {
+	if envelope.Kind == domain.KindRoomMedia {
+		if err := contracts.ValidateRoomMediaMessage(envelope.Type, encoded, m.now()); err != nil {
+			return err
+		}
+	} else if err := requireCanonicalDetails(encoded, envelope.Type, envelope.Kind); err != nil {
 		return err
 	}
 	if envelope.Type == contracts.RoomWorkloadOffer {
@@ -201,11 +212,7 @@ func requireCanonicalDetails(encoded []byte, messageType string, kind domain.Kin
 			fields = []string{"session_id", "protocol", "backpressure_policy", "max_buffer_bytes", "heartbeat_timeout_ms"}
 		}
 	case domain.KindRoomMedia:
-		if messageType == contracts.RoomWorkloadOffer {
-			fields = []string{"session_id", "resume_from_sequence", "replay", "service", "tracks", "layers"}
-		} else {
-			fields = []string{"session_id", "service", "tracks", "layers", "heartbeat_timeout_ms"}
-		}
+		return nil
 	default:
 		return fmt.Errorf("unsupported generic room workload kind %s", kind)
 	}
@@ -260,6 +267,18 @@ func (m *Manager) submitOffer(ctx context.Context, kind domain.Kind, encoded []b
 		var value contracts.RoomWorkloadOfferWire[contracts.MediaUnitDetails]
 		if err := decodeCanonical(encoded, &value); err != nil {
 			return err
+		}
+		if contracts.IsRoomMediaNodeProfile(value.Details.Profile) {
+			if err := contracts.ValidateMediaNodeEnvelope(value.Details.Role, value.RequiredCapacity,
+				len(value.DestinationSnapshot.Targets), &value.PathAuthorizations.Source); err != nil {
+				return err
+			}
+			if err := value.ValidateProtocol(m.now(), true, contracts.RoomMediaNodePathProtocol); err != nil {
+				return err
+			}
+			definition := fromOffer(value)
+			supersedeEarlierEpochs(ctx, m.media, definition.Identity)
+			return submitOfferedTyped(ctx, m, m.media, definition)
 		}
 		if err := value.Validate(m.now(), lateJoinMedia(value.Details.Profile)); err != nil {
 			return err
@@ -330,6 +349,16 @@ func (m *Manager) submitDefinition(ctx context.Context, kind domain.Kind, encode
 		if value.Details.HeartbeatTimeoutMS <= 0 || value.Details.HeartbeatTimeoutMS > 300_000 {
 			return errors.New("invalid room.media heartbeat_timeout_ms")
 		}
+		if contracts.IsRoomMediaNodeProfile(value.Details.Profile) {
+			if err := contracts.ValidateMediaNodeEnvelope(value.Details.Role, value.RequiredCapacity, len(value.Targets), nil); err != nil {
+				return err
+			}
+			details := contracts.MediaUnitDetails{SessionID: value.Details.SessionID, Profile: value.Details.Profile,
+				HeartbeatTimeoutMS: value.Details.HeartbeatTimeoutMS, MediaNodeFields: value.Details.MediaNodeFields}
+			definition := fromSubmit(value, details)
+			definition.Source.Protocol = contracts.RoomMediaNodePathProtocol
+			return submitTyped(ctx, m, m.media, definition)
+		}
 		details := contracts.MediaUnitDetails{SessionID: value.Details.SessionID, Service: value.Details.Service, Profile: value.Details.Profile,
 			Tracks: value.Details.Tracks, Layers: value.Details.Layers, Protection: value.Details.Protection}
 		return submitTyped(ctx, m, m.media, fromSubmit(value, details))
@@ -343,7 +372,47 @@ func submitTyped[T, R any](ctx context.Context, manager *Manager, target *servic
 }
 
 func submitOfferedTyped[T, R any](ctx context.Context, manager *Manager, target *service[T, R], definition contracts.RoomWorkloadDefinition[T]) error {
-	return submitTypedWithID(ctx, manager, target, definition, offerDefinitionID(definition.Identity))
+	definitionID := offerDefinitionID(definition.Identity)
+	err := submitTypedWithID(ctx, manager, target, definition, definitionID)
+	reason := offerRefusal(err)
+	if reason == "" || !manager.refuseOffer(ctx, definition.Identity, reason, err) {
+		return err
+	}
+	if errors.Is(err, dispatch.ErrAdmissionRejected) {
+		if cancelErr := target.Cancel(ctx, definitionID, "refused by its Worker"); cancelErr != nil {
+			log.Printf("room workload offer %s refused by its Worker not ended: %v", definition.Identity.WorkloadID, cancelErr)
+		}
+	}
+	return nil
+}
+
+func offerRefusal(err error) string {
+	switch {
+	case errors.Is(err, scheduling.ErrNoCandidate), errors.Is(err, dispatch.ErrAdmissionRejected):
+		return contracts.RoomWorkloadRefusedNoCapacity
+	case errors.Is(err, ErrMediaWithheld), errors.Is(err, ErrMediaStopped):
+		return contracts.RoomWorkloadRefusedDraining
+	default:
+		return ""
+	}
+}
+
+func (m *Manager) refuseOffer(ctx context.Context, identity contracts.RoomWorkloadIdentity, reason string, cause error) bool {
+	sink := m.currentSink()
+	if sink == nil {
+		return false
+	}
+	err := sink.SubmitRoomWorkloadProvisioningResult(ctx, contracts.RoomWorkloadProvisioningResultWire{
+		Type: contracts.RoomWorkloadProvisioningResult, SchemaVersion: contracts.RoomWorkloadSchema, Kind: identity.Kind,
+		WorkloadID: identity.WorkloadID, UnitID: identity.UnitID, Epoch: identity.Epoch, Attempt: identity.Attempt,
+		ProvisioningID: fmt.Sprintf("offer/%s/%d/%d", identity.UnitID, identity.Epoch, identity.Attempt),
+		Reason:         &reason, ReportedAt: m.now().UTC()})
+	if err != nil {
+		log.Printf("room workload offer %s not refused (%s): %v", identity.WorkloadID, reason, err)
+		return false
+	}
+	log.Printf("room workload offer %s refused, %s: %v", identity.WorkloadID, reason, cause)
+	return true
 }
 
 func submitTypedWithID[T, R any](ctx context.Context, manager *Manager, target *service[T, R], definition contracts.RoomWorkloadDefinition[T], definitionID string) error {
@@ -361,10 +430,8 @@ func offerDefinitionID(identity contracts.RoomWorkloadIdentity) string {
 	return "room-offer-" + workloadID + "-" + attemptID
 }
 
-// lateJoinMedia admits worker-hosted WebRTC media without targets; viewers join
-// the running session later. Other kinds and the legacy profile need a target.
 func lateJoinMedia(profile string) bool {
-	return profile == contracts.RoomMediaWebRTCWorkerProfile
+	return profile == contracts.RoomMediaWebRTCWorkerProfile || contracts.IsRoomMediaNodeProfile(profile)
 }
 
 func (m *Manager) Cancel(ctx context.Context, cancel contracts.RoomWorkloadCancelWire) error {
@@ -445,6 +512,18 @@ func latestRecordForWorkload[T, R any](target *service[T, R], workloadID string)
 		}
 	}
 	return latest, true
+}
+
+func supersedeEarlierEpochs[T, R any](ctx context.Context, target *service[T, R], identity contracts.RoomWorkloadIdentity) {
+	for _, earlier := range recordsForWorkload(target, identity.WorkloadID) {
+		if earlier.Definition.Workload.Identity.Epoch >= identity.Epoch {
+			continue
+		}
+		if err := target.Cancel(ctx, earlier.Definition.ID, fmt.Sprintf("superseded by epoch %d", identity.Epoch)); err != nil {
+			log.Printf("media node %s epoch %d not ended for epoch %d: %v", identity.WorkloadID,
+				earlier.Definition.Workload.Identity.Epoch, identity.Epoch, err)
+		}
+	}
 }
 
 func recordsForWorkload[T, R any](target *service[T, R], workloadID string) []record[T, R] {

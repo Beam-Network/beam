@@ -10,6 +10,7 @@ import (
 	orchestratordomain "github.com/Beam-Network/beam/internal/orchestrator/domain"
 	"github.com/Beam-Network/beam/internal/orchestrator/registry"
 	"github.com/Beam-Network/beam/internal/workload/contracts"
+	"github.com/Beam-Network/beam/internal/workload/contracts/mediacontracts"
 	workload "github.com/Beam-Network/beam/internal/workload/domain"
 )
 
@@ -98,15 +99,19 @@ func (s *Service) Accept(hello WorkerHello) (OrchestratorWelcome, error) {
 
 func (s *Service) Heartbeat(identity workload.Identity, status, region, circuitEndpoint string,
 	_ []string, capabilityManifest *contracts.CapabilityManifest,
-	total, available workload.Resources, planVersion uint64) error {
+	total, available workload.Resources, planVersion uint64, media *mediacontracts.WorkerCapacity) error {
 	canonicalCapabilities, err := workerCapabilities(identity, capabilityManifest)
 	if err != nil {
 		return err
+	}
+	if media != nil && (media.WorkerID != identity.WorkerID || contracts.ValidateWorkerMediaCapacity(*media) != nil) {
+		media = nil
 	}
 	return s.registry.UpdateObservation(orchestratordomain.WorkerObservation{
 		WorkerID: identity.WorkerID, NodeID: identity.NodeID, Region: region,
 		Status: status, Capabilities: canonicalCapabilities, Total: total, Available: available,
 		ObservedAt: s.now(), PlanVersion: planVersion, CircuitEndpoint: circuitEndpoint,
+		Media: media,
 	}, s.now())
 }
 

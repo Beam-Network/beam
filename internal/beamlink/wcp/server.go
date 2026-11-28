@@ -57,6 +57,8 @@ type Server struct {
 	relayMu   sync.Mutex
 	relays    map[string]*serverRelay
 	relaySink func(StorageProbeRelayEvent)
+
+	media serverMedia
 }
 
 type revokedCircuit struct {

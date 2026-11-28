@@ -74,6 +74,7 @@ func serve(arguments []string) {
 	tunnelNATS := natsFlags(flags, "tunnel", "BEAM_TUNNEL", "TUNNEL_WORKLOADS", "beam.workloads.tunnel.tasks",
 		"beam.workloads.tunnel.results", "beam-orchestrator-tunnel")
 	flags.StringVar(&tunnelNATS.ProvisionSubject, "tunnel-nats-provision-subject", "beam.workloads.tunnel.provision", "Tunnel coordinator room lease request/reply subject")
+	media := registerMediaFlags(flags)
 	_ = flags.Parse(arguments)
 	beamCoreNATS.Hotkey = *hotkey
 	controlTokenPath := filepath.Join(filepath.Dir(*statePath), "control-token")
@@ -139,6 +140,7 @@ func serve(arguments []string) {
 		if roomErr != nil {
 			log.Fatal(roomErr)
 		}
+		wireMedia(media, roomWorkloads, wcpServer, server, orchestratorRegistry, *roomWorkloadState)
 	} else {
 		server = orchestratorserver.New(orchestrator.OrchestratorID, orchestratorRegistry)
 	}
@@ -203,7 +205,7 @@ func serve(arguments []string) {
 			if tasks == nil {
 				return nil
 			}
-			return tasks.HandleProgressContext(ctx, event.Progress)
+			return tasks.HandleProgressContext(ctx, event.WorkerID, event.Progress)
 		})
 		go func() {
 			for event := range wcpServer.Checkpoints() {
@@ -224,6 +226,9 @@ func serve(arguments []string) {
 	}
 	go func() {
 		<-ctx.Done()
+		if roomWorkloads != nil {
+			roomWorkloads.StopMedia()
+		}
 		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = httpServer.Shutdown(shutdownContext)

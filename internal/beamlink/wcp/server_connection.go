@@ -131,6 +131,8 @@ func (s *Server) handleEnvelope(session *Session, envelope Envelope) error {
 		return s.handleReceipt(session, envelope)
 	case TypeStorageProbeRelayOpened, TypeStorageProbeRelayData, TypeStorageProbeRelayClose:
 		return s.handleStorageProbeRelay(session, envelope)
+	case TypeMediaControl:
+		return s.handleMediaControl(session, envelope)
 	case TypeError:
 		_, err := decodePayload[ErrorMessage](envelope)
 		return err
@@ -148,10 +150,11 @@ func (s *Server) handleHeartbeat(session *Session, envelope Envelope) error {
 		return errors.New("heartbeat identity changed within session")
 	}
 	if err := s.control.Heartbeat(heartbeat.Identity, heartbeat.Status, heartbeat.Region, heartbeat.CircuitEndpoint,
-		heartbeat.Capabilities, heartbeat.CapabilityManifest, heartbeat.Total, heartbeat.Available, heartbeat.PlanVersion); err != nil {
+		heartbeat.Capabilities, heartbeat.CapabilityManifest, heartbeat.Total, heartbeat.Available, heartbeat.PlanVersion, heartbeat.Media); err != nil {
 		return err
 	}
 	session.storageProbeRelay.Store(advertisesStorageProbeRelay(heartbeat.CapabilityManifest))
+	session.media.Store(validMediaCapacity(session.workerID, heartbeat.Media))
 	return nil
 }
 
@@ -254,6 +257,7 @@ type Session struct {
 	lastRead   atomic.Uint64
 	// storageProbeRelay reports whether the Worker's manifest advertises storage.probe.relay.v2.
 	storageProbeRelay atomic.Bool
+	media             atomic.Bool
 }
 
 func (s *Session) send(messageType, replyTo string, value any) (Envelope, error) {

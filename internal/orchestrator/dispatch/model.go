@@ -89,4 +89,5 @@ type DispatchRequest struct {
 	WorkerID     string
 	NodeID       string
 	BeforeCommit func(context.Context, Record) error
+	ReplaceSpec  bool
 }

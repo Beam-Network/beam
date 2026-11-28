@@ -18,7 +18,7 @@ worker-visible plaintext. Workers do not receive storage credentials or room key
 
 ## Requirements
 
-- Go 1.24+ for orchestrator and worker
+- Go 1.26+ for orchestrator and worker
 - Python 3.10-3.12 for validator
 - Bittensor hotkey registered on subnet 105
 - Network access to BeamCore, Core NATS, orchestrator WCP, Bittensor, and task storage URLs

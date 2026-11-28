@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	workloadcheckpoint "github.com/Beam-Network/beam/internal/workload/checkpoint"
+	"github.com/Beam-Network/beam/internal/workload/delivery"
 	"github.com/Beam-Network/beam/internal/workload/domain"
 	workloadprogress "github.com/Beam-Network/beam/internal/workload/progress"
 	"github.com/Beam-Network/beam/internal/workload/runtime"
@@ -20,6 +21,7 @@ const maxIPCBytes = 16 << 20
 type Request struct {
 	Spec       domain.Spec        `json:"spec"`
 	Checkpoint *domain.Checkpoint `json:"checkpoint,omitempty"`
+	Resumed    bool               `json:"resumed,omitempty"`
 }
 
 type Event struct {
@@ -66,6 +68,9 @@ func ServeOne(ctx context.Context, handler runtime.Handler, input io.Reader, out
 	initial := request.Checkpoint
 	if initial == nil {
 		initial = &domain.Checkpoint{WorkloadID: request.Spec.WorkloadID, AttemptID: request.Spec.AttemptID, Kind: request.Spec.Kind}
+	}
+	if request.Resumed {
+		ctx = delivery.WithResumed(ctx)
 	}
 	executionContext := workloadprogress.WithReporter(ctx, func(progress map[string]string) {
 		_ = stream.send(Event{Type: "progress", Progress: progress})

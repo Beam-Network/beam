@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Beam-Network/beam/internal/workload/contracts"
+	"github.com/Beam-Network/beam/internal/workload/contracts/mediacontracts"
 	"github.com/Beam-Network/beam/internal/workload/domain"
 )
 
@@ -98,16 +99,17 @@ type Welcome struct {
 }
 
 type Heartbeat struct {
-	Identity           domain.Identity               `json:"identity"`
-	Status             string                        `json:"status"`
-	Region             string                        `json:"region,omitempty"`
-	Capabilities       []string                      `json:"capabilities"`
-	CapabilityManifest *contracts.CapabilityManifest `json:"capability_manifest,omitempty"`
-	Total              domain.Resources              `json:"total"`
-	Available          domain.Resources              `json:"available"`
-	PlanVersion        uint64                        `json:"plan_version"`
-	EventCursor        uint64                        `json:"event_cursor"`
-	CircuitEndpoint    string                        `json:"circuit_endpoint,omitempty"`
+	Identity           domain.Identity                `json:"identity"`
+	Status             string                         `json:"status"`
+	Region             string                         `json:"region,omitempty"`
+	Capabilities       []string                       `json:"capabilities"`
+	CapabilityManifest *contracts.CapabilityManifest  `json:"capability_manifest,omitempty"`
+	Total              domain.Resources               `json:"total"`
+	Available          domain.Resources               `json:"available"`
+	PlanVersion        uint64                         `json:"plan_version"`
+	EventCursor        uint64                         `json:"event_cursor"`
+	CircuitEndpoint    string                         `json:"circuit_endpoint,omitempty"`
+	Media              *mediacontracts.WorkerCapacity `json:"media,omitempty"`
 }
 
 type Cancel struct {

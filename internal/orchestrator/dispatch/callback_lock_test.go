@@ -53,7 +53,7 @@ func TestCallbacksPermitDispatchReplayAndPreserveCancellation(t *testing.T) {
 			go func() {
 				switch event {
 				case "progress":
-					done <- service.HandleProgress(domain.Progress{WorkloadID: record.Spec.WorkloadID, AttemptID: record.Spec.AttemptID})
+					done <- service.HandleProgress(record.WorkerID, domain.Progress{WorkloadID: record.Spec.WorkloadID, AttemptID: record.Spec.AttemptID})
 				case "result":
 					done <- service.HandleResult(context.Background(), domain.Result{
 						WorkloadID: record.Spec.WorkloadID, AttemptID: record.Spec.AttemptID, State: domain.StateCompleted})

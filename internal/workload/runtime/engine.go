@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/Beam-Network/beam/internal/resources"
 	workloadcheckpoint "github.com/Beam-Network/beam/internal/workload/checkpoint"
+	"github.com/Beam-Network/beam/internal/workload/delivery"
 	"github.com/Beam-Network/beam/internal/workload/domain"
 	workloadprogress "github.com/Beam-Network/beam/internal/workload/progress"
 )
@@ -155,7 +157,7 @@ func (e *Engine) Recover(parent context.Context) error {
 			e.cancels[record.Spec.Key()] = cancel
 			e.leases[record.Spec.Key()] = ctx
 			e.mu.Unlock()
-			go e.execute(ctx, record)
+			go e.execute(delivery.WithResumed(ctx), record)
 		}
 	}
 	return nil
@@ -184,6 +186,17 @@ func (e *Engine) Offer(ctx context.Context, spec domain.Spec) (Decision, error) 
 	}
 
 	if existing, getErr := e.store.Get(spec.Key()); getErr == nil {
+		if existing.State == domain.StateReserved && !bytes.Equal(existing.Spec.Payload, spec.Payload) {
+			if existing.Spec.Resources != spec.Resources {
+				err := errors.New("a fresh offer of a reserved workload asks for other resources")
+				return Decision{WorkloadID: spec.WorkloadID, AttemptID: spec.AttemptID, Reason: err.Error()}, err
+			}
+			existing.Spec = spec
+			existing.UpdatedAt = e.now()
+			if err := e.store.Save(existing); err != nil {
+				return Decision{}, err
+			}
+		}
 		return decisionFor(existing), nil
 	} else if !errors.Is(getErr, ErrRecordNotFound) {
 		return Decision{}, getErr

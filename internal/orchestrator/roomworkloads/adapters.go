@@ -32,7 +32,7 @@ func (p pathProvisioner[T, R]) Redeem(ctx context.Context, request roomworkload.
 		_ = sink.SubmitRoomWorkloadProvisioningResult(ctx, contracts.RoomWorkloadProvisioningResultWire{
 			Type: contracts.RoomWorkloadProvisioningResult, SchemaVersion: contracts.RoomWorkloadSchema, Kind: identity.Kind,
 			WorkloadID: identity.WorkloadID, UnitID: identity.UnitID, Epoch: identity.Epoch, Attempt: identity.Attempt,
-			ProvisioningID: request.Path.ID, WorkerID: request.WorkerID, Admitted: err == nil, Reason: reason, ReportedAt: p.manager.now().UTC()})
+			ProvisioningID: request.Path.ID, WorkerID: &request.WorkerID, Admitted: err == nil, Reason: reason, ReportedAt: p.manager.now().UTC()})
 	}
 	return lease, err
 }
@@ -43,6 +43,9 @@ func (s resultSink[T, R]) DeliverRoomWorkloadResult(ctx context.Context, value c
 	sink := s.manager.currentSink()
 	if sink == nil {
 		return errors.New("generic room workload sink is not connected")
+	}
+	if err := s.manager.awaitMediaEvents(ctx, value); err != nil {
+		return err
 	}
 	if err := sink.SubmitRoomWorkloadResult(ctx, value); err != nil {
 		return err

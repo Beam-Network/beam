@@ -27,6 +27,8 @@ import (
 	"github.com/Beam-Network/beam/internal/localauth"
 	"github.com/Beam-Network/beam/internal/resources"
 	versioninfo "github.com/Beam-Network/beam/internal/version"
+	"github.com/Beam-Network/beam/internal/worker/mediafleet"
+	mediaplane "github.com/Beam-Network/beam/internal/worker/planes/media"
 	"github.com/Beam-Network/beam/internal/worker/server"
 	"github.com/Beam-Network/beam/internal/worker/subsystem"
 	"github.com/Beam-Network/beam/internal/workload/contracts"
@@ -119,7 +121,12 @@ func serve(arguments []string) {
 	subsystemMode := flags.String("subsystem-mode", envOrDefault("BEAM_WORKER_SUBSYSTEM_MODE", "process"), "handler isolation mode: process or integrated")
 	region := flags.String("region", os.Getenv("BEAM_REGION"), "Worker region")
 	delegation := flags.String("orchestrator-delegation", os.Getenv("BEAM_ORCHESTRATOR_DELEGATION"), "base64url Orchestrator delegation")
+	mediaRoles := registerMediaRoleFlags(flags)
 	_ = flags.Parse(arguments)
+	if *mediaPublisherReconnectGrace > 30*time.Second {
+		log.Printf("--media-publisher-reconnect-grace %s is above 30s: clamped to 30s", *mediaPublisherReconnectGrace)
+		*mediaPublisherReconnectGrace = 30 * time.Second
+	}
 	controlTokenPath := filepath.Join(filepath.Dir(*statePath), "control-token")
 	controlToken, err := localauth.ResolveToken(*token, controlTokenPath)
 	if err != nil {
@@ -154,6 +161,30 @@ func serve(arguments []string) {
 	}
 	controlAddress := controlListener.Addr().String()
 	capabilities := splitList(*capabilityList)
+	mediaConfig := mediaPlaneConfig(mediaListenerFlags{workerID: *workerID, stateDir: filepath.Dir(*statePath),
+		listenAddress: *mediaAddr, advertiseURL: *mediaAdvertiseURL, publicIP: *mediaPublicIP,
+		udpPortMin: uint16(*mediaUDPPortMin), udpPortMax: uint16(*mediaUDPPortMax), iceServers: splitList(*mediaICEServers),
+		turnSecret: *mediaTURNSecret, turnCredentialTTL: *mediaTURNCredentialTTL, turnUsernamePrefix: *mediaTURNUsernamePrefix,
+		maxViewers: *mediaMaxViewers, publisherReconnectGrace: *mediaPublisherReconnectGrace,
+		allowPublicListeners: *allowPublicNetwork, legacyProcess: *subsystemMode == "process",
+		webRTC: contains(capabilities, contracts.RoomMediaWebRTCCapability)}, mediaRoles)
+	if err := mediaConfig.Check(); err != nil {
+		log.Fatal(err)
+	}
+	gpuContext, cancelGPUCheck := context.WithTimeout(context.Background(), 30*time.Second)
+	mediaWarnings, err := mediaConfig.CheckGPUs(gpuContext)
+	cancelGPUCheck()
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, warning := range mediaWarnings {
+		log.Printf("WARNING: %s", warning)
+	}
+	for _, capability := range mediaConfig.RoleCapabilities() {
+		if !contains(capabilities, capability) {
+			capabilities = append(capabilities, capability)
+		}
+	}
 	var circuitService *circuit.Service
 	governor, err := resources.NewGovernor(domain.Resources{
 		CPUMillis: 1000, MemoryBytes: *memory, ScratchBytes: *scratch,
@@ -225,22 +256,17 @@ func serve(arguments []string) {
 	if err := validateRoomMediaStartup(capabilities, *mediaAdvertiseURL); err != nil {
 		log.Fatal(err)
 	}
-	if contains(capabilities, contracts.RoomMediaWebRTCCapability) {
-		mediaHandler := roommediahandler.NewHandler(roommediahandler.Config{ListenAddress: *mediaAddr,
-			AdvertiseURL: *mediaAdvertiseURL, PublicIP: *mediaPublicIP, UDPPortMin: uint16(*mediaUDPPortMin),
-			UDPPortMax: uint16(*mediaUDPPortMax), ICEServers: splitList(*mediaICEServers), TURNSecret: *mediaTURNSecret,
-			TURNCredentialTTL: *mediaTURNCredentialTTL, TURNUsernamePrefix: *mediaTURNUsernamePrefix,
-			MaxViewers: *mediaMaxViewers, PublisherReconnectGrace: *mediaPublisherReconnectGrace})
-		if err := mediaHandler.PrepareListener(); err != nil {
+	var mediaFleet *mediafleet.Fleet
+	if mediaConfig.Hosted() {
+		mediaPlane, err := mediaplane.Build(mediaConfig)
+		if err != nil {
 			log.Fatal(err)
 		}
-		defer mediaHandler.Close()
-		// WebRTC sessions share one signaling listener and are multiplexed by
-		// session ID. Keep this stateful handler in the Worker process even when
-		// other workload kinds use subprocess isolation.
-		if registerErr := registry.Register(mediaHandler); registerErr != nil {
+		defer mediaPlane.Close()
+		if registerErr := registry.Register(mediaPlane.Handler); registerErr != nil {
 			log.Fatal(registerErr)
 		}
+		mediaFleet = mediaPlane.Fleet
 	} else if contains(capabilities, "room.media") {
 		registerHandler(roomhandler.NewHandler(roomhandler.Config{AllowPublicListeners: *allowPublicNetwork}))
 	}
@@ -377,6 +403,9 @@ func serve(arguments []string) {
 		log.Fatal(err)
 	}
 	go engine.Reconcile(ctx, time.Second)
+	if mediaFleet != nil {
+		go mediaFleet.Run(ctx)
+	}
 	if receiptRecorder != nil {
 		go func() {
 			if err := receiptRecorder.Run(ctx, engine.Results()); err != nil && ctx.Err() == nil {
@@ -408,6 +437,7 @@ func serve(arguments []string) {
 			TotalResources: governor.Snapshot().Capacity, Engine: engine, Governor: governor, Store: store,
 			CircuitEndpoint: advertisedCircuitEndpoint, Circuits: circuitService,
 			Receipts: receiptRecorder, StorageProbeRelays: relayBinder,
+			Media: mediaBinder(mediaFleet),
 		})
 		if err != nil {
 			log.Fatal(err)

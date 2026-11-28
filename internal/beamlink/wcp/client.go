@@ -17,6 +17,7 @@ import (
 	"github.com/Beam-Network/beam/internal/evidence"
 	"github.com/Beam-Network/beam/internal/resources"
 	"github.com/Beam-Network/beam/internal/workload/contracts"
+	"github.com/Beam-Network/beam/internal/workload/contracts/mediacontracts"
 	"github.com/Beam-Network/beam/internal/workload/domain"
 	"github.com/Beam-Network/beam/internal/workload/runtime"
 )
@@ -41,13 +42,15 @@ type ClientConfig struct {
 	Receipts               *evidence.Recorder
 	// StorageProbeRelays serves storage.probe.relay.v2; nil refuses relays.
 	StorageProbeRelays StorageProbeRelayBinder
+	Media              MediaBinder
 }
 
 type Client struct {
-	config      ClientConfig
-	planVersion atomic.Uint64
-	eventCursor atomic.Uint64
-	draining    atomic.Bool
+	config       ClientConfig
+	planVersion  atomic.Uint64
+	eventCursor  atomic.Uint64
+	draining     atomic.Bool
+	mediaPending *MediaControl
 
 	failedAttempts int
 	lastFailureLog time.Time
@@ -226,10 +229,18 @@ func (c *Client) runSession(ctx context.Context, established *bool) error {
 	}
 	resultTicker := time.NewTicker(min(welcome.HeartbeatInterval, 250*time.Millisecond))
 	defer resultTicker.Stop()
+	var mediaOutbound <-chan MediaControl
+	if c.config.Media != nil {
+		mediaOutbound = c.config.Media.Outbound()
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case message := <-mediaOutbound:
+			if err := c.writeMedia(framed, message); err != nil {
+				return err
+			}
 		case err := <-readError:
 			return err
 		case err := <-heartbeatError:
@@ -431,6 +442,22 @@ func (c *Client) readLoop(ctx context.Context, framed *framedConn, initialSequen
 			}
 		case TypeStorageProbeRelayOpen, TypeStorageProbeRelayData, TypeStorageProbeRelayClose:
 			handleStorageProbeRelay(relays, relayEmitter, envelope)
+		case TypeMediaControl:
+			message, err := decodePayload[MediaControl](envelope)
+			if err != nil {
+				return err
+			}
+			if c.config.Media == nil {
+				_, _ = framed.write(TypeError, envelope.MessageID, ErrorMessage{Code: "media_disabled", Message: "Worker holds no media role"}, lastSequence)
+				continue
+			}
+			err = message.Validate(MediaControlToWorker)
+			if err == nil {
+				err = c.config.Media.Deliver(message)
+			}
+			if err != nil {
+				_, _ = framed.write(TypeError, envelope.MessageID, ErrorMessage{Code: "media_control_rejected", Message: err.Error()}, lastSequence)
+			}
 		case TypeError:
 			continue
 		default:
@@ -446,11 +473,15 @@ func (c *Client) sendHeartbeat(framed *framedConn) error {
 		status = "draining"
 	}
 	capabilityManifest := c.capabilityManifest(c.config.TotalResources, snapshot.Available)
+	var media *mediacontracts.WorkerCapacity
+	if c.config.Media != nil {
+		media = c.config.Media.Capacity()
+	}
 	_, err := framed.write(TypeHeartbeat, "", Heartbeat{
 		Identity: c.config.Identity, Status: status, Region: c.config.Region,
 		Capabilities: capabilityManifest.Capabilities, CapabilityManifest: &capabilityManifest, Total: c.config.TotalResources,
 		Available: snapshot.Available, PlanVersion: c.planVersion.Load(), EventCursor: c.eventCursor.Load(),
-		CircuitEndpoint: c.config.CircuitEndpoint,
+		CircuitEndpoint: c.config.CircuitEndpoint, Media: media,
 	}, c.eventCursor.Load())
 	return err
 }
@@ -472,6 +503,9 @@ func (c *Client) capabilityManifest(total, available domain.Resources) contracts
 }
 
 func (c *Client) replayResults(framed *framedConn, records []runtime.Record, sent map[string]struct{}) error {
+	if err := c.flushMedia(framed); err != nil {
+		return err
+	}
 	replayed := 0
 	for _, record := range records {
 		if record.Result == nil || record.State == domain.StateReceiptCommitted {
@@ -546,4 +580,41 @@ func (c *Client) replayReceipts(framed *framedConn, sent map[string]time.Time) e
 		}
 	}
 	return nil
+}
+
+func (c *Client) writeMedia(framed *framedConn, message MediaControl) error {
+	_, err := framed.write(TypeMediaControl, "", message, c.eventCursor.Load())
+	if err == nil {
+		return nil
+	}
+	var writeErr frameWriteError
+	if errors.As(err, &writeErr) {
+		c.mediaPending = &message
+		return err
+	}
+	log.Printf("drop media %s for the Orchestrator: %v", message.Type, err)
+	return nil
+}
+
+func (c *Client) flushMedia(framed *framedConn) error {
+	if c.config.Media == nil {
+		return nil
+	}
+	if pending := c.mediaPending; pending != nil {
+		c.mediaPending = nil
+		if err := c.writeMedia(framed, *pending); err != nil {
+			return err
+		}
+	}
+	outbound := c.config.Media.Outbound()
+	for {
+		select {
+		case message := <-outbound:
+			if err := c.writeMedia(framed, message); err != nil {
+				return err
+			}
+		default:
+			return nil
+		}
+	}
 }
